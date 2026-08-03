@@ -10,9 +10,12 @@
   export let stream = "";
   export let failure = "";
   export let canInitialize = false;
+  export let canRun = false;
+  export let runCount = 0;
   export let onClose: () => void = () => undefined;
   export let onEdit: (task: CanonicalTask) => void = () => undefined;
   export let onInitialize: (task: CanonicalTask) => void = () => undefined;
+  export let onRun: (task: CanonicalTask) => void = () => undefined;
 
   let markdownRoot: HTMLElement;
   let mermaidRenderKey = "";
@@ -147,12 +150,18 @@
           <span>{task.content ? "Rendered Markdown" : "Canonical outline"}</span>
           <code>{task.content?.path ?? task.source.documents[0]?.path}</code>
         </div>
-        {#if task.content}
-          <button class="edit-button" type="button" onclick={() => onEdit(task)}>
-            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m4 20 4.5-1 10-10a2.1 2.1 0 0 0-3-3l-10 10z"/><path d="m14 7 3 3M4 20h16"/></svg>
-            Edit in Monaco
+        <div class="panel-actions">
+          {#if task.content}
+            <button class="edit-button" type="button" onclick={() => onEdit(task)}>
+              <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m4 20 4.5-1 10-10a2.1 2.1 0 0 0-3-3l-10 10z"/><path d="m14 7 3 3M4 20h16"/></svg>
+              Edit in Monaco
+            </button>
+          {/if}
+          <button class="run-button" type="button" onclick={() => onRun(task)} disabled={!canRun} title={canRun ? "Open this task in the run workbench" : "Choose an available repository provider and model first"}>
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m8 5 11 7-11 7z"/></svg>
+            Run task{runCount ? ` · ${runCount}` : ""}
           </button>
-        {/if}
+        </div>
       </footer>
     </div>
   </div>
@@ -172,11 +181,11 @@
   .markdown-body :global(.mermaid-diagram) { display: grid; max-width: 100%; min-height: 120px; place-items: center; overflow: auto; margin: 24px 0; border: 1px solid var(--border); border-radius: var(--radius-lg); padding: 22px; background: var(--surface-soft); }.markdown-body :global(.mermaid-diagram svg) { width: auto !important; max-width: 100% !important; height: auto; }.markdown-body :global(.mermaid-diagram-error) { place-items: start; background: #151c18; color: #cbd7cf; font: 14px/1.6 "SFMono-Regular",Consolas,monospace; white-space: pre-wrap; }.mermaid-notice { margin: -44px auto 26px; max-width: 824px; border: 1px solid color-mix(in srgb,var(--warning-500) 55%,var(--border)); border-radius: var(--radius); padding: 10px 12px; background: var(--warning-surface); color: var(--warning-600); font-size: 13px; }
   .content-empty { display: grid; min-height: 100%; place-items: center; align-content: center; padding: 48px; text-align: center; }.empty-document { display: grid; width: 64px; height: 64px; place-items: center; border: 1px solid var(--border); border-radius: var(--radius-lg); background: var(--surface-soft); color: var(--brand-500); }.empty-document svg { width: 29px; height: 29px; fill: none; stroke: currentColor; stroke-linecap: round; stroke-linejoin: round; stroke-width: 1.7; }.empty-eyebrow { margin: 18px 0 3px; color: var(--active-text); font-size: 11px; font-weight: 800; letter-spacing: .09em; text-transform: uppercase; }.content-empty h3 { margin: 0; font-size: 19px; }.content-empty > p:not(.empty-eyebrow) { max-width: 460px; margin: 9px 0 19px; color: var(--text-muted); font-size: 13px; line-height: 1.6; }.content-empty button { min-height: 40px; border: 1px solid var(--brand-600); border-radius: var(--radius); padding: 0 14px; background: var(--brand-600); color: white; font-size: 12px; font-weight: 750; }.content-empty button:disabled { opacity: .5; }
   .content-stream { overflow: hidden; margin: 0 24px 28px; border: 1px solid #34423b; border-radius: var(--radius); background: #111815; color: #c6d1ca; }.content-stream > header { display: flex; align-items: center; gap: 8px; border-bottom: 1px solid #2b3832; padding: 9px 11px; background: #161f1b; }.content-stream > header span { width: 8px; height: 8px; border-radius: 50%; background: #e0aa62; }.content-stream[data-status="running"] > header span { animation: pulse 1.2s ease infinite; }.content-stream[data-status="failed"] > header span { background: #d36b64; }.content-stream strong { font-size: 11px; }.content-stream pre { max-height: 220px; overflow: auto; margin: 0; padding: 12px; color: #9eaaa2; font: 11px/1.6 "SFMono-Regular",Consolas,monospace; white-space: pre-wrap; word-break: break-word; }
-  .panel-footer { display: flex; min-height: 66px; align-items: center; justify-content: space-between; gap: 18px; border-top: 1px solid var(--border); padding: 10px 16px 10px 20px; background: color-mix(in srgb,var(--surface) 96%,transparent); backdrop-filter: blur(12px); }.panel-footer > div { min-width: 0; }.panel-footer span,.panel-footer code { display: block; }.panel-footer > div > span { color: var(--text-subtle); font-size: 10px; font-weight: 750; letter-spacing: .06em; text-transform: uppercase; }.panel-footer code { overflow: hidden; margin-top: 3px; border: 0; padding: 0; background: transparent; color: var(--text-muted); font-size: 10px; text-overflow: ellipsis; white-space: nowrap; }.edit-button { display: flex; min-height: 39px; flex: 0 0 auto; align-items: center; gap: 8px; border: 1px solid var(--brand-600); border-radius: var(--radius); padding: 0 13px; background: var(--brand-600); color: white; font-size: 12px; font-weight: 750; }.edit-button:hover { background: var(--brand-700); }.edit-button svg { width: 15px; height: 15px; fill: none; stroke: currentColor; stroke-linecap: round; stroke-linejoin: round; stroke-width: 1.8; }
+  .panel-footer { display: flex; min-height: 66px; align-items: center; justify-content: space-between; gap: 18px; border-top: 1px solid var(--border); padding: 10px 16px 10px 20px; background: color-mix(in srgb,var(--surface) 96%,transparent); backdrop-filter: blur(12px); }.panel-footer > div:first-child { min-width: 0; }.panel-footer span,.panel-footer code { display: block; }.panel-footer > div:first-child > span { color: var(--text-subtle); font-size: 10px; font-weight: 750; letter-spacing: .06em; text-transform: uppercase; }.panel-footer code { overflow: hidden; margin-top: 3px; border: 0; padding: 0; background: transparent; color: var(--text-muted); font-size: 10px; text-overflow: ellipsis; white-space: nowrap; }.panel-actions { display: flex; flex: 0 0 auto; gap: 8px; }.edit-button,.run-button { display: flex; min-height: 39px; flex: 0 0 auto; align-items: center; gap: 8px; border: 1px solid var(--border); border-radius: var(--radius); padding: 0 13px; background: var(--surface); color: var(--text); font-size: 12px; font-weight: 750; }.edit-button:hover { border-color: var(--brand-300); background: var(--active-surface); color: var(--active-text); }.run-button { border-color: var(--brand-600); background: var(--brand-600); color: white; }.run-button:hover { background: var(--brand-700); }.run-button:disabled { cursor: not-allowed; opacity: .45; }.edit-button svg,.run-button svg { width: 15px; height: 15px; fill: none; stroke: currentColor; stroke-linecap: round; stroke-linejoin: round; stroke-width: 1.8; }
   @keyframes panel-in { from { opacity: .7; transform: translateX(28px); } } @keyframes backdrop-in { from { opacity: 0; } }
   @keyframes pulse { 50% { opacity: .35; transform: scale(.72); } }
   @media (max-width: 1100px) { .content-panel { width: min(900px,calc(100vw - 80px)); }.markdown-body { padding-inline: 24px; } }
   @media (max-width: 900px) { .content-panel { width: min(780px,calc(100vw - 40px)); }.markdown-body { padding-inline: 20px; } }
-  @media (max-width: 620px) { .content-panel { width: 100vw; }.panel-header { padding-left: 14px; }.task-glyph { display: none; }.task-heading h2 { font-size: 15px; }.task-context { padding-inline: 14px; }.markdown-body { padding: 24px 14px 54px; }.panel-footer { align-items: stretch; flex-direction: column; }.edit-button { justify-content: center; }.content-empty { padding: 28px; } }
+  @media (max-width: 620px) { .content-panel { width: 100vw; }.panel-header { padding-left: 14px; }.task-glyph { display: none; }.task-heading h2 { font-size: 15px; }.task-context { padding-inline: 14px; }.markdown-body { padding: 24px 14px 54px; }.panel-footer { align-items: stretch; flex-direction: column; }.panel-actions { width: 100%; }.edit-button,.run-button { flex: 1; justify-content: center; }.content-empty { padding: 28px; } }
   @media (prefers-reduced-motion: reduce) { .content-panel,.panel-backdrop { animation: none; } }
 </style>

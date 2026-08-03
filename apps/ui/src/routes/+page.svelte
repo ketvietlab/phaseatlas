@@ -156,9 +156,6 @@
   $: selectedTimelineEvents = selectedAgentEvents.filter((event) =>
     !["command.output", "command.completed"].includes(event.type)
   );
-  $: selectedTaskRuns = selectedTask
-    ? agentRuns.filter((run) => run.taskKey === canonicalTaskKey(selectedTask))
-    : [];
   $: terminalShortcutLabel = platform === "darwin" ? "⌘`" : "Ctrl+`";
   $: chatShortcutLabel = platform === "darwin" ? "⌥L" : "Alt+L";
   onMount(() => {
@@ -1425,10 +1422,6 @@
                       </div>
                       <div class="task-header-actions">
                         <div class="task-badges"><span class="state-badge" data-state={selectedTask.state}>{stateLabel(selectedTask.state)}</span><span class="priority-badge" data-priority={selectedTask.priority}>{selectedTask.priority}</span></div>
-                        <button class="primary-button task-run-button" type="button" onclick={() => openExecutionWorkbench(selectedTask)}>
-                          <svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="m8 5 11 7-11 7z"/></svg>
-                          Run task{selectedTaskRuns.length ? ` · ${selectedTaskRuns.length}` : ""}
-                        </button>
                       </div>
                     </header>
 
@@ -2029,9 +2022,12 @@
     stream={contentLogs[canonicalTaskKey(contentPanelTask)] ?? ""}
     failure={contentFailures[canonicalTaskKey(contentPanelTask)] ?? ""}
     canInitialize={Boolean(plannerRunnerId)}
+    canRun={providerSelectionReady}
+    runCount={agentRuns.filter((run) => run.taskKey === canonicalTaskKey(contentPanelTask)).length}
     onClose={() => contentPanelTaskKey = ""}
     onEdit={editTaskContent}
     onInitialize={(task) => initializeTaskContent([canonicalTaskKey(task)])}
+    onRun={(task) => openExecutionWorkbench(task)}
   />
 {/if}
 
