@@ -1294,6 +1294,18 @@
           <span>Chat</span>
         </button>
         <button
+          class:active={editorOpen}
+          class="terminal-toggle"
+          type="button"
+          aria-label="Open repository explorer"
+          aria-pressed={editorOpen}
+          onclick={() => openRepositoryEditor()}
+          disabled={!selectedCheckoutId}
+        >
+          <svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M4 5h16v14H4zM8 5v14M11 9h6M11 13h4"/></svg>
+          <span>Explorer</span>
+        </button>
+        <button
           class:active={terminalOpen}
           class="terminal-toggle"
           type="button"
@@ -1337,10 +1349,6 @@
             </div>
           </div>
           <div class="repository-toolbar-actions">
-            <button class="secondary-button" type="button" onclick={() => openRepositoryEditor()}>
-              <svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M4 5h16v14H4zM8 5v14M11 9h6M11 13h4"/></svg>
-              Explorer
-            </button>
             <button class="secondary-button" type="button" onclick={() => openExecutionWorkbench()}>
               <svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M5 4h14v16H5zM8 8h8M8 12h5M8 16h7"/><path d="m15 11 4 2.5-4 2.5z"/></svg>
               Runs
