@@ -1,0 +1,169 @@
+import { randomUUID } from "node:crypto";
+import type {
+  AgentEvent,
+  AgentRunCreateInput,
+  AgentRunResult,
+  AgentRunSpec,
+  AgentSandbox,
+  ValidatedAgentRunResult,
+  WorktreeLeaseRecord,
+} from "@phaseatlas/contracts";
+import { createAgentRunSpec, deriveSandboxPolicy, resolveAgentRunTask } from "./agent-run-spec.js";
+import { validateAgentRunResult } from "./agent-result-validator.js";
+import type { CheckoutOperationalStore } from "./checkout-operational-store.js";
+import { captureGitState, inspectGitChanges, type GitCommand } from "./git-change-inspector.js";
+import type { RepositoryInspector } from "./repository-inspector.js";
+import { WorktreeLeaseManager } from "./worktree-lease-manager.js";
+
+type AgentEventWithoutSequence = AgentEvent extends infer Event
+  ? Event extends { sequence: number } ? Omit<Event, "sequence"> : never
+  : never;
+
+export interface AgentExecutionAdapter {
+  readonly supportedSandboxes: ReadonlyArray<AgentSandbox>;
+  execute(context: {
+    spec: AgentRunSpec;
+    workingDirectory: string;
+    signal: AbortSignal;
+    emit(event: AgentEventWithoutSequence): void;
+  }): Promise<unknown>;
+}
+
+export interface PreparedAgentRun {
+  spec: AgentRunSpec;
+  lease?: WorktreeLeaseRecord;
+}
+
+export class AgentExecutionScheduler {
+  constructor(
+    private readonly inspector: RepositoryInspector,
+    private readonly store: CheckoutOperationalStore,
+    readonly leases: WorktreeLeaseManager,
+    private readonly changeGit?: GitCommand,
+  ) {}
+
+  async prepare(request: AgentRunCreateInput): Promise<PreparedAgentRun> {
+    const [repository, snapshot] = await Promise.all([this.inspector.describe(), this.inspector.taskSnapshot()]);
+    const task = resolveAgentRunTask(request, snapshot);
+    const sandbox = deriveSandboxPolicy(request, task);
+    if (request.expectedCheckoutId && request.expectedCheckoutId !== repository.checkoutId) {
+      throw new Error("Agent run request targets a different checkout.");
+    }
+    const runId = randomUUID();
+    this.store.recordRun({ runId, kind: "agent", status: "starting", taskKeys: [request.taskKey] });
+    let lease: WorktreeLeaseRecord | undefined;
+    try {
+      if (sandbox === "workspace-write") lease = await this.leases.acquire(runId);
+      const spec = createAgentRunSpec({ runId, request, repository, snapshot, ...(lease ? { lease } : {}) });
+      this.store.appendEvent({
+        runId,
+        type: "agent.prepared",
+        payload: {
+          taskKey: spec.taskKey,
+          taskRevision: spec.taskRevision,
+          action: spec.action,
+          sandbox: spec.sandbox,
+          checkoutId: spec.checkout.checkoutId,
+          ...(lease ? { leaseId: lease.leaseId } : {}),
+        },
+      });
+      return { spec, ...(lease ? { lease } : {}) };
+    } catch (error) {
+      this.store.appendEvent({
+        runId,
+        type: "run.failed",
+        payload: { message: error instanceof Error ? error.message : "Agent run preparation failed." },
+        status: "failed",
+      });
+      throw error;
+    }
+  }
+
+  async execute(
+    request: AgentRunCreateInput,
+    adapter: AgentExecutionAdapter,
+    signal: AbortSignal,
+    onEvent: (event: AgentEvent) => void = () => undefined,
+  ): Promise<ValidatedAgentRunResult> {
+    const prepared = await this.prepare(request);
+    const { spec } = prepared;
+    if (!adapter.supportedSandboxes.includes(spec.sandbox)) {
+      await this.failAndCleanup(spec.runId, `Execution adapter cannot honor ${spec.sandbox}.`);
+      throw new Error(`Execution adapter cannot honor ${spec.sandbox}.`);
+    }
+    if (signal.aborted) {
+      this.store.appendEvent({ runId: spec.runId, type: "run.cancelled", payload: { message: "Run cancelled before handoff." }, status: "cancelled" });
+      if (prepared.lease) await this.leases.release(spec.runId, "cancelled_before_handoff");
+      throw signal.reason instanceof Error ? signal.reason : new Error("Agent run was cancelled.");
+    }
+    let sequence = 0;
+    const readOnlyBaseline = spec.sandbox === "read-only"
+      ? await captureGitState({ worktreePath: spec.executionDirectory, ...(this.changeGit ? { git: this.changeGit } : {}) })
+      : null;
+    const emit = (event: AgentEventWithoutSequence) => {
+      const normalized = { ...event, sequence: ++sequence } as AgentEvent;
+      const persisted = this.store.appendEvent({
+        runId: spec.runId,
+        type: normalized.type,
+        payload: { ...normalized, sequence: undefined },
+        ...(normalized.type === "run.status" && normalized.status === "running" ? { status: "running" as const } : {}),
+      });
+      onEvent({ ...normalized, sequence: persisted.sequence } as AgentEvent);
+    };
+    try {
+      emit({ type: "run.status", status: "running" });
+      const rawResult = await adapter.execute({
+        spec,
+        workingDirectory: spec.executionDirectory,
+        signal,
+        emit,
+      });
+      const result = validateAgentRunResult(rawResult);
+      const readOnlyChanged = readOnlyBaseline !== null && readOnlyBaseline !== await captureGitState({
+        worktreePath: spec.executionDirectory,
+        ...(this.changeGit ? { git: this.changeGit } : {}),
+      });
+      const inspectedChanges = spec.sandbox === "workspace-write" || readOnlyChanged
+        ? await inspectGitChanges({
+          worktreePath: spec.executionDirectory,
+          scope: spec.sandbox === "workspace-write" ? spec.scope : { ...spec.scope, writable: false },
+          ...(this.changeGit ? { git: this.changeGit } : {}),
+        })
+        : [];
+      const policyViolations = inspectedChanges.flatMap((change) =>
+        change.policyViolations.map((violation) => `${change.path}: ${violation}`),
+      );
+      if (readOnlyChanged) policyViolations.push("read_only_checkout_modified");
+      const validated: ValidatedAgentRunResult = { result, inspectedChanges, policyViolations };
+      this.store.appendEvent({
+        runId: spec.runId,
+        type: "agent.result",
+        payload: {
+          outcome: result.outcome,
+          summary: result.summary,
+          inspectedChanges,
+          policyViolations,
+          proposedTaskState: result.proposedTaskState ?? null,
+          advisory: true,
+        },
+        status: policyViolations.length || result.outcome === "failed" ? "failed" : "completed",
+      });
+      return validated;
+    } catch (error) {
+      this.store.appendEvent({
+        runId: spec.runId,
+        type: signal.aborted ? "run.cancelled" : "run.failed",
+        payload: { message: error instanceof Error ? error.message : "Agent execution failed." },
+        status: signal.aborted ? "cancelled" : "failed",
+      });
+      throw error;
+    } finally {
+      if (prepared.lease) await this.leases.release(spec.runId, signal.aborted ? "cancelled" : "run_finished");
+    }
+  }
+
+  private async failAndCleanup(runId: string, message: string): Promise<void> {
+    this.store.appendEvent({ runId, type: "run.failed", payload: { message }, status: "failed" });
+    await this.leases.release(runId, "adapter_rejected");
+  }
+}

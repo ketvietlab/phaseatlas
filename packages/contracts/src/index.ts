@@ -1,8 +1,10 @@
 import taskProposalSchema from "../schemas/task-proposal.schema.json" with { type: "json" };
 import taskContentSchema from "../schemas/task-content.schema.json" with { type: "json" };
+import agentRunResultSchema from "../schemas/agent-run-result.schema.json" with { type: "json" };
 
 export const TASK_PROPOSAL_SCHEMA = taskProposalSchema;
 export const TASK_CONTENT_SCHEMA = taskContentSchema;
+export const AGENT_RUN_RESULT_SCHEMA = agentRunResultSchema;
 
 export const TASK_STATES = [
   "draft",
@@ -341,23 +343,85 @@ export type AgentRunStatus =
   | "cancelled"
   | "interrupted";
 
-export interface AgentRunSpec {
-  schemaVersion: "phaseatlas.run/v1";
-  runId: string;
+export type AgentRunAction = "analyze" | "plan" | "implement" | "review";
+export type AgentSandbox = "read-only" | "workspace-write";
+
+export interface AgentRunCreateInput {
   taskKey: string;
-  taskRevision: string;
-  action: "analyze" | "plan" | "implement" | "review";
-  repositoryPath: string;
-  worktreePath?: string;
-  branch?: string;
-  objective: string;
-  content?: TaskContent;
-  contextDocuments: Array<{ path: string; revision?: string }>;
-  scope: TaskScope;
-  acceptanceCriteria: AcceptanceCriterion[];
-  verification: VerificationStep[];
-  sandbox: "read-only" | "workspace-write";
+  expectedTaskRevision?: string;
+  expectedCheckoutId?: string;
+  action: AgentRunAction;
+  requestedSandbox?: AgentSandbox;
+}
+
+export interface AgentCheckoutIdentity {
+  repositoryId: string;
+  checkoutId: string;
+  canonicalPath: string;
+}
+
+export type WorktreeLeaseStatus = "allocating" | "active" | "releasing" | "released" | "abandoned";
+
+export interface WorktreeLeaseRecord {
+  leaseId: string;
+  runId: string;
+  checkoutId: string;
+  worktreePath: string;
+  branch: string;
+  status: WorktreeLeaseStatus;
   createdAt: string;
+  updatedAt: string;
+  recoveryReason?: string;
+  disposition?: string;
+}
+
+export interface AgentRunSpec {
+  readonly schemaVersion: "phaseatlas.run/v1";
+  readonly runId: string;
+  readonly taskKey: string;
+  readonly taskRevision: string;
+  readonly action: AgentRunAction;
+  readonly checkout: AgentCheckoutIdentity;
+  readonly lease?: WorktreeLeaseRecord;
+  readonly executionDirectory: string;
+  readonly objective: string;
+  readonly content?: TaskContent;
+  readonly contextDocuments: ReadonlyArray<{ path: string; revision?: string }>;
+  readonly scope: TaskScope;
+  readonly acceptanceCriteria: ReadonlyArray<AcceptanceCriterion>;
+  readonly verification: ReadonlyArray<VerificationStep>;
+  readonly sandbox: AgentSandbox;
+  readonly createdAt: string;
+}
+
+export type AgentRunOutcome = "completed" | "partial" | "blocked" | "failed";
+export type AgentFileChangeType = "added" | "modified" | "deleted";
+
+export interface AgentRunResult {
+  outcome: AgentRunOutcome;
+  summary: string;
+  changedFiles: Array<{ path: string; changeType: AgentFileChangeType }>;
+  verification: Array<{ stepId: string; status: "passed" | "failed" | "not_run"; details: string }>;
+  producedEvidence: Array<{
+    type: "diff" | "test" | "commit" | "pull_request" | "document";
+    reference: string;
+  }>;
+  blockers: string[];
+  nextAction: string;
+  requiresHumanReview: boolean;
+  proposedTaskState?: TaskState;
+}
+
+export interface InspectedAgentChange {
+  path: string;
+  changeType: AgentFileChangeType;
+  policyViolations: string[];
+}
+
+export interface ValidatedAgentRunResult {
+  result: AgentRunResult;
+  inspectedChanges: InspectedAgentChange[];
+  policyViolations: string[];
 }
 
 export type AgentEvent =
@@ -384,6 +448,9 @@ export type RepositoryWorkerMethod =
   | "task-content.save"
   | "run.list"
   | "run.events"
+  | "agent-run.prepare"
+  | "agent-run.leases"
+  | "agent-run.release"
   | "file.list"
   | "file.read"
   | "file.save"
@@ -400,7 +467,7 @@ export type WorkerResponse =
   | { requestId: string; error: { code: string; message: string } };
 
 export interface WorkerEvent {
-  type: "worker.ready" | "repository.changed" | "worker.warning" | "planning.event" | "task-content.event";
+  type: "worker.ready" | "repository.changed" | "worker.warning" | "planning.event" | "task-content.event" | "lease.recovery";
   payload: Record<string, unknown>;
 }
 

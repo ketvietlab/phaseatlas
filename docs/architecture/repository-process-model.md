@@ -91,6 +91,19 @@ operational databases directly.
 
 ## Execution concurrency
 
-Read-only planning can share a repository checkout. Future write execution must receive a unique
-worktree lease; two write runs must never share a worktree. The durable run stream is designed to also
-carry the provider-neutral agent events introduced by the execution phase.
+Read-only runs share the fixed canonical checkout but must use an executor that enforces `read-only`.
+Write-capable implementation runs never execute there. They receive an exclusive checkout-owned
+worktree lease whose branch and directory are allocated by trusted backend code.
+
+```text
+agent run -> durable allocating lease -> unique Git worktree -> active lease
+          -> execute/inspect -> exact validated cleanup -> released lease
+```
+
+Lease allocation is serialized within the worker, so concurrent requests cannot share an ID, branch,
+or directory. Lease lifecycle events use the checkout operational stream established for run history.
+After a worker restart, previously allocating, active, or releasing leases become `abandoned`; their worktrees stay
+in place and are reported for recovery rather than deleted or reused.
+
+The scheduler independently inspects Git changes in the leased worktree and attaches scope violations
+to the advisory result. Neither an executor result nor lease cleanup can modify canonical task state.

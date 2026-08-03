@@ -28,7 +28,7 @@
 
 ## M3 — Execution
 
-- [ ] Worktree lease manager
+- [x] Worktree lease manager
 - [ ] Provider-neutral execution runner framework
 - [ ] Codex CLI execution adapter
 - [ ] Second execution provider adapter to verify the abstraction

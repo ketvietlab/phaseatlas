@@ -7,6 +7,9 @@ import type {
   PlanningStartInput,
   PlanningTarget,
   PersistedRunStatus,
+  AgentRunCreateInput,
+  AgentRunAction,
+  AgentSandbox,
   TaskContentEvent,
   TaskContentRunStatus,
   TaskContentRunSummary,
@@ -17,12 +20,14 @@ import type {
   WorkerResponse,
 } from "@phaseatlas/contracts";
 import {
+  AgentExecutionScheduler,
   CheckoutOperationalStore,
   RepositoryInspector,
   listRepositoryFiles,
   readRepositoryFile,
   saveRepositoryFile,
   writeTaskContent,
+  WorktreeLeaseManager,
 } from "@phaseatlas/core";
 import { watch, type FSWatcher } from "chokidar";
 import { RunnerRegistry } from "./runner-registry.js";
@@ -58,6 +63,9 @@ if (
 }
 const operationalStore = new CheckoutOperationalStore(resolvedCheckoutStorePath, initialRepository.checkoutId);
 operationalStore.reconcileInterruptedRuns();
+const leaseManager = new WorktreeLeaseManager(canonicalRepositoryRoot, initialRepository.checkoutId, operationalStore);
+const executionScheduler = new AgentExecutionScheduler(inspector, operationalStore, leaseManager);
+const abandonedLeases = await leaseManager.reconcileAbandoned();
 const runners = new RunnerRegistry();
 const parentPort: ElectronParentPort = utilityParentPort;
 const activePlanningRuns = new Map<string, AbortController>();
@@ -127,6 +135,34 @@ function planningInput(value: unknown): PlanningStartInput {
     runnerId: (input.runnerId as string).trim(),
     request: (input.request as string).trim(),
     ...(typeof input.model === "string" && input.model.trim() ? { model: input.model.trim() } : {}),
+  };
+}
+
+function agentRunInput(value: unknown): AgentRunCreateInput {
+  if (!isRecord(value)) throw new Error("Agent run input is required.");
+  const allowedFields = new Set(["taskKey", "expectedTaskRevision", "expectedCheckoutId", "action", "requestedSandbox"]);
+  if (Object.keys(value).some((field) => !allowedFields.has(field))) {
+    throw new Error("Agent run input contains unsupported fields.");
+  }
+  if (typeof value.taskKey !== "string" || !value.taskKey.trim()) throw new Error("taskKey is required.");
+  const actions = new Set<AgentRunAction>(["analyze", "plan", "implement", "review"]);
+  if (!actions.has(value.action as AgentRunAction)) throw new Error("action is invalid.");
+  if (value.expectedTaskRevision !== undefined && typeof value.expectedTaskRevision !== "string") {
+    throw new Error("expectedTaskRevision must be a string.");
+  }
+  if (value.expectedCheckoutId !== undefined && typeof value.expectedCheckoutId !== "string") {
+    throw new Error("expectedCheckoutId must be a string.");
+  }
+  const sandboxes = new Set<AgentSandbox>(["read-only", "workspace-write"]);
+  if (value.requestedSandbox !== undefined && !sandboxes.has(value.requestedSandbox as AgentSandbox)) {
+    throw new Error("requestedSandbox is invalid.");
+  }
+  return {
+    taskKey: value.taskKey.trim(),
+    action: value.action as AgentRunAction,
+    ...(typeof value.expectedTaskRevision === "string" ? { expectedTaskRevision: value.expectedTaskRevision } : {}),
+    ...(typeof value.expectedCheckoutId === "string" ? { expectedCheckoutId: value.expectedCheckoutId } : {}),
+    ...(value.requestedSandbox ? { requestedSandbox: value.requestedSandbox as AgentSandbox } : {}),
   };
 }
 
@@ -514,6 +550,22 @@ async function dispatch(request: WorkerRequest): Promise<unknown> {
       }
       return operationalStore.listEvents(runId, Number(afterSequence ?? 0));
     }
+    case "agent-run.prepare":
+      return executionScheduler.prepare(agentRunInput(requestParams(request).input));
+    case "agent-run.leases":
+      return leaseManager.list();
+    case "agent-run.release": {
+      const runId = requestParams(request).runId;
+      if (typeof runId !== "string") throw new Error("runId is required.");
+      const released = await leaseManager.release(runId, "explicit_release");
+      operationalStore.appendEvent({
+        runId,
+        type: "run.cancelled",
+        payload: { reason: "explicit_release" },
+        status: "cancelled",
+      });
+      return released;
+    }
     case "file.list": {
       const directory = requestParams(request).directory;
       if (directory !== undefined && typeof directory !== "string") throw new Error("directory must be a string.");
@@ -631,3 +683,4 @@ send({
     processId: process.pid,
   },
 });
+for (const lease of abandonedLeases) send({ type: "lease.recovery", payload: { lease } });
