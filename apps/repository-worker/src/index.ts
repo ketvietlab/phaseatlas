@@ -9,7 +9,12 @@ import type {
   PersistedRunStatus,
   AgentRunCreateInput,
   AgentRunAction,
+  AgentRunCancellationResult,
+  AgentRunRecoveryInput,
+  AgentRunRecoveryResult,
+  AgentRunStartInput,
   AgentSandbox,
+  PersistedRunEventPage,
   TaskContentEvent,
   TaskContentRunStatus,
   TaskContentRunSummary,
@@ -26,6 +31,7 @@ import {
   listRepositoryFiles,
   readRepositoryFile,
   saveRepositoryFile,
+  reviewAgentResult,
   writeTaskContent,
   WorktreeLeaseManager,
 } from "@phaseatlas/core";
@@ -73,6 +79,11 @@ const activeTaskContentRuns = new Map<string, {
   controller: AbortController;
   status: TaskContentRunStatus;
   taskKeys: string[];
+}>();
+const activeAgentRuns = new Map<string, {
+  controller: AbortController;
+  completion: Promise<void>;
+  cancellation?: Promise<AgentRunCancellationResult>;
 }>();
 
 async function mapConcurrent<Input, Output>(
@@ -163,6 +174,50 @@ function agentRunInput(value: unknown): AgentRunCreateInput {
     ...(typeof value.expectedTaskRevision === "string" ? { expectedTaskRevision: value.expectedTaskRevision } : {}),
     ...(typeof value.expectedCheckoutId === "string" ? { expectedCheckoutId: value.expectedCheckoutId } : {}),
     ...(value.requestedSandbox ? { requestedSandbox: value.requestedSandbox as AgentSandbox } : {}),
+  };
+}
+
+function agentRunStartInput(value: unknown): AgentRunStartInput {
+  if (!isRecord(value)) throw new Error("Agent run start input is required.");
+  const allowedFields = new Set([
+    "taskKey", "expectedTaskRevision", "expectedCheckoutId", "action", "requestedSandbox", "runnerId", "model",
+  ]);
+  if (Object.keys(value).some((field) => !allowedFields.has(field))) {
+    throw new Error("Agent run start input contains unsupported fields.");
+  }
+  if (typeof value.runnerId !== "string" || !value.runnerId.trim()) throw new Error("runnerId is required.");
+  if (value.model !== undefined && (typeof value.model !== "string" || !value.model.trim())) {
+    throw new Error("model must be a non-empty string.");
+  }
+  const request = agentRunInput(Object.fromEntries(
+    Object.entries(value).filter(([field]) => field !== "runnerId" && field !== "model"),
+  ));
+  return {
+    ...request,
+    runnerId: value.runnerId.trim(),
+    ...(typeof value.model === "string" ? { model: value.model.trim() } : {}),
+  };
+}
+
+function agentRunRecoveryInput(value: unknown): AgentRunRecoveryInput {
+  if (!isRecord(value)) throw new Error("Agent run recovery input is required.");
+  const allowedFields = new Set(["runId", "decision", "runnerId", "model"]);
+  if (Object.keys(value).some((field) => !allowedFields.has(field))) {
+    throw new Error("Agent run recovery input contains unsupported fields.");
+  }
+  if (typeof value.runId !== "string" || !/^[a-f0-9-]{8,64}$/i.test(value.runId)) throw new Error("runId is invalid.");
+  if (value.decision !== "leave_interrupted" && value.decision !== "retry") throw new Error("Recovery decision is invalid.");
+  if (value.decision === "retry" && (typeof value.runnerId !== "string" || !value.runnerId.trim())) {
+    throw new Error("runnerId is required for retry.");
+  }
+  if (value.model !== undefined && (typeof value.model !== "string" || !value.model.trim())) {
+    throw new Error("model must be a non-empty string.");
+  }
+  return {
+    runId: value.runId,
+    decision: value.decision,
+    ...(typeof value.runnerId === "string" ? { runnerId: value.runnerId.trim() } : {}),
+    ...(typeof value.model === "string" ? { model: value.model.trim() } : {}),
   };
 }
 
@@ -504,6 +559,94 @@ function listTaskContentRuns(): TaskContentRunSummary[] {
   }));
 }
 
+async function startAgentRun(input: AgentRunStartInput, parentRunId?: string): Promise<{ runId: string }> {
+  const runner = runners.get(input.runnerId);
+  const descriptor = await runner.describe();
+  if (!descriptor.available) throw new Error(descriptor.unavailableReason || `${descriptor.name} is unavailable.`);
+  assertRunnerModel(descriptor, input.model);
+  const expectedSandbox: AgentSandbox = input.action === "implement" ? "workspace-write" : "read-only";
+  const adapter = runners.getExecution(input.runnerId, input.action, expectedSandbox);
+  const request: AgentRunCreateInput = {
+    taskKey: input.taskKey,
+    action: input.action,
+    ...(input.expectedTaskRevision ? { expectedTaskRevision: input.expectedTaskRevision } : {}),
+    ...(input.expectedCheckoutId ? { expectedCheckoutId: input.expectedCheckoutId } : {}),
+    ...(input.requestedSandbox ? { requestedSandbox: input.requestedSandbox } : {}),
+  };
+  const prepared = await executionScheduler.prepare(request, {
+    runnerId: input.runnerId,
+    ...(input.model ? { model: input.model } : {}),
+  });
+  if (parentRunId) operationalStore.linkRunAttempt(prepared.spec.runId, parentRunId);
+  const controller = new AbortController();
+  const entry: {
+    controller: AbortController;
+    completion: Promise<void>;
+    cancellation?: Promise<AgentRunCancellationResult>;
+  } = { controller, completion: Promise.resolve() };
+  entry.completion = executionScheduler.executePrepared(
+    prepared,
+    adapter,
+    controller.signal,
+    (event) => send({ type: "agent-run.event", payload: { runId: prepared.spec.runId, event } }),
+    input.model,
+  ).then(() => undefined).finally(() => {
+    if (activeAgentRuns.get(prepared.spec.runId) === entry) activeAgentRuns.delete(prepared.spec.runId);
+  });
+  activeAgentRuns.set(prepared.spec.runId, entry);
+  void entry.completion.catch(() => undefined);
+  return { runId: prepared.spec.runId };
+}
+
+async function cancelAgentRun(runId: string): Promise<AgentRunCancellationResult> {
+  const run = operationalStore.getRun(runId);
+  if (run.kind !== "agent") throw new Error("Run is not an agent execution.");
+  if (["completed", "failed", "cancelled", "interrupted"].includes(run.status)) {
+    return {
+      runId,
+      status: run.status as AgentRunCancellationResult["status"],
+      disposition: "already_terminal",
+    };
+  }
+  const active = activeAgentRuns.get(runId);
+  if (!active) throw new Error("The agent process is not owned by this worker and requires recovery.");
+  if (!active.cancellation) {
+    active.controller.abort(new Error("Agent run cancellation requested."));
+    active.cancellation = active.completion.catch(() => undefined).then(() => {
+      const terminal = operationalStore.getRun(runId);
+      if (!["completed", "failed", "cancelled", "interrupted"].includes(terminal.status)) {
+        throw new Error("Agent cancellation did not reach a durable terminal state.");
+      }
+      return {
+        runId,
+        status: terminal.status as AgentRunCancellationResult["status"],
+        disposition: terminal.status === "cancelled" ? "cancelled" as const : "already_terminal" as const,
+      };
+    });
+  }
+  return active.cancellation;
+}
+
+async function recoverAgentRun(input: AgentRunRecoveryInput): Promise<AgentRunRecoveryResult> {
+  const run = operationalStore.getRun(input.runId);
+  if (run.kind !== "agent" || run.status !== "interrupted") {
+    throw new Error("Only an interrupted agent run can be recovered.");
+  }
+  if (input.decision === "leave_interrupted") {
+    return { originalRunId: input.runId, decision: input.decision };
+  }
+  const previous = operationalStore.getAgentSpec(input.runId);
+  if (!previous || !input.runnerId) throw new Error("Interrupted run specification is unavailable.");
+  const retry = await startAgentRun({
+    taskKey: previous.taskKey,
+    action: previous.action,
+    expectedCheckoutId: initialRepository.checkoutId,
+    runnerId: input.runnerId,
+    ...(input.model ? { model: input.model } : {}),
+  }, input.runId);
+  return { originalRunId: input.runId, decision: input.decision, retryRunId: retry.runId };
+}
+
 async function dispatch(request: WorkerRequest): Promise<unknown> {
   switch (request.method) {
     case "repository.describe":
@@ -552,8 +695,27 @@ async function dispatch(request: WorkerRequest): Promise<unknown> {
       }
       return operationalStore.listEvents(runId, Number(afterSequence ?? 0));
     }
+    case "run.events-page": {
+      const { runId, afterSequence, limit } = requestParams(request);
+      if (typeof runId !== "string") throw new Error("runId is required.");
+      return operationalStore.listEventsPage(runId, Number(afterSequence ?? 0), Number(limit ?? 200));
+    }
     case "agent-run.prepare":
       return executionScheduler.prepare(agentRunInput(requestParams(request).input));
+    case "agent-run.start":
+      return startAgentRun(agentRunStartInput(requestParams(request).input));
+    case "agent-run.cancel": {
+      const runId = requestParams(request).runId;
+      if (typeof runId !== "string" || !/^[a-f0-9-]{8,64}$/i.test(runId)) throw new Error("runId is invalid.");
+      return cancelAgentRun(runId);
+    }
+    case "agent-run.result": {
+      const runId = requestParams(request).runId;
+      if (typeof runId !== "string" || !/^[a-f0-9-]{8,64}$/i.test(runId)) throw new Error("runId is invalid.");
+      return reviewAgentResult(operationalStore, inspector, runId);
+    }
+    case "agent-run.recover":
+      return recoverAgentRun(agentRunRecoveryInput(requestParams(request).input));
     case "agent-run.leases":
       return leaseManager.list();
     case "agent-run.release": {
@@ -650,6 +812,7 @@ try {
 process.once("exit", () => {
   for (const controller of activePlanningRuns.values()) controller.abort();
   for (const run of activeTaskContentRuns.values()) run.controller.abort();
+  for (const run of activeAgentRuns.values()) run.controller.abort();
   operationalStore.close();
   if (changeTimer) clearTimeout(changeTimer);
   void watcher?.close();

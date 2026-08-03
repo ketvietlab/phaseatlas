@@ -16,6 +16,9 @@ dependencies:
   - taskKey: PHA-007
     relation: blocks_start
     requiredState: done
+  - taskKey: PHA-011
+    relation: blocks_start
+    requiredState: done
 scope:
   allowedPaths:
     - package.json

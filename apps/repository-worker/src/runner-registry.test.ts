@@ -15,6 +15,7 @@ import {
   parseClaudeModelHelp,
   parseCodexModelCatalog,
   RunnerRegistry,
+  runChildProcess,
   type ProviderProcessRunner,
 } from "./runner-registry.js";
 
@@ -209,4 +210,24 @@ test("formats Codex JSONL events as readable terminal progress", () => {
     "Turn completed · 1,250 input / 340 output tokens\n",
   );
   assert.equal(formatCodexJsonEvent({ type: "unknown.event" }), "");
+});
+
+test("cancellation waits for provider exit and force-terminates an unresponsive owned process", async () => {
+  const controller = new AbortController();
+  const startedAt = Date.now();
+  let outputAfterAbort = "";
+  const execution = runChildProcess({
+    executable: process.execPath,
+    args: ["-e", "process.on('SIGTERM', () => {}); process.stdout.write('ready\\n'); setInterval(() => process.stdout.write('late\\n'), 20);"],
+    cwd: process.cwd(),
+    signal: controller.signal,
+    terminationGraceMs: 80,
+    onStdout: (chunk) => {
+      if (chunk.includes("ready")) controller.abort();
+      else if (controller.signal.aborted) outputAfterAbort += chunk;
+    },
+  });
+  await assert.rejects(execution, /cancelled/);
+  assert.ok(Date.now() - startedAt >= 60, "cancellation must wait for confirmed force termination");
+  assert.equal(outputAfterAbort, "");
 });

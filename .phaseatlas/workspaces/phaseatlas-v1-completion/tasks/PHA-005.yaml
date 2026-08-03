@@ -3,7 +3,7 @@ id: PHA-005
 title: Deliver provider-neutral execution adapters
 kind: code
 phase: execution-providers
-state: in_review
+state: done
 priority: high
 objective: Codex CLI and a second provider can run the same validated specification and emit the
   same normalized event and result contracts without exposing credentials, raw process handles, or

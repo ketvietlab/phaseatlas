@@ -103,3 +103,70 @@ structured-output APIs.
 `proposedTaskState` is always advisory, including `done`. Result acceptance and lease completion never
 write canonical task files, promote evidence, or transition task state. Those actions require a
 separate authorized verification and promotion workflow.
+
+## Durable lifecycle and terminal ordering
+
+The checkout operational store is the lifecycle authority. A scheduler first persists the immutable
+run specification, then starts the provider. Each normalized event is assigned and committed with the
+next checkout-local sequence before it is published live. A validated result is persisted before a
+terminal event can be observed.
+
+Runs have one of these terminal states:
+
+```text
+completed | failed | cancelled | interrupted
+```
+
+Completion, cancellation, adapter failure, and startup recovery all compete through one atomic
+compare-and-set transition. The winner establishes the terminal state; later terminal attempts are
+idempotent and provider output after terminalization is rejected. Only recognized lease audit events
+and result-revalidation records may be appended after terminal state.
+
+## Cursor replay
+
+Consumers read bounded pages strictly after a durable sequence cursor:
+
+```text
+events where sequence > afterSequence, ordered ascending, limit 1..500
+```
+
+The returned `nextSequence` is the last event in the page, or the supplied cursor for an empty page.
+`hasMore` indicates that persisted events remain. A reconnecting renderer replays from its last
+contiguous sequence and merges live events by sequence; timestamps, provider sequence numbers, and
+arrival order are never cursor authority.
+
+## Cancellation and process ownership
+
+Cancellation is idempotent. The worker aborts the owned provider process group, first requests graceful
+termination, waits for confirmed process close, and applies bounded force termination when necessary.
+It stops accepting provider output as soon as cancellation is requested. Only after the process is
+confirmed closed may the run become `cancelled` and its exact lease be released or retained under the
+worktree recovery policy.
+
+The renderer cannot supply a process identifier, signal, command, executable, working directory, or
+grace period. Those remain private adapter and worker concerns.
+
+## Interruption and recovery
+
+At startup, a previously active run becomes `interrupted`; it is never presented as completed and is
+not silently restarted. Recovery is an explicit choice:
+
+- leave the original run interrupted; or
+- create a new run with a new identifier from the current validated canonical task and link it to the
+  interrupted attempt.
+
+The new attempt receives a fresh specification, runner/model validation, revision, and worktree lease.
+The original run, events, result if any, and retry linkage remain immutable audit history.
+
+## Result freshness and promotion
+
+Every persisted result records the immutable task revision used by its run. Core review compares that
+revision with the current canonical task before any evidence or state promotion:
+
+- an exact match is `current`;
+- a mismatch is `stale` and non-promotable;
+- a missing or invalid current task is `unverifiable` and non-promotable.
+
+A trusted revalidation may restore `current` only when it records the exact current revision for the
+same result. If the canonical task changes again, that revalidation no longer matches and the result
+immediately becomes stale. Renderer state and provider output cannot create revalidation authority.

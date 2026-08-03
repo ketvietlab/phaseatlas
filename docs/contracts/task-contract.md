@@ -228,7 +228,18 @@ are separate projections; code being merged does not imply evidence is verified 
 
 Normalization produces a deterministic hash over the canonical task and its declared sources. Every
 agent run stores this revision. If the task changes while a run is active, its result becomes stale and
-requires revalidation before promotion.
+requires trusted revalidation before promotion.
+
+Result freshness is evaluated against the current canonical snapshot at review time, never inferred
+from the run's terminal status or renderer memory. A result is promotable only when its stored revision
+equals the current task revision, or when a trusted revalidation record names that exact current
+revision. Missing or invalid current tasks are unverifiable. Any subsequent task edit invalidates a
+previous revalidation because its recorded revision no longer equals the new canonical revision.
+
+Providers and renderers cannot record freshness or promote evidence. Revalidation is a separate core
+authority that must first repeat the verification required by the changed task. A stale or
+unverifiable result may remain visible as historical output, but it cannot mark the task complete,
+satisfy a dependency, or become current evidence.
 
 ## Runtime validation
 

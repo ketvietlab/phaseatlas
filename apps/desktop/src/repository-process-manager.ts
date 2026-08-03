@@ -6,9 +6,15 @@ import path from "node:path";
 import type { DatabaseSync as DatabaseSyncType } from "node:sqlite";
 import { utilityProcess, type UtilityProcess } from "electron";
 import {
+  type AgentResultReview,
+  type AgentRunCancellationResult,
+  type AgentRunRecoveryInput,
+  type AgentRunRecoveryResult,
+  type AgentRunStartInput,
   isWorkerEvent,
   isWorkerResponse,
   type PersistedRunEvent,
+  type PersistedRunEventPage,
   type PersistedRunRecord,
   type PlanningEvent,
   type PlanningPublishInput,
@@ -58,7 +64,7 @@ interface CatalogRow extends Record<string, unknown> {
 const CATALOG_SCHEMA_VERSION = "1";
 const LIFECYCLE_STATES = new Set<RepositoryLifecycleState>(["closed", "starting", "online", "cooling", "recovery_required"]);
 const ACTIVE_STATES = new Set(["starting", "running"]);
-const TERMINAL_STATES = new Set(["completed", "failed", "cancelled"]);
+const TERMINAL_STATES = new Set(["completed", "failed", "cancelled", "interrupted"]);
 const { DatabaseSync } = createRequire(import.meta.url)("node:" + "sqlite") as {
   DatabaseSync: typeof DatabaseSyncType;
 };
@@ -446,6 +452,32 @@ export class RepositoryProcessManager {
     return (await this.ensureWorker(checkoutId)).call<PersistedRunEvent[]>("run.events", { runId, afterSequence });
   }
 
+  async listRunEventPage(checkoutId: string, runId: string, afterSequence = 0, limit = 200): Promise<PersistedRunEventPage> {
+    return (await this.ensureWorker(checkoutId)).call<PersistedRunEventPage>("run.events-page", { runId, afterSequence, limit });
+  }
+
+  async startAgentRun(checkoutId: string, input: AgentRunStartInput): Promise<{ runId: string }> {
+    const started = await (await this.ensureWorker(checkoutId)).call<{ runId: string }>("agent-run.start", { input });
+    this.trackRun(checkoutId, started.runId, "running");
+    return started;
+  }
+
+  async cancelAgentRun(checkoutId: string, runId: string): Promise<AgentRunCancellationResult> {
+    const result = await (await this.ensureWorker(checkoutId)).call<AgentRunCancellationResult>("agent-run.cancel", { runId });
+    this.trackRun(checkoutId, runId, result.status);
+    return result;
+  }
+
+  async agentRunResult(checkoutId: string, runId: string): Promise<AgentResultReview> {
+    return (await this.ensureWorker(checkoutId)).call<AgentResultReview>("agent-run.result", { runId });
+  }
+
+  async recoverAgentRun(checkoutId: string, input: AgentRunRecoveryInput): Promise<AgentRunRecoveryResult> {
+    const result = await (await this.ensureWorker(checkoutId)).call<AgentRunRecoveryResult>("agent-run.recover", { input });
+    if (result.retryRunId) this.trackRun(checkoutId, result.retryRunId, "running");
+    return result;
+  }
+
   close(checkoutId: string, viewId?: number): void {
     this.catalog.setVisible(checkoutId, false);
     if (viewId !== undefined) this.releaseView(checkoutId, viewId);
@@ -548,6 +580,8 @@ export class RepositoryProcessManager {
 
   private onWorkerEvent(checkoutId: string, worker: RepositoryWorkerHandle, event: WorkerEvent): void {
     if (worker.expectedStop) return;
+    const currentWorker = this.workers.get(checkoutId);
+    if (currentWorker && currentWorker !== worker) return;
     if (event.type === "planning.event" && event.payload.event) {
       const planningEvent = event.payload.event as PlanningEvent;
       this.trackRun(checkoutId, planningEvent.runId, planningEvent.type === "planning.status" ? planningEvent.status : undefined);
@@ -556,6 +590,21 @@ export class RepositoryProcessManager {
       const contentEvent = event.payload.event as TaskContentEvent;
       this.trackRun(checkoutId, contentEvent.runId, contentEvent.type === "task-content.status" ? contentEvent.status : undefined);
       this.eventSink?.({ type: "task-content.event", checkoutId, event: contentEvent });
+    } else if (event.type === "agent-run.event" && typeof event.payload.runId === "string" && event.payload.event) {
+      const persistedEvent = event.payload.event as PersistedRunEvent;
+      const status = persistedEvent.type === "run.status" && typeof persistedEvent.payload.status === "string"
+        ? persistedEvent.payload.status
+        : persistedEvent.type === "agent.result" && typeof persistedEvent.payload.status === "string"
+          ? persistedEvent.payload.status
+          : persistedEvent.type === "run.failed"
+            ? "failed"
+            : persistedEvent.type === "run.cancelled"
+              ? "cancelled"
+              : persistedEvent.type === "run.interrupted"
+                ? "interrupted"
+                : undefined;
+      this.trackRun(checkoutId, event.payload.runId, status);
+      this.eventSink?.({ type: "agent-run.event", checkoutId, runId: event.payload.runId, event: persistedEvent });
     } else if (event.type === "repository.changed") {
       const paths = Array.isArray(event.payload.paths)
         ? event.payload.paths.filter((item): item is string => typeof item === "string")
