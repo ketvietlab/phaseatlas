@@ -3,7 +3,7 @@ id: PHA-003
 title: Add durable checkout state and worker recovery
 kind: code
 phase: runtime-persistence
-state: in_review
+state: done
 priority: high
 objective: PhaseAtlas preserves repository catalog entries, run events, and recoverable checkout
   state across application or worker restarts while idling workers only when no view or active run
