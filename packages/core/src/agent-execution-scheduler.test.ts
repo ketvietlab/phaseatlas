@@ -128,6 +128,38 @@ test("refuses an adapter that cannot honor read-only execution", async (context)
   runtime.store.close();
 });
 
+test("terminalizes a read-only run when Git baseline capture fails", async (context) => {
+  const runtime = await fixture(context);
+  const scheduler = new AgentExecutionScheduler(
+    runtime.inspector,
+    runtime.store,
+    runtime.leases,
+    async () => { throw new Error("baseline unavailable"); },
+  );
+  let executed = false;
+  const adapter: AgentExecutionAdapter = {
+    supportedSandboxes: ["read-only"],
+    async execute() {
+      executed = true;
+      return successfulResult;
+    },
+  };
+  await assert.rejects(
+    scheduler.execute({ taskKey: "core/PHA-001", action: "review" }, adapter, new AbortController().signal),
+    /baseline unavailable/,
+  );
+  const run = runtime.store.listRuns()[0];
+  assert.ok(run);
+  assert.equal(run.status, "failed");
+  assert.equal(executed, false);
+  assert.deepEqual(runtime.store.listEvents(run.runId).map((event) => event.type), [
+    "agent.prepared",
+    "run.status",
+    "run.failed",
+  ]);
+  runtime.store.close();
+});
+
 test("releases a write lease when execution fails", async (context) => {
   const runtime = await fixture(context);
   const adapter: AgentExecutionAdapter = {

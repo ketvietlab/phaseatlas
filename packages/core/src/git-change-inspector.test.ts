@@ -1,9 +1,17 @@
 import assert from "node:assert/strict";
-import { mkdir, mkdtemp, rm, symlink, writeFile } from "node:fs/promises";
+import { execFile } from "node:child_process";
+import { mkdir, mkdtemp, rm, symlink, truncate, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
-import { inspectGitChanges, type GitCommand } from "./git-change-inspector.js";
+import { promisify } from "node:util";
+import { captureGitState, inspectGitChanges, type GitCommand } from "./git-change-inspector.js";
+
+const execFileAsync = promisify(execFile);
+
+async function git(root: string, ...args: string[]): Promise<void> {
+  await execFileAsync("git", args, { cwd: root });
+}
 
 test("flags traversal, git metadata, forbidden paths, out-of-scope files, and symlink escapes", async (context) => {
   const root = await mkdtemp(path.join(os.tmpdir(), "phaseatlas-change-policy-"));
@@ -37,4 +45,32 @@ test("flags traversal, git metadata, forbidden paths, out-of-scope files, and sy
   assert.deepEqual(byPath.get(".git/config"), ["unsafe_path"]);
   assert.deepEqual(byPath.get("allowed/package.json"), ["dependency_change_not_allowed"]);
   assert.deepEqual(byPath.get("allowed/migrations/001.sql"), ["database_migration_not_allowed"]);
+});
+
+test("fingerprints large untracked files and embedded repositories", async (context) => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "phaseatlas-git-state-"));
+  context.after(() => rm(root, { recursive: true, force: true }));
+  await git(root, "init");
+  await git(root, "config", "user.email", "phaseatlas@example.test");
+  await git(root, "config", "user.name", "PhaseAtlas Test");
+  await writeFile(path.join(root, "README.md"), "root\n");
+  await git(root, "add", "README.md");
+  await git(root, "commit", "-m", "root");
+
+  const embedded = path.join(root, "embedded");
+  await mkdir(embedded);
+  await git(embedded, "init");
+  await git(embedded, "config", "user.email", "phaseatlas@example.test");
+  await git(embedded, "config", "user.name", "PhaseAtlas Test");
+  await writeFile(path.join(embedded, "tracked.txt"), "before\n");
+  await git(embedded, "add", "tracked.txt");
+  await git(embedded, "commit", "-m", "embedded");
+  const largeFile = path.join(root, "large.bin");
+  await writeFile(largeFile, "");
+  await truncate(largeFile, 11 * 1024 * 1024);
+
+  const before = await captureGitState({ worktreePath: root });
+  await writeFile(path.join(embedded, "tracked.txt"), "after\n");
+  const after = await captureGitState({ worktreePath: root });
+  assert.notEqual(after, before);
 });
