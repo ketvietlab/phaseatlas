@@ -119,6 +119,14 @@
     onClose();
   }
 
+  export function closeActiveSurface() {
+    if (activePath) {
+      closeTab(activePath);
+      return;
+    }
+    requestClose();
+  }
+
   function languageFor(path: string) {
     const extension = path.split(".").pop()?.toLowerCase();
     return ({ md: "markdown", json: "json", yaml: "yaml", yml: "yaml", ts: "typescript", js: "javascript", css: "css", html: "html", svelte: "html" } as Record<string, string>)[extension ?? ""] ?? "plaintext";

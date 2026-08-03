@@ -46,6 +46,22 @@ function createWindow(): BrowserWindow {
       : navigationUrl.startsWith("file://");
     if (!internalNavigation) event.preventDefault();
   });
+  window.webContents.on("before-input-event", (event, input) => {
+    const closeModifier = process.platform === "darwin"
+      ? input.meta && !input.control
+      : input.control && !input.meta;
+    if (
+      input.key.toLowerCase() !== "w" ||
+      !closeModifier ||
+      input.alt ||
+      input.shift
+    ) return;
+
+    event.preventDefault();
+    if (input.type === "keyDown" && !input.isAutoRepeat) {
+      window.webContents.send("phaseatlas:shortcut:close-surface");
+    }
+  });
   window.once("ready-to-show", () => window.show());
   const webContentsId = window.webContents.id;
   window.webContents.once("destroyed", () => repositories.releaseViewsForWebContents(webContentsId));

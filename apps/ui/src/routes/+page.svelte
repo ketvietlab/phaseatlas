@@ -52,6 +52,8 @@
   let platform = "desktop";
   let theme = "light";
   let loading = true;
+  let repositoryLoading = false;
+  let repositoryLoadRequest = 0;
   let opening = false;
   let refreshing = false;
   let menuOpen = false;
@@ -112,6 +114,7 @@
   let terminalMaximized = false;
   let terminalHeight = 300;
   let terminalPanel: { focus(): void } | undefined;
+  let repositoryWorkbench: { closeActiveSurface(): void } | undefined;
   let chatOpen = false;
 
   $: selectedRepository = repositories.find(
@@ -194,12 +197,14 @@
         refreshTimer = window.setTimeout(() => void refreshRepository(event.checkoutId), 180);
       }
     });
+    const unsubscribeCloseSurface = window.phaseatlas.runtime.onCloseSurface(closeCurrentSurface);
 
     void initialize();
     return () => {
       window.clearTimeout(refreshTimer);
       window.clearInterval(planningClockTimer);
       unsubscribe();
+      unsubscribeCloseSurface();
     };
   });
 
@@ -239,6 +244,8 @@
 
   async function selectRepository(checkoutId: string) {
     if (!window.phaseatlas) return;
+    const requestId = ++repositoryLoadRequest;
+    repositoryLoading = true;
     selectedCheckoutId = checkoutId;
     workspaces = [];
     runners = [];
@@ -267,6 +274,7 @@
     menuOpen = false;
     try {
       const recoveredRepository = await window.phaseatlas.repositories.refresh(checkoutId);
+      if (requestId !== repositoryLoadRequest || checkoutId !== selectedCheckoutId) return;
       const [nextWorkspaces, nextTaskSnapshot, nextRunners, activeContentRuns, nextAgentRuns] = await Promise.all([
         window.phaseatlas.workspaces.list(checkoutId),
         window.phaseatlas.tasks.snapshot(checkoutId),
@@ -274,6 +282,7 @@
         window.phaseatlas.tasks.listContentRuns(checkoutId),
         window.phaseatlas.agentRuns.list(checkoutId),
       ]);
+      if (requestId !== repositoryLoadRequest || checkoutId !== selectedCheckoutId) return;
       workspaces = nextWorkspaces;
       repositories = repositories.map((repository) => repository.checkoutId === checkoutId ? recoveredRepository : repository);
       taskSnapshot = nextTaskSnapshot;
@@ -296,7 +305,10 @@
       applyRepositoryProviderSettings(checkoutId);
       selectWorkspace(workspaces[0]?.slug ?? "");
     } catch (error) {
+      if (requestId !== repositoryLoadRequest || checkoutId !== selectedCheckoutId) return;
       errorMessage = error instanceof Error ? error.message : "The repository workspaces could not be read.";
+    } finally {
+      if (requestId === repositoryLoadRequest && checkoutId === selectedCheckoutId) repositoryLoading = false;
     }
   }
 
@@ -1099,6 +1111,8 @@
     await window.phaseatlas.repositories.close(checkoutId);
     repositories = repositories.filter((repository) => repository.checkoutId !== checkoutId);
     if (selectedCheckoutId === checkoutId) {
+      repositoryLoadRequest += 1;
+      repositoryLoading = false;
       selectedCheckoutId = "";
       workspaces = [];
       runners = [];
@@ -1122,6 +1136,31 @@
     localStorage.setItem("phaseatlas-theme", nextTheme);
   }
 
+  function closeCurrentSurface() {
+    if (editorOpen) {
+      repositoryWorkbench?.closeActiveSurface();
+    } else if (chatOpen) {
+      chatOpen = false;
+    } else if (providerSettingsOpen) {
+      providerSettingsOpen = false;
+    } else if (executionConfirmAction) {
+      executionConfirmAction = null;
+      executionScopeConfirmed = false;
+      executionPanelElement?.focus();
+    } else if (executionOpen) {
+      closeExecutionWorkbench();
+    } else if (contentPanelTask) {
+      contentPanelTaskKey = "";
+    } else if (plannerOpen) {
+      closePlanner();
+    } else if (terminalOpen) {
+      terminalOpen = false;
+      terminalMaximized = false;
+    } else {
+      menuOpen = false;
+    }
+  }
+
   function handleWindowKeydown(event: KeyboardEvent) {
     if (event.key === "Tab" && executionOpen && executionPanelElement) {
       const focusable = [...executionPanelElement.querySelectorAll<HTMLElement>(
@@ -1139,6 +1178,13 @@
       return;
     }
     const modifier = event.metaKey || event.ctrlKey;
+    const closeShortcut = modifier && !event.shiftKey && !event.altKey && event.key.toLowerCase() === "w";
+    if (closeShortcut) {
+      event.preventDefault();
+      event.stopPropagation();
+      if (!event.repeat) closeCurrentSurface();
+      return;
+    }
     const terminalShortcut = modifier && !event.shiftKey && !event.altKey && (
       event.code === "Backquote" || event.key.toLowerCase() === "j"
     );
@@ -1319,7 +1365,12 @@
         {/if}
 
         <section class="workspace-section">
-          {#if workspaces.length}
+          {#if repositoryLoading}
+            <div class="card loading-state repository-loading-state" aria-live="polite" aria-busy="true">
+              <span class="loading-mark" aria-hidden="true"></span>
+              <div><h2>Loading repository</h2><p>Reading workspaces and canonical tasks for {selectedRepository.name}…</p></div>
+            </div>
+          {:else if workspaces.length}
             {#if selectedWorkspace}
               <div class="card workspace-switcher">
                 <span class="workspace-switcher-icon" aria-hidden="true"><svg class="icon" viewBox="0 0 24 24"><rect x="3" y="4" width="7" height="7" rx="1"/><rect x="14" y="4" width="7" height="7" rx="1"/><rect x="3" y="15" width="7" height="6" rx="1"/><path d="M14 18h7M17.5 14.5v7"/></svg></span>
@@ -1494,7 +1545,7 @@
                 {/if}
               </section>
             {/if}
-          {:else}
+          {:else if !errorMessage}
             <div class="card empty-state">
               <img src="./assets/phaseatlas-logo-mark.png" width="1254" height="1254" alt="" aria-hidden="true" />
               <div><h2>This repository has no workspaces</h2><p>Let a read-only runner inspect the repository and propose its first workspace with starter tasks.</p><button class="primary-button empty-state-action" type="button" onclick={() => openPlanner("repository")}>Plan first workspace</button></div>
@@ -2036,6 +2087,7 @@
 
 {#if editorOpen && selectedCheckoutId}
   <RepositoryWorkbench
+    bind:this={repositoryWorkbench}
     checkoutId={selectedCheckoutId}
     initialPath={editorInitialPath}
     theme={theme === "dark" ? "dark" : "light"}
