@@ -674,6 +674,81 @@ export interface RepositoryChatCancellationResult {
   disposition: "cancelled" | "already_terminal";
 }
 
+export interface ChatEditScope {
+  allowedPaths: string[];
+  forbiddenPaths: string[];
+}
+
+export interface ChatEditPrepareInput {
+  sessionId: string;
+  prompt: string;
+  scope: ChatEditScope;
+}
+
+export interface ChatEditSpec {
+  readonly schemaVersion: "phaseatlas.chat-edit/v1";
+  readonly editId: string;
+  readonly sessionId: string;
+  readonly checkout: AgentCheckoutIdentity;
+  readonly baseRevision: string;
+  readonly runnerId: string;
+  readonly model: string;
+  readonly prompt: string;
+  readonly scope: TaskScope;
+  readonly sandbox: "workspace-write";
+  readonly createdAt: string;
+  readonly confirmationDigest: string;
+}
+
+export interface ChatEditConfirmation {
+  editId: string;
+  repositoryId: string;
+  checkoutId: string;
+  repositoryName: string;
+  baseRevision: string;
+  runnerId: string;
+  model: string;
+  scope: TaskScope;
+  isolatedWorktree: true;
+  reviewRequired: true;
+  confirmationDigest: string;
+}
+
+export interface ChatEditStartInput {
+  editId: string;
+  confirmationDigest: string;
+}
+
+export type ChatEditDisposition = "pending_review" | "accepted" | "discarded" | "retained";
+
+export interface ChatEditResult {
+  editId: string;
+  status: "awaiting_confirmation" | "running" | "completed" | "failed" | "cancelled" | "interrupted";
+  disposition: ChatEditDisposition;
+  summary: string;
+  changedFiles: InspectedAgentChange[];
+  patch: string;
+  patchTruncated: boolean;
+  verification: Array<{ label: string; status: "passed" | "failed" | "not_run"; details: string }>;
+  blockers: string[];
+  nextAction: string;
+  runnerId: string;
+  model: string;
+  baseRevision: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface ChatEditCancellationResult {
+  editId: string;
+  disposition: "cancelled" | "already_terminal";
+}
+
+export interface ChatEditRecoveryInput {
+  editId: string;
+  decision: "resume_review" | "discard";
+}
+
 export type RepositoryChatAdapterEvent =
   | { type: "chat.turn.status"; status: "running" }
   | { type: "chat.assistant.delta"; text: string }
@@ -746,6 +821,16 @@ export type RepositoryWorkerMethod =
   | "chat.turn.events"
   | "chat.turn.cancel"
   | "chat.turn.retry"
+  | "chat.edit.prepare"
+  | "chat.edit.list"
+  | "chat.edit.start"
+  | "chat.edit.events"
+  | "chat.edit.result"
+  | "chat.edit.cancel"
+  | "chat.edit.accept"
+  | "chat.edit.discard"
+  | "chat.edit.retain"
+  | "chat.edit.recover"
   | "file.list"
   | "file.read"
   | "file.save"
@@ -762,7 +847,7 @@ export type WorkerResponse =
   | { requestId: string; error: { code: string; message: string } };
 
 export interface WorkerEvent {
-  type: "worker.ready" | "repository.changed" | "worker.warning" | "planning.event" | "task-content.event" | "agent-run.event" | "terminal.event" | "chat.turn.event" | "lease.recovery";
+  type: "worker.ready" | "repository.changed" | "worker.warning" | "planning.event" | "task-content.event" | "agent-run.event" | "terminal.event" | "chat.turn.event" | "chat.edit.event" | "lease.recovery";
   payload: Record<string, unknown>;
 }
 
@@ -804,13 +889,21 @@ export interface RepositoryChatDesktopEvent {
   event: PersistedRepositoryChatEvent;
 }
 
+export interface ChatEditDesktopEvent {
+  type: "chat.edit.event";
+  checkoutId: string;
+  editId: string;
+  event: PersistedRunEvent;
+}
+
 export type PhaseAtlasDesktopEvent =
   | RepositoryChangedEvent
   | PlanningDesktopEvent
   | TaskContentDesktopEvent
   | AgentRunDesktopEvent
   | TerminalDesktopEvent
-  | RepositoryChatDesktopEvent;
+  | RepositoryChatDesktopEvent
+  | ChatEditDesktopEvent;
 
 export interface PhaseAtlasDesktopApi {
   repositories: {
@@ -870,6 +963,16 @@ export interface PhaseAtlasDesktopApi {
     events(checkoutId: string, turnId: string, afterSequence?: number, limit?: number): Promise<RepositoryChatEventPage>;
     cancel(checkoutId: string, turnId: string): Promise<RepositoryChatCancellationResult>;
     retry(checkoutId: string, input: RepositoryChatRetryInput): Promise<{ turnId: string }>;
+    prepareEdit(checkoutId: string, input: ChatEditPrepareInput): Promise<ChatEditConfirmation>;
+    listEdits(checkoutId: string, sessionId?: string): Promise<ChatEditResult[]>;
+    startEdit(checkoutId: string, input: ChatEditStartInput): Promise<{ editId: string }>;
+    editEvents(checkoutId: string, editId: string, afterSequence?: number, limit?: number): Promise<PersistedRunEventPage>;
+    editResult(checkoutId: string, editId: string): Promise<ChatEditResult>;
+    cancelEdit(checkoutId: string, editId: string): Promise<ChatEditCancellationResult>;
+    acceptEdit(checkoutId: string, editId: string): Promise<ChatEditResult>;
+    discardEdit(checkoutId: string, editId: string): Promise<ChatEditResult>;
+    retainEdit(checkoutId: string, editId: string): Promise<ChatEditResult>;
+    recoverEdit(checkoutId: string, input: ChatEditRecoveryInput): Promise<ChatEditResult>;
   };
   events: {
     subscribe(listener: (event: PhaseAtlasDesktopEvent) => void): () => void;

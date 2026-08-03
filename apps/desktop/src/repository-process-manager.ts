@@ -14,6 +14,12 @@ import {
   type AgentRunRecoveryResult,
   type AgentRunStartInput,
   type AgentRunSummary,
+  type ChatEditCancellationResult,
+  type ChatEditConfirmation,
+  type ChatEditPrepareInput,
+  type ChatEditRecoveryInput,
+  type ChatEditResult,
+  type ChatEditStartInput,
   isWorkerEvent,
   isWorkerResponse,
   type PersistedRunEvent,
@@ -580,6 +586,50 @@ export class RepositoryProcessManager {
     return result;
   }
 
+  async prepareChatEdit(checkoutId: string, input: ChatEditPrepareInput): Promise<ChatEditConfirmation> {
+    return (await this.ensureWorker(checkoutId)).call<ChatEditConfirmation>("chat.edit.prepare", { input });
+  }
+
+  async listChatEdits(checkoutId: string, sessionId?: string): Promise<ChatEditResult[]> {
+    return (await this.ensureWorker(checkoutId)).call<ChatEditResult[]>("chat.edit.list", { ...(sessionId ? { sessionId } : {}) });
+  }
+
+  async startChatEdit(checkoutId: string, input: ChatEditStartInput): Promise<{ editId: string }> {
+    const result = await (await this.ensureWorker(checkoutId)).call<{ editId: string }>("chat.edit.start", { input });
+    this.trackRun(checkoutId, result.editId, "running");
+    return result;
+  }
+
+  async listChatEditEvents(checkoutId: string, editId: string, afterSequence = 0, limit = 200): Promise<PersistedRunEventPage> {
+    return (await this.ensureWorker(checkoutId)).call<PersistedRunEventPage>("chat.edit.events", { editId, afterSequence, limit });
+  }
+
+  async chatEditResult(checkoutId: string, editId: string): Promise<ChatEditResult> {
+    return (await this.ensureWorker(checkoutId)).call<ChatEditResult>("chat.edit.result", { editId });
+  }
+
+  async cancelChatEdit(checkoutId: string, editId: string): Promise<ChatEditCancellationResult> {
+    const result = await (await this.ensureWorker(checkoutId)).call<ChatEditCancellationResult>("chat.edit.cancel", { editId });
+    this.trackRun(checkoutId, editId, "cancelled");
+    return result;
+  }
+
+  async acceptChatEdit(checkoutId: string, editId: string): Promise<ChatEditResult> {
+    return (await this.ensureWorker(checkoutId)).call<ChatEditResult>("chat.edit.accept", { editId });
+  }
+
+  async discardChatEdit(checkoutId: string, editId: string): Promise<ChatEditResult> {
+    return (await this.ensureWorker(checkoutId)).call<ChatEditResult>("chat.edit.discard", { editId });
+  }
+
+  async retainChatEdit(checkoutId: string, editId: string): Promise<ChatEditResult> {
+    return (await this.ensureWorker(checkoutId)).call<ChatEditResult>("chat.edit.retain", { editId });
+  }
+
+  async recoverChatEdit(checkoutId: string, input: ChatEditRecoveryInput): Promise<ChatEditResult> {
+    return (await this.ensureWorker(checkoutId)).call<ChatEditResult>("chat.edit.recover", { input });
+  }
+
   close(checkoutId: string, viewId?: number): void {
     this.catalog.setVisible(checkoutId, false);
     this.terminalDemand.delete(checkoutId);
@@ -723,6 +773,13 @@ export class RepositoryProcessManager {
                 : undefined;
       this.trackChatTurn(checkoutId, event.payload.turnId, status);
       this.eventSink?.({ type: "chat.turn.event", checkoutId, turnId: event.payload.turnId, event: chatEvent });
+    } else if (event.type === "chat.edit.event" && typeof event.payload.editId === "string" && event.payload.event) {
+      const editEvent = event.payload.event as PersistedRunEvent;
+      const status = editEvent.type === "chat.edit.result" ? "completed"
+        : editEvent.type === "chat.edit.failed" ? "failed"
+          : editEvent.type === "chat.edit.running" ? "running" : undefined;
+      this.trackRun(checkoutId, event.payload.editId, status);
+      this.eventSink?.({ type: "chat.edit.event", checkoutId, editId: event.payload.editId, event: editEvent });
     } else if (event.type === "repository.changed") {
       const paths = Array.isArray(event.payload.paths)
         ? event.payload.paths.filter((item): item is string => typeof item === "string")

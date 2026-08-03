@@ -81,4 +81,15 @@ session state and durable events.
 
 - Result promotion and canonical task-state transitions remain separate reviewed workflows.
 - The packaged worker path has a placeholder layout and will be finalized with Electron packaging.
-- Repository chat is read-only. User-authorized worktree editing is a separate milestone.
+- Repository chat starts read-only. Use the Ask/Edit switch for a separately confirmed isolated edit.
+
+### Isolated chat editing
+
+Edit mode requires one or more comma-separated repository paths before it can show the confirmation.
+Verify the repository, provider, model, base revision, scope, and fixed no-network/no-dependency/no-database
+policy before confirming.
+
+The review must list Git-derived files and a patch while the canonical checkout remains unchanged. Test
+Accept only with a clean, unchanged checkout; test Discard and Retain separately. After Retain, restart the
+desktop worker and verify that Resume review or Discard is required. `Option+L` toggles Chat on macOS
+(`Alt+L` elsewhere), and the Explorer action opens the existing repository file browser.

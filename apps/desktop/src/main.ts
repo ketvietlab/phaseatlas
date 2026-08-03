@@ -179,6 +179,16 @@ function registerIpc(): void {
   ipcMain.handle("phaseatlas:chat:turns:events", (_event, checkoutId: string, turnId: string, afterSequence = 0, limit = 200) => repositories.listChatEvents(checkoutId, turnId, afterSequence, limit));
   ipcMain.handle("phaseatlas:chat:turns:cancel", (_event, checkoutId: string, turnId: string) => repositories.cancelChatTurn(checkoutId, turnId));
   ipcMain.handle("phaseatlas:chat:turns:retry", (_event, checkoutId: string, input) => repositories.retryChatTurn(checkoutId, input));
+  ipcMain.handle("phaseatlas:chat:edits:prepare", (_event, checkoutId: string, input) => repositories.prepareChatEdit(checkoutId, input));
+  ipcMain.handle("phaseatlas:chat:edits:list", (_event, checkoutId: string, sessionId?: string) => repositories.listChatEdits(checkoutId, sessionId));
+  ipcMain.handle("phaseatlas:chat:edits:start", (_event, checkoutId: string, input) => repositories.startChatEdit(checkoutId, input));
+  ipcMain.handle("phaseatlas:chat:edits:events", (_event, checkoutId: string, editId: string, afterSequence = 0, limit = 200) => repositories.listChatEditEvents(checkoutId, editId, afterSequence, limit));
+  ipcMain.handle("phaseatlas:chat:edits:result", (_event, checkoutId: string, editId: string) => repositories.chatEditResult(checkoutId, editId));
+  ipcMain.handle("phaseatlas:chat:edits:cancel", (_event, checkoutId: string, editId: string) => repositories.cancelChatEdit(checkoutId, editId));
+  ipcMain.handle("phaseatlas:chat:edits:accept", (_event, checkoutId: string, editId: string) => repositories.acceptChatEdit(checkoutId, editId));
+  ipcMain.handle("phaseatlas:chat:edits:discard", (_event, checkoutId: string, editId: string) => repositories.discardChatEdit(checkoutId, editId));
+  ipcMain.handle("phaseatlas:chat:edits:retain", (_event, checkoutId: string, editId: string) => repositories.retainChatEdit(checkoutId, editId));
+  ipcMain.handle("phaseatlas:chat:edits:recover", (_event, checkoutId: string, input) => repositories.recoverChatEdit(checkoutId, input));
 }
 
 app.whenReady().then(() => {

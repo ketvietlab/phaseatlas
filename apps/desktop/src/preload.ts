@@ -87,6 +87,16 @@ const api: PhaseAtlasDesktopApi = {
     ),
     cancel: (checkoutId, turnId) => ipcRenderer.invoke("phaseatlas:chat:turns:cancel", checkoutId, turnId),
     retry: (checkoutId, input) => ipcRenderer.invoke("phaseatlas:chat:turns:retry", checkoutId, input),
+    prepareEdit: (checkoutId, input) => ipcRenderer.invoke("phaseatlas:chat:edits:prepare", checkoutId, input),
+    listEdits: (checkoutId, sessionId) => ipcRenderer.invoke("phaseatlas:chat:edits:list", checkoutId, sessionId),
+    startEdit: (checkoutId, input) => ipcRenderer.invoke("phaseatlas:chat:edits:start", checkoutId, input),
+    editEvents: (checkoutId, editId, afterSequence = 0, limit = 200) => ipcRenderer.invoke("phaseatlas:chat:edits:events", checkoutId, editId, afterSequence, limit),
+    editResult: (checkoutId, editId) => ipcRenderer.invoke("phaseatlas:chat:edits:result", checkoutId, editId),
+    cancelEdit: (checkoutId, editId) => ipcRenderer.invoke("phaseatlas:chat:edits:cancel", checkoutId, editId),
+    acceptEdit: (checkoutId, editId) => ipcRenderer.invoke("phaseatlas:chat:edits:accept", checkoutId, editId),
+    discardEdit: (checkoutId, editId) => ipcRenderer.invoke("phaseatlas:chat:edits:discard", checkoutId, editId),
+    retainEdit: (checkoutId, editId) => ipcRenderer.invoke("phaseatlas:chat:edits:retain", checkoutId, editId),
+    recoverEdit: (checkoutId, input) => ipcRenderer.invoke("phaseatlas:chat:edits:recover", checkoutId, input),
   },
   events: {
     subscribe: (listener) => {
