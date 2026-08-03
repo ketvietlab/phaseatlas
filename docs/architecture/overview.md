@@ -69,4 +69,10 @@ PhaseAtlas distinguishes four data classes:
 3. **Operational state** — local SQLite, run events, logs, retries, and UI state.
 4. **Projection** — workspace metrics and display status derived from the previous sources.
 
+A repository without `.phaseatlas/repository.yaml` may additionally expose a read-only legacy
+candidate projection from the fixed, approved document allowlist. That projection is isolated from
+canonical task snapshots, revisions, dependency graphs, execution, and completion. A configured
+repository never combines canonical YAML with legacy candidates, and an invalid manifest never
+activates the legacy path.
+
 An agent can propose state and produce evidence. It cannot directly declare a canonical task complete.

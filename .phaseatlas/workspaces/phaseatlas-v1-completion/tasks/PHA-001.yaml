@@ -3,7 +3,7 @@ id: PHA-001
 title: Define the legacy source adapter contract
 kind: research
 phase: legacy-ingestion
-state: planned
+state: done
 priority: normal
 objective: Establish an approved, deterministic contract for converting selected legacy repository
   documents into PhaseAtlas task candidates without weakening canonical YAML authority.
