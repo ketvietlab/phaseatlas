@@ -12,6 +12,7 @@
     "build:runtime": "pnpm --filter @phaseatlas/contracts build && pnpm --filter @phaseatlas/core build && pnpm --filter @phaseatlas/repository-worker build && pnpm --filter @phaseatlas/desktop build",
     "check": "pnpm --filter @phaseatlas/contracts build && pnpm --filter @phaseatlas/core build && pnpm --filter @phaseatlas/contracts check && pnpm --filter @phaseatlas/core check && pnpm --filter @phaseatlas/repository-worker check && pnpm --filter @phaseatlas/ui check && pnpm --filter @phaseatlas/desktop check",
     "dev": "node scripts/dev.mjs",
+    "postinstall": "node scripts/fix-node-pty-permissions.mjs",
     "test": "pnpm --filter @phaseatlas/contracts build && pnpm --filter @phaseatlas/core build && pnpm --filter @phaseatlas/core test && pnpm --filter @phaseatlas/repository-worker test"
   },
   "devDependencies": {

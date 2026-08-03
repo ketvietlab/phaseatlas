@@ -1,6 +1,7 @@
 <script lang="ts">
   import { onMount, tick } from "svelte";
   import RepositoryWorkbench from "$lib/RepositoryWorkbench.svelte";
+  import TerminalPanel from "$lib/TerminalPanel.svelte";
   import TaskContentPanel from "$lib/TaskContentPanel.svelte";
   import TaskMap from "$lib/TaskMap.svelte";
   import type {
@@ -28,6 +29,7 @@
   const TASK_VIEW_STORAGE_KEY = "phaseatlas.task-view";
   const PROVIDER_SETTINGS_STORAGE_KEY = "phaseatlas.repository-provider-settings.v1";
   const SELECTED_AGENT_RUN_STORAGE_KEY = "phaseatlas.selected-agent-run.v1";
+  const TERMINAL_HEIGHT_STORAGE_KEY = "phaseatlas.terminal-height.v1";
 
   type RepositoryProviderSettings = Record<string, { runnerId: string; modelId: string }>;
   type CommandCard = {
@@ -105,6 +107,10 @@
   let executionReturnFocus: HTMLElement | null = null;
   let executionActionRequest = 0;
   let agentRunListRequest = 0;
+  let terminalOpen = false;
+  let terminalMaximized = false;
+  let terminalHeight = 300;
+  let terminalPanel: { focus(): void } | undefined;
 
   $: selectedRepository = repositories.find(
     (repository) => repository.checkoutId === selectedCheckoutId,
@@ -151,10 +157,13 @@
   $: selectedTaskRuns = selectedTask
     ? agentRuns.filter((run) => run.taskKey === canonicalTaskKey(selectedTask))
     : [];
+  $: terminalShortcutLabel = platform === "darwin" ? "⌘`" : "Ctrl+`";
   onMount(() => {
     theme = document.documentElement.dataset.theme === "dark" ? "dark" : "light";
     const savedTaskView = window.localStorage.getItem(TASK_VIEW_STORAGE_KEY);
     if (savedTaskView === "list" || savedTaskView === "map") taskView = savedTaskView;
+    const savedTerminalHeight = Number(window.localStorage.getItem(TERMINAL_HEIGHT_STORAGE_KEY));
+    if (Number.isFinite(savedTerminalHeight) && savedTerminalHeight >= 180) terminalHeight = savedTerminalHeight;
     const planningClockTimer = window.setInterval(() => {
       planningClock = Date.now();
     }, 1_000);
@@ -286,6 +295,22 @@
     } catch (error) {
       errorMessage = error instanceof Error ? error.message : "The repository workspaces could not be read.";
     }
+  }
+
+  async function toggleTerminal() {
+    if (!selectedCheckoutId) return;
+    terminalOpen = !terminalOpen;
+    if (!terminalOpen) {
+      terminalMaximized = false;
+      return;
+    }
+    await tick();
+    terminalPanel?.focus();
+  }
+
+  function updateTerminalHeight(nextHeight: number) {
+    terminalHeight = Math.round(nextHeight);
+    window.localStorage.setItem(TERMINAL_HEIGHT_STORAGE_KEY, String(terminalHeight));
   }
 
   function readRepositoryProviderSettings(): RepositoryProviderSettings {
@@ -1081,7 +1106,9 @@
       agentRuns = [];
       agentEvents = {};
       agentEventCursors = {};
+      terminalMaximized = false;
       if (repositories[0]) await selectRepository(repositories[0].checkoutId);
+      else terminalOpen = false;
     }
   }
 
@@ -1107,6 +1134,15 @@
       }
       return;
     }
+    const modifier = event.metaKey || event.ctrlKey;
+    const terminalShortcut = modifier && !event.shiftKey && !event.altKey && (
+      event.code === "Backquote" || event.key.toLowerCase() === "j"
+    );
+    if (terminalShortcut && !event.repeat && !executionOpen && !plannerOpen && !providerSettingsOpen && !editorOpen && !contentPanelTask) {
+      event.preventDefault();
+      void toggleTerminal();
+      return;
+    }
     if (event.key !== "Escape") return;
     if (executionConfirmAction) {
       executionConfirmAction = null;
@@ -1114,6 +1150,7 @@
       executionPanelElement?.focus();
     }
     else if (executionOpen) closeExecutionWorkbench();
+    else if (terminalMaximized) terminalMaximized = false;
     else if (plannerOpen) closePlanner();
     else menuOpen = false;
   }
@@ -1183,12 +1220,31 @@
   </header>
   {#if menuOpen}<button class="sidebar-backdrop" type="button" aria-label="Close menu" onclick={() => (menuOpen = false)}></button>{/if}
 
-  <main class="main" id="main-content">
+  <main
+    class:terminal-visible={terminalOpen && Boolean(selectedCheckoutId) && !terminalMaximized}
+    class="main"
+    id="main-content"
+    style={`--terminal-panel-height: ${terminalHeight}px`}
+  >
     <header class="command-bar">
       <div class="breadcrumbs">
         <span>PhaseAtlas</span><span>/</span><strong>{selectedRepository?.name || "Repositories"}</strong>
       </div>
       <div class="command-actions">
+        <button
+          class:active={terminalOpen}
+          class="terminal-toggle"
+          type="button"
+          aria-label={`${terminalOpen ? "Close" : "Open"} repository terminal`}
+          aria-pressed={terminalOpen}
+          title={`Toggle terminal (${terminalShortcutLabel})`}
+          onclick={toggleTerminal}
+          disabled={!selectedCheckoutId}
+        >
+          <svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="m5 7 4.5 5L5 17M12 17h7"/></svg>
+          <span>Terminal</span>
+          <kbd>{terminalShortcutLabel}</kbd>
+        </button>
         <span class="runtime-badge"><span class="live-indicator"></span>{platform} · local</span>
         <button class="theme-toggle" type="button" aria-label={theme === "dark" ? "Switch to light theme" : "Switch to dark theme"} aria-pressed={theme === "dark"} onclick={() => setTheme(theme === "dark" ? "light" : "dark")}>
           <span class="theme-track"><span class="theme-thumb"></span></span>
@@ -1923,6 +1979,26 @@
     onEdit={editTaskContent}
     onInitialize={(task) => initializeTaskContent([canonicalTaskKey(task)])}
   />
+{/if}
+
+{#if terminalOpen && selectedCheckoutId && selectedRepository}
+  {#key selectedCheckoutId}
+    <TerminalPanel
+      bind:this={terminalPanel}
+      checkoutId={selectedCheckoutId}
+      repositoryName={selectedRepository.name}
+      theme={theme === "dark" ? "dark" : "light"}
+      height={terminalHeight}
+      maximized={terminalMaximized}
+      shortcutLabel={terminalShortcutLabel}
+      onClose={() => {
+        terminalOpen = false;
+        terminalMaximized = false;
+      }}
+      onHeightChange={updateTerminalHeight}
+      onToggleMaximized={() => terminalMaximized = !terminalMaximized}
+    />
+  {/key}
 {/if}
 
 {#if editorOpen && selectedCheckoutId}
