@@ -1,0 +1,65 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://phaseatlas.local/schemas/agent-run-result.schema.json",
+  "title": "PhaseAtlas agent run result",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "outcome",
+    "summary",
+    "changedFiles",
+    "verification",
+    "producedEvidence",
+    "blockers",
+    "nextAction",
+    "requiresHumanReview"
+  ],
+  "properties": {
+    "outcome": { "enum": ["completed", "partial", "blocked", "failed"] },
+    "summary": { "type": "string" },
+    "changedFiles": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["path", "changeType"],
+        "properties": {
+          "path": { "type": "string" },
+          "changeType": { "enum": ["added", "modified", "deleted"] }
+        }
+      }
+    },
+    "verification": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["stepId", "status", "details"],
+        "properties": {
+          "stepId": { "type": "string" },
+          "status": { "enum": ["passed", "failed", "not_run"] },
+          "details": { "type": "string" }
+        }
+      }
+    },
+    "producedEvidence": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["type", "reference"],
+        "properties": {
+          "type": { "enum": ["diff", "test", "commit", "pull_request", "document"] },
+          "reference": { "type": "string" }
+        }
+      }
+    },
+    "blockers": { "type": "array", "items": { "type": "string" } },
+    "nextAction": { "type": "string" },
+    "requiresHumanReview": { "type": "boolean" },
+    "proposedTaskState": {
+      "enum": ["draft", "planned", "ready", "in_progress", "blocked", "in_review", "done", "deferred", "cancelled"]
+    }
+  }
+}
+

@@ -1,0 +1,51 @@
+schemaVersion: phaseatlas.task/v1
+id: PHA-002
+title: Implement deterministic legacy source adapters
+kind: code
+phase: legacy-ingestion
+state: planned
+priority: normal
+objective: Legacy repositories containing the approved source formats produce stable task candidates
+  and structured validation issues while configured repositories continue to use canonical
+  PhaseAtlas manifests unchanged.
+owners: []
+dependencies:
+  - taskKey: PHA-001
+    relation: blocks_start
+    requiredState: done
+scope:
+  allowedPaths:
+    - packages/contracts/src/index.ts
+    - packages/core/src/repository-inspector.ts
+    - packages/core/src/task-loader.ts
+    - packages/core/src/repository-inspector.test.ts
+    - docs/contracts/task-contract.md
+  forbiddenPaths: []
+  writable: true
+  allowDependencyChanges: false
+  allowDatabaseMigrations: false
+  allowExternalNetwork: false
+acceptanceCriteria:
+  - id: AC-1
+    statement: Each approved legacy format is converted into stable normalized candidates with source
+      provenance and deterministic identities.
+    verification:
+      type: human
+      reviewerRole: PhaseAtlas maintainer
+  - id: AC-2
+    statement: Missing, malformed, conflicting, or unsupported legacy sources produce structured issues
+      without crashing repository inspection.
+    verification:
+      type: human
+      reviewerRole: PhaseAtlas maintainer
+  - id: AC-3
+    statement: Configured repositories do not silently merge legacy-derived candidates into canonical
+      task snapshots.
+    verification:
+      type: human
+      reviewerRole: PhaseAtlas maintainer
+verification: []
+evidenceRequirements:
+  - type: human_review
+content:
+  path: PHA-002.md

@@ -1,0 +1,56 @@
+schemaVersion: phaseatlas.task/v1
+id: PHA-003
+title: Add durable checkout state and worker recovery
+kind: code
+phase: runtime-persistence
+state: planned
+priority: high
+objective: PhaseAtlas preserves repository catalog entries, run events, and recoverable checkout
+  state across application or worker restarts while idling workers only when no view or active run
+  requires them.
+owners: []
+dependencies: []
+scope:
+  allowedPaths:
+    - packages/contracts/src/index.ts
+    - apps/desktop/src/repository-process-manager.ts
+    - apps/desktop/src/main.ts
+    - apps/repository-worker/src/index.ts
+    - packages/core/src
+    - docs/architecture/repository-process-model.md
+    - docs/decisions/0002-storage-boundaries.md
+  forbiddenPaths: []
+  writable: true
+  allowDependencyChanges: false
+  allowDatabaseMigrations: false
+  allowExternalNetwork: false
+acceptanceCriteria:
+  - id: AC-1
+    statement: A global catalog and isolated per-checkout stores reopen with the same repository
+      identity and monotonically ordered persisted events after restart.
+    verification:
+      type: human
+      reviewerRole: PhaseAtlas maintainer
+  - id: AC-2
+    statement: Operational storage remains outside the repository and does not contain provider
+      credentials or canonical task authority.
+    verification:
+      type: human
+      reviewerRole: PhaseAtlas maintainer
+  - id: AC-3
+    statement: A worker shuts down after its idle interval only when it has no open views or active
+      runs, and reopening the checkout starts one replacement worker.
+    verification:
+      type: human
+      reviewerRole: PhaseAtlas maintainer
+  - id: AC-4
+    statement: Unexpected worker exit rejects pending requests, records interruption, and supports
+      explicit recovery without spawning duplicate checkout workers.
+    verification:
+      type: human
+      reviewerRole: PhaseAtlas maintainer
+verification: []
+evidenceRequirements:
+  - type: human_review
+content:
+  path: PHA-003.md

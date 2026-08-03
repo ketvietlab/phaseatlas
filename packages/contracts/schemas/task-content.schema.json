@@ -1,0 +1,11 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://phaseatlas.local/schemas/task-content.schema.json",
+  "title": "PhaseAtlas initialized task content",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["body"],
+  "properties": {
+    "body": { "type": "string", "minLength": 300 }
+  }
+}

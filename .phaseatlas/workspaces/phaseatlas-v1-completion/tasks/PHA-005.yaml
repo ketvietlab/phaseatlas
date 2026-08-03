@@ -1,0 +1,57 @@
+schemaVersion: phaseatlas.task/v1
+id: PHA-005
+title: Deliver provider-neutral execution adapters
+kind: code
+phase: execution-providers
+state: planned
+priority: high
+objective: Codex CLI and a second provider can run the same validated specification and emit the
+  same normalized event and result contracts without exposing credentials, raw process handles, or
+  provider-specific payloads to the renderer.
+owners: []
+dependencies:
+  - taskKey: PHA-004
+    relation: blocks_start
+    requiredState: done
+scope:
+  allowedPaths:
+    - packages/contracts/src/index.ts
+    - packages/contracts/schemas/agent-run-result.schema.json
+    - apps/repository-worker/src/runner-registry.ts
+    - apps/repository-worker/src/runner-registry.test.ts
+    - apps/repository-worker/src
+    - docs/contracts/agent-run-contract.md
+    - docs/decisions/0004-provider-neutral-planning.md
+  forbiddenPaths: []
+  writable: true
+  allowDependencyChanges: false
+  allowDatabaseMigrations: false
+  allowExternalNetwork: false
+acceptanceCriteria:
+  - id: AC-1
+    statement: Runner discovery reports execution, sandbox, streaming, structured-output, and
+      cancellation capabilities through provider-neutral descriptors.
+    verification:
+      type: human
+      reviewerRole: PhaseAtlas maintainer
+  - id: AC-2
+    statement: Codex CLI and the selected second provider translate equivalent fixture output into
+      ordered normalized agent events and schema-valid results.
+    verification:
+      type: human
+      reviewerRole: PhaseAtlas maintainer
+  - id: AC-3
+    statement: Invalid structured output, sequence regressions, and unsupported provider actions fail
+      closed with normalized failure events.
+    verification:
+      type: human
+      reviewerRole: PhaseAtlas maintainer
+  - id: AC-4
+    statement: Renderer-visible messages exclude credentials, executable paths, raw process handles, and
+      provider-only permission flags.
+    verification:
+      type: human
+      reviewerRole: PhaseAtlas maintainer
+verification: []
+evidenceRequirements:
+  - type: human_review

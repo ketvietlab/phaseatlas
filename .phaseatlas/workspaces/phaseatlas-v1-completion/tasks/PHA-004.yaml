@@ -1,0 +1,62 @@
+schemaVersion: phaseatlas.task/v1
+id: PHA-004
+title: Establish isolated execution and worktree leases
+kind: code
+phase: execution-foundation
+state: planned
+priority: critical
+objective: Validated agent run specifications execute only within their permitted checkout context,
+  with every write-capable implementation run holding one exclusive worktree lease and read-only
+  actions unable to modify repository state.
+owners: []
+dependencies:
+  - taskKey: PHA-003
+    relation: blocks_start
+    requiredState: done
+scope:
+  allowedPaths:
+    - packages/contracts/src/index.ts
+    - packages/contracts/schemas/agent-run-result.schema.json
+    - packages/core/src
+    - apps/repository-worker/src
+    - docs/contracts/agent-run-contract.md
+    - docs/architecture/repository-process-model.md
+  forbiddenPaths: []
+  writable: true
+  allowDependencyChanges: false
+  allowDatabaseMigrations: false
+  allowExternalNetwork: false
+acceptanceCriteria:
+  - id: AC-1
+    statement: Run creation snapshots and validates the canonical task revision, objective, scope,
+      criteria, verification, sandbox, and canonical checkout before scheduling.
+    verification:
+      type: human
+      reviewerRole: PhaseAtlas maintainer
+  - id: AC-2
+    statement: Every workspace-write run receives a unique leased worktree, and simultaneous write runs
+      never share a worktree.
+    verification:
+      type: human
+      reviewerRole: PhaseAtlas maintainer
+  - id: AC-3
+    statement: Read-only actions run without a writable lease and cannot modify repository files.
+    verification:
+      type: human
+      reviewerRole: PhaseAtlas maintainer
+  - id: AC-4
+    statement: Leases are released after success, failure, or cancellation while abandoned leases are
+      reported for recovery rather than silently reused.
+    verification:
+      type: human
+      reviewerRole: PhaseAtlas maintainer
+  - id: AC-5
+    statement: An agent result remains advisory and cannot directly transition a canonical task to done.
+    verification:
+      type: human
+      reviewerRole: PhaseAtlas maintainer
+verification: []
+evidenceRequirements:
+  - type: human_review
+content:
+  path: PHA-004.md

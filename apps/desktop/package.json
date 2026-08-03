@@ -1,0 +1,23 @@
+{
+  "name": "@phaseatlas/desktop",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "main": "dist/main.js",
+  "scripts": {
+    "build": "tsup",
+    "check": "tsc --noEmit",
+    "dev": "wait-on tcp:127.0.0.1:4177 && cross-env PHASEATLAS_UI_DEV_URL=http://127.0.0.1:4177 electron dist/main.js"
+  },
+  "dependencies": {
+    "@phaseatlas/contracts": "workspace:*"
+  },
+  "devDependencies": {
+    "@types/node": "^24.3.0",
+    "cross-env": "^10.0.0",
+    "electron": "43.2.0",
+    "tsup": "^8.5.1",
+    "typescript": "^6.0.3",
+    "wait-on": "^8.0.4"
+  }
+}

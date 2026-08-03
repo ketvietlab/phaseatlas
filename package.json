@@ -1,0 +1,20 @@
+{
+  "name": "phaseatlas",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "packageManager": "pnpm@11.9.0",
+  "engines": {
+    "node": ">=24.0.0"
+  },
+  "scripts": {
+    "build": "pnpm --filter @phaseatlas/contracts build && pnpm --filter @phaseatlas/core build && pnpm --filter @phaseatlas/repository-worker build && pnpm --filter @phaseatlas/ui build && pnpm --filter @phaseatlas/desktop build",
+    "build:runtime": "pnpm --filter @phaseatlas/contracts build && pnpm --filter @phaseatlas/core build && pnpm --filter @phaseatlas/repository-worker build && pnpm --filter @phaseatlas/desktop build",
+    "check": "pnpm --filter @phaseatlas/contracts build && pnpm --filter @phaseatlas/core build && pnpm --filter @phaseatlas/contracts check && pnpm --filter @phaseatlas/core check && pnpm --filter @phaseatlas/repository-worker check && pnpm --filter @phaseatlas/ui check && pnpm --filter @phaseatlas/desktop check",
+    "dev": "node scripts/dev.mjs",
+    "test": "pnpm --filter @phaseatlas/contracts build && pnpm --filter @phaseatlas/core build && pnpm --filter @phaseatlas/core test && pnpm --filter @phaseatlas/repository-worker test"
+  },
+  "devDependencies": {
+    "concurrently": "^10.0.4"
+  }
+}
