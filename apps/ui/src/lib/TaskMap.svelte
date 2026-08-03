@@ -333,7 +333,13 @@
       <div class="dependency-canvas" style:width={`${model.width}px`} style:height={`${model.height}px`}>
         <svg class="edge-layer" viewBox={`0 0 ${model.width} ${model.height}`} aria-hidden="true">
           <defs>
-            <marker id="task-map-arrow" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto" markerUnits="strokeWidth">
+            <marker class="default" id="task-map-arrow-default" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto" markerUnits="strokeWidth">
+              <path d="M0,0 L8,4 L0,8 z" />
+            </marker>
+            <marker class="blocked" id="task-map-arrow-blocked" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto" markerUnits="strokeWidth">
+              <path d="M0,0 L8,4 L0,8 z" />
+            </marker>
+            <marker class="complete" id="task-map-arrow-complete" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto" markerUnits="strokeWidth">
               <path d="M0,0 L8,4 L0,8 z" />
             </marker>
           </defs>
@@ -343,7 +349,7 @@
               class:complete={edge.complete}
               class="task-edge"
               d={edgePath(edge)}
-              marker-end="url(#task-map-arrow)"
+              marker-end={`url(#task-map-arrow-${edge.complete ? "complete" : edge.blocked ? "blocked" : "default"})`}
             />
           {/each}
         </svg>
@@ -439,7 +445,7 @@
   .map-scroll { position: relative; max-width: 100%; overflow: auto; border-bottom: 1px solid var(--border); outline: none; background-color: var(--canvas); background-image: linear-gradient(var(--border-soft) 1px, transparent 1px), linear-gradient(90deg, var(--border-soft) 1px, transparent 1px); background-size: 24px 24px; cursor: grab; overscroll-behavior: contain; scrollbar-color: var(--border) transparent; scrollbar-width: thin; touch-action: none; }
   .map-scroll:focus-visible { box-shadow: inset 0 0 0 3px color-mix(in srgb,var(--brand-300) 48%,transparent); }.map-scroll.panning { cursor: grabbing; scroll-behavior: auto; user-select: none; }
   .dependency-canvas { position: relative; min-height: 300px; margin: 0 auto; }
-  .edge-layer { position: absolute; inset: 0; width: 100%; height: 100%; pointer-events: none; }.edge-layer marker path { fill: var(--brand-400); }
+  .edge-layer { position: absolute; inset: 0; width: 100%; height: 100%; pointer-events: none; }.edge-layer marker.default path { fill: var(--brand-300); }.edge-layer marker.blocked path { fill: var(--map-blocked-dot); }.edge-layer marker.complete path { fill: var(--success-500); }
   .task-edge { fill: none; stroke: var(--brand-300); stroke-linecap: round; stroke-linejoin: round; stroke-width: 2.15; vector-effect: non-scaling-stroke; transition: opacity .16s ease, stroke .16s ease; }.task-edge.blocked { stroke: var(--map-blocked-dot); stroke-dasharray: 8 7; }.task-edge.complete { stroke: var(--success-500); }
   .task-node { position: absolute; z-index: 1; display: grid; grid-template-rows: auto minmax(28px, auto) auto 1fr; align-content: start; gap: 4px; overflow: hidden; border: 1px solid var(--border); border-radius: var(--radius); padding: 9px 10px 8px; background: color-mix(in srgb, var(--surface) 97%, transparent); color: var(--text); box-shadow: var(--shadow-card); text-align: left; transition: border-color .16s ease, box-shadow .16s ease, opacity .16s ease, transform .16s ease; backdrop-filter: blur(8px); cursor: pointer; }
   .task-node:hover { z-index: 3; border-color: var(--brand-300); box-shadow: var(--shadow-hover); transform: translateY(-1px); }.task-node.selected { z-index: 2; border-color: var(--brand-500); box-shadow: 0 0 0 2px color-mix(in srgb, var(--brand-300) 30%, transparent), var(--shadow-hover); }

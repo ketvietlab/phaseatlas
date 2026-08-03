@@ -162,6 +162,7 @@
   $: selectedTaskRuns = selectedTask
     ? agentRuns.filter((run) => run.taskKey === canonicalTaskKey(selectedTask))
     : [];
+  $: explorerShortcutLabel = platform === "darwin" ? "⌘⇧E" : "Ctrl+Shift+E";
   $: terminalShortcutLabel = platform === "darwin" ? "⌘`" : "Ctrl+`";
   onMount(() => {
     theme = document.documentElement.dataset.theme === "dark" ? "dark" : "light";
@@ -1185,6 +1186,20 @@
       if (!event.repeat) closeCurrentSurface();
       return;
     }
+    const explorerShortcut = modifier && event.shiftKey && !event.altKey && event.code === "KeyE";
+    if (explorerShortcut) {
+      event.preventDefault();
+      if (
+        !event.repeat &&
+        selectedCheckoutId &&
+        !chatOpen &&
+        !executionOpen &&
+        !plannerOpen &&
+        !providerSettingsOpen &&
+        !contentPanelTask
+      ) openRepositoryEditor();
+      return;
+    }
     const terminalShortcut = modifier && !event.shiftKey && !event.altKey && (
       event.code === "Backquote" || event.key.toLowerCase() === "j"
     );
@@ -1299,11 +1314,13 @@
           type="button"
           aria-label="Open repository explorer"
           aria-pressed={editorOpen}
+          title={`Open explorer (${explorerShortcutLabel})`}
           onclick={() => openRepositoryEditor()}
           disabled={!selectedCheckoutId}
         >
           <svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M4 5h16v14H4zM8 5v14M11 9h6M11 13h4"/></svg>
           <span>Explorer</span>
+          <kbd>{explorerShortcutLabel}</kbd>
         </button>
         <button
           class:active={terminalOpen}
