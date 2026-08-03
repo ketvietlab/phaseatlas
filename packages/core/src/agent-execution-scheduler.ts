@@ -129,9 +129,6 @@ export class AgentExecutionScheduler {
       throw signal.reason instanceof Error ? signal.reason : new Error("Agent run was cancelled.");
     }
     let adapterTerminalEvent = false;
-    const readOnlyBaseline = spec.sandbox === "read-only"
-      ? await captureGitState({ worktreePath: spec.executionDirectory, ...(this.changeGit ? { git: this.changeGit } : {}) })
-      : null;
     const emit = (event: AgentEventWithoutSequence) => {
       if (event.type === "run.failed" || (event.type === "run.status" && event.status === "cancelled")) {
         adapterTerminalEvent = true;
@@ -154,6 +151,9 @@ export class AgentExecutionScheduler {
     };
     try {
       emit({ type: "run.status", status: "running" });
+      const readOnlyBaseline = spec.sandbox === "read-only"
+        ? await captureGitState({ worktreePath: spec.executionDirectory, ...(this.changeGit ? { git: this.changeGit } : {}) })
+        : null;
       const rawResult = await adapter.execute({
         spec,
         workingDirectory: spec.executionDirectory,
