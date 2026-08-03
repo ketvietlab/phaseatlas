@@ -142,6 +142,11 @@ actionable message.
   canonical YAML remains the sole task source, while an invalid manifest remains a configuration
   error rather than activating legacy fallback.
 
+The implemented core boundary is `RepositoryInspector.legacySnapshot()`. It caches one
+`LegacyIngestionSnapshot` independently from the canonical `taskSnapshot()` and clears both caches on
+`invalidate()`. The aggregate `inspectRepository()` result exposes both projections without combining
+their candidates, issues, revisions, or graph semantics.
+
 ## Minimum task shape
 
 ```yaml
