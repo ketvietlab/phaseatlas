@@ -1238,7 +1238,7 @@
   <aside class:mobile-open={menuOpen} class="sidebar" aria-label="Repository navigation">
     <div class="brand-lockup">
       <img class="product-mark" src="./assets/phaseatlas-logo-mark.png" width="1254" height="1254" alt="" />
-      <span class="product-name"><strong>PhaseAtlas</strong><small>KétViệt workspace</small></span>
+      <span class="product-name"><strong>PhaseAtlas</strong><small>Unify AI Tool</small></span>
     </div>
 
     <div class="sidebar-section-heading">
@@ -1277,7 +1277,7 @@
   <header class="mobile-topbar">
     <div class="mobile-brand">
       <img class="product-mark" src="./assets/phaseatlas-logo-mark.png" width="1254" height="1254" alt="" />
-      <span class="product-name"><strong>PhaseAtlas</strong><small>KétViệt workspace</small></span>
+      <span class="product-name"><strong>PhaseAtlas</strong><small>Unify AI Tool</small></span>
     </div>
     <button class="icon-button" type="button" aria-label={menuOpen ? "Close menu" : "Open menu"} aria-expanded={menuOpen} onclick={() => (menuOpen = !menuOpen)}>
       <svg class="icon" viewBox="0 0 24 24" aria-hidden="true">{#if menuOpen}<path d="m6 6 12 12M18 6 6 18"/>{:else}<path d="M4 7h16M4 12h16M4 17h16"/>{/if}</svg>
