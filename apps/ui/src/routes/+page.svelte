@@ -1194,7 +1194,6 @@
       {#each repositories as repository}
         <div class:active={repository.checkoutId === selectedCheckoutId} class="repository-row">
           <button class="repository-select" type="button" onclick={() => selectRepository(repository.checkoutId)}>
-            <span class="repository-mark" aria-hidden="true">{repository.name.slice(0, 2).toUpperCase()}</span>
             <span class="repository-copy">
               <strong>{repository.name}</strong>
               <small>{repository.workspaceCount} {repository.workspaceCount === 1 ? "workspace" : "workspaces"}</small>
