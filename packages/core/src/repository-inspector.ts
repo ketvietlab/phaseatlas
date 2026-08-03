@@ -459,7 +459,23 @@ export class RepositoryInspector {
     const entries: ParsedLegacyEntry[] = [];
     const issues: ValidationIssue[] = [];
     for (const [documentRank, sourcePath] of LEGACY_SOURCE_PATHS.entries()) {
-      const absolutePath = path.join(this.root, ...sourcePath.split("/"));
+      const sourceSegments = sourcePath.split("/");
+      const absolutePath = path.join(this.root, ...sourceSegments);
+      let parentPath = this.root;
+      let unsafeParent = false;
+      for (const segment of sourceSegments.slice(0, -1)) {
+        parentPath = path.join(parentPath, segment);
+        try {
+          if ((await lstat(parentPath)).isSymbolicLink()) {
+            issues.push(legacyIssue(sourcePath, "LEGACY_SOURCE_SYMLINK", "Legacy source parent directories must not be symbolic links."));
+            unsafeParent = true;
+            break;
+          }
+        } catch {
+          break;
+        }
+      }
+      if (unsafeParent) continue;
       let metadata;
       try {
         metadata = await lstat(absolutePath);
@@ -499,6 +515,10 @@ export class RepositoryInspector {
           continue;
         }
         bytes = await handle.readFile();
+        if (bytes.byteLength > LEGACY_SOURCE_MAX_BYTES) {
+          issues.push(legacyIssue(sourcePath, "LEGACY_SOURCE_TOO_LARGE", "Legacy sources must not exceed one MiB."));
+          continue;
+        }
       } catch (error) {
         issues.push(legacyIssue(sourcePath, "LEGACY_SOURCE_UNREADABLE", `Approved legacy source ${sourcePath} could not be read: ${(error as Error).message}`));
         continue;

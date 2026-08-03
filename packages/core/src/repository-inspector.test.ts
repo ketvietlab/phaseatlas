@@ -173,6 +173,28 @@ test("fails closed for unsafe and invalid legacy source files", async (context) 
   ]);
 });
 
+test("does not follow a legacy source parent directory outside the repository", async (context) => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "phaseatlas-legacy-parent-"));
+  const outside = await mkdtemp(path.join(os.tmpdir(), "phaseatlas-legacy-outside-"));
+  context.after(async () => {
+    await rm(root, { recursive: true, force: true });
+    await rm(outside, { recursive: true, force: true });
+  });
+  await mkdir(path.join(root, ".git"));
+  await writeFile(path.join(outside, "TODO.md"), "## Core {#core}\n- [ ] [LEG-001] Outside :: Must never be read.\n");
+  await symlink(outside, path.join(root, "docs"));
+
+  const snapshot = await (await RepositoryInspector.open(root)).legacySnapshot();
+
+  assert.equal(snapshot.candidates.length, 0);
+  assert.equal(snapshot.issues.some((issue) =>
+    issue.sourcePath === "docs/TODO.md" && issue.code === "LEGACY_SOURCE_SYMLINK"
+  ), true);
+  assert.equal(snapshot.issues.some((issue) =>
+    issue.sourcePath === "docs/ROADMAP.md" && issue.code === "LEGACY_SOURCE_SYMLINK"
+  ), true);
+});
+
 test("configured repositories never inspect or merge legacy candidates", async (context) => {
   const root = await mkdtemp(path.join(os.tmpdir(), "phaseatlas-configured-authority-"));
   context.after(() => rm(root, { recursive: true, force: true }));
