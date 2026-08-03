@@ -144,6 +144,38 @@ export interface ValidationIssue {
   message: string;
   sourcePath: string;
   field?: string;
+  line?: number;
+  column?: number;
+}
+
+export type LegacySourceFormat = "markdown-checklist/v1";
+export type LegacyCompletionHint = "open" | "completed";
+
+export interface LegacySourceLocation {
+  path: string;
+  nativeId: string;
+  line: number;
+  column: 1;
+}
+
+export interface LegacyTaskCandidate {
+  candidateId: string;
+  sourceFormat: LegacySourceFormat;
+  nativeId: string;
+  title: string;
+  objective: string;
+  phaseId: string;
+  completionHint: LegacyCompletionHint;
+  provenance: {
+    primary: LegacySourceLocation;
+    identicalDuplicates: LegacySourceLocation[];
+  };
+  warnings: ValidationIssue[];
+}
+
+export interface LegacyIngestionSnapshot {
+  candidates: LegacyTaskCandidate[];
+  issues: ValidationIssue[];
 }
 
 export interface TaskGraphEdge {

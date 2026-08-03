@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, symlink, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
@@ -47,6 +47,173 @@ test("rejects directories that are not Git repositories", async (context) => {
   const root = await mkdtemp(path.join(os.tmpdir(), "phaseatlas-not-git-"));
   context.after(() => rm(root, { recursive: true, force: true }));
   await assert.rejects(RepositoryInspector.open(root), /Git repository/);
+});
+
+test("projects deterministic legacy candidates without creating canonical tasks", async (context) => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "phaseatlas-legacy-"));
+  const otherRoot = await mkdtemp(path.join(os.tmpdir(), "phaseatlas-legacy-other-"));
+  context.after(async () => {
+    await rm(root, { recursive: true, force: true });
+    await rm(otherRoot, { recursive: true, force: true });
+  });
+  await mkdir(path.join(root, ".git"));
+  await mkdir(path.join(root, "docs"));
+  await writeFile(path.join(root, "TODO.md"), [
+    "## Delivery {#delivery}",
+    "- [ ] [LEG-002]  Ship   renderer  ::  Deliver   the renderer. ",
+    "- [x] [LEG-001] Normalize café :: Preserve Unicode identity.",
+  ].join("\r\n"));
+  await writeFile(path.join(root, "docs", "TODO.md"), [
+    "## Delivery {#delivery}",
+    "- [X] [LEG-001] Normalize cafe\u0301 :: Preserve Unicode identity.",
+  ].join("\n"));
+  await mkdir(path.join(otherRoot, ".git"));
+  await mkdir(path.join(otherRoot, "docs"));
+  await writeFile(path.join(otherRoot, "docs", "TODO.md"), await readFile(path.join(root, "docs", "TODO.md")));
+  await writeFile(path.join(otherRoot, "TODO.md"), await readFile(path.join(root, "TODO.md")));
+
+  const inspector = await RepositoryInspector.open(root);
+  const repository = await inspector.describe();
+  const canonical = await inspector.taskSnapshot();
+  const first = await inspector.legacySnapshot();
+  inspector.invalidate();
+  const second = await inspector.legacySnapshot();
+  const fromOtherCheckout = await (await RepositoryInspector.open(otherRoot)).legacySnapshot();
+
+  assert.equal(repository.configuration, "legacy");
+  assert.equal(canonical.tasks.length, 0);
+  assert.deepEqual(first, second);
+  assert.deepEqual(first, fromOtherCheckout);
+  assert.deepEqual(first.candidates.map((candidate) => candidate.nativeId), ["LEG-001", "LEG-002"]);
+  assert.equal(first.candidates[0]?.candidateId, "legacy_0d54e701694c91540eebd91fc0c0c990");
+  assert.equal(first.candidates[0]?.title, "Normalize café");
+  assert.equal(first.candidates[0]?.completionHint, "completed");
+  assert.deepEqual(first.candidates[0]?.provenance, {
+    primary: { path: "TODO.md", nativeId: "LEG-001", line: 3, column: 1 },
+    identicalDuplicates: [{ path: "docs/TODO.md", nativeId: "LEG-001", line: 2, column: 1 }],
+  });
+  assert.equal(first.candidates[0]?.warnings[0]?.code, "LEGACY_DUPLICATE_IDENTICAL");
+  assert.equal(first.issues.filter((issue) => issue.code === "LEGACY_SOURCE_MISSING").length, 2);
+});
+
+test("invalidates the cached legacy projection after source changes", async (context) => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "phaseatlas-legacy-cache-"));
+  context.after(() => rm(root, { recursive: true, force: true }));
+  await mkdir(path.join(root, ".git"));
+  await writeFile(path.join(root, "TODO.md"), "## Core {#core}\n- [ ] [LEG-001] First title :: First objective.\n");
+  const inspector = await RepositoryInspector.open(root);
+
+  const first = await inspector.legacySnapshot();
+  await writeFile(path.join(root, "TODO.md"), "## Core {#core}\n- [ ] [LEG-002] Second title :: Second objective.\n");
+  assert.equal((await inspector.legacySnapshot()).candidates[0]?.nativeId, "LEG-001");
+  inspector.invalidate();
+  const refreshed = await inspector.legacySnapshot();
+
+  assert.equal(first.candidates[0]?.nativeId, "LEG-001");
+  assert.equal(refreshed.candidates[0]?.nativeId, "LEG-002");
+  assert.equal(refreshed.candidates[0]?.candidateId, "legacy_68f2eece99e5a928337079abfbbeb8bc");
+});
+
+test("excludes conflicting and malformed legacy entries with located issues", async (context) => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "phaseatlas-legacy-errors-"));
+  context.after(() => rm(root, { recursive: true, force: true }));
+  await mkdir(path.join(root, ".git"));
+  await mkdir(path.join(root, "docs"));
+  await writeFile(path.join(root, "TODO.md"), [
+    "- [ ] [ORPHAN] No phase :: Must not be accepted.",
+    "## Core {#core}",
+    "- [ ] [bad-id] Invalid identifier :: Must not be accepted.",
+    "- [ ] malformed task",
+    "- [ ] [LEG-001] Stable title :: First objective.",
+    "- [ ] [LEG-003] Valid sibling :: Keep this candidate.",
+  ].join("\n"));
+  await writeFile(path.join(root, "docs", "TODO.md"), [
+    "## Core {#core}",
+    "- [ ] [LEG-001] Stable title :: Conflicting objective.",
+  ].join("\n"));
+
+  const snapshot = await (await RepositoryInspector.open(root)).legacySnapshot();
+  const codes = new Set(snapshot.issues.map((issue) => issue.code));
+
+  assert.deepEqual(snapshot.candidates.map((candidate) => candidate.nativeId), ["LEG-003"]);
+  assert.equal(codes.has("LEGACY_TASK_OUTSIDE_PHASE"), true);
+  assert.equal(codes.has("LEGACY_TASK_ID_INVALID"), true);
+  assert.equal(codes.has("LEGACY_TASK_SYNTAX_INVALID"), true);
+  assert.equal(codes.has("LEGACY_DUPLICATE_CONFLICT"), true);
+  assert.deepEqual(snapshot.issues.find((issue) => issue.code === "LEGACY_TASK_OUTSIDE_PHASE"), {
+    severity: "error",
+    code: "LEGACY_TASK_OUTSIDE_PHASE",
+    message: "Task entries must appear below a valid phase heading.",
+    sourcePath: "TODO.md",
+    line: 1,
+    column: 1,
+  });
+});
+
+test("fails closed for unsafe and invalid legacy source files", async (context) => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "phaseatlas-legacy-files-"));
+  context.after(() => rm(root, { recursive: true, force: true }));
+  await mkdir(path.join(root, ".git"));
+  await mkdir(path.join(root, "docs"));
+  await writeFile(path.join(root, "target.md"), "## Core {#core}\n- [ ] [LEG-001] Hidden :: Symlink content.\n");
+  await symlink("target.md", path.join(root, "TODO.md"));
+  await writeFile(path.join(root, "docs", "TODO.md"), Buffer.from([0xc3, 0x28]));
+  await writeFile(path.join(root, "ROADMAP.md"), "x".repeat(1024 * 1024 + 1));
+  await writeFile(path.join(root, "docs", "ROADMAP.md"), "```ts\n- [ ] [LEG-002] Hidden :: Fence never closes.\n");
+
+  const snapshot = await (await RepositoryInspector.open(root)).legacySnapshot();
+  const codes = snapshot.issues.map((issue) => issue.code);
+
+  assert.equal(snapshot.candidates.length, 0);
+  assert.deepEqual(codes, [
+    "LEGACY_SOURCE_SYMLINK",
+    "LEGACY_SOURCE_INVALID_UTF8",
+    "LEGACY_SOURCE_TOO_LARGE",
+    "LEGACY_MARKDOWN_UNTERMINATED_FENCE",
+  ]);
+});
+
+test("configured repositories never inspect or merge legacy candidates", async (context) => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "phaseatlas-configured-authority-"));
+  context.after(() => rm(root, { recursive: true, force: true }));
+  const tasksRoot = await createConfiguredRepository(root);
+  await writeFile(path.join(tasksRoot, "PHA-001.yaml"), validTask({ id: "PHA-001" }));
+  await writeFile(path.join(tasksRoot, "PHA-002.yaml"), "schemaVersion: phaseatlas.task/v1\nid: PHA-002\n");
+  await writeFile(path.join(root, "TODO.md"), "## Core {#core}\n- [ ] [LEG-001] Legacy title :: Must stay isolated.\n");
+
+  const inspector = await RepositoryInspector.open(root);
+  const canonical = await inspector.taskSnapshot();
+  const legacy = await inspector.legacySnapshot();
+
+  assert.deepEqual(canonical.tasks.map((task) => task.key.taskId), ["PHA-001"]);
+  assert.equal(canonical.issues.some((issue) => issue.sourcePath.endsWith("PHA-002.yaml")), true);
+  assert.deepEqual(legacy, { candidates: [], issues: [] });
+});
+
+test("a present invalid manifest never falls back to legacy inspection", async (context) => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "phaseatlas-invalid-authority-"));
+  context.after(() => rm(root, { recursive: true, force: true }));
+  await mkdir(path.join(root, ".git"));
+  await mkdir(path.join(root, ".phaseatlas"));
+  await writeFile(path.join(root, ".phaseatlas", "repository.yaml"), "schemaVersion: unsupported\nid: repo-test\nname: Invalid\n");
+  await writeFile(path.join(root, "TODO.md"), "## Core {#core}\n- [ ] [LEG-001] Legacy title :: Must not become a fallback.\n");
+
+  const inspector = await RepositoryInspector.open(root);
+  await assert.rejects(inspector.legacySnapshot(), /schemaVersion must be phaseatlas.repository\/v1/);
+});
+
+test("missing manifest isolates legacy inspection from partial canonical directories", async (context) => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "phaseatlas-legacy-remnants-"));
+  context.after(() => rm(root, { recursive: true, force: true }));
+  await mkdir(path.join(root, ".git"));
+  await mkdir(path.join(root, ".phaseatlas", "workspaces", "broken"), { recursive: true });
+  await writeFile(path.join(root, ".phaseatlas", "workspaces", "broken", "workspace.yaml"), "not: a valid workspace\n");
+  await writeFile(path.join(root, "TODO.md"), "## Core {#core}\n- [ ] [LEG-001] Legacy title :: Remains inspectable.\n");
+
+  const inspector = await RepositoryInspector.open(root);
+  assert.equal((await inspector.describe()).configuration, "legacy");
+  assert.deepEqual(await inspector.listWorkspaces(), []);
+  assert.equal((await inspector.legacySnapshot()).candidates[0]?.nativeId, "LEG-001");
 });
 
 const validTask = (options: {
