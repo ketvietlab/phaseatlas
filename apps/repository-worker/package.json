@@ -5,7 +5,7 @@
   "type": "module",
   "main": "dist/index.js",
   "scripts": {
-    "build": "tsup src/index.ts --format esm --platform node --clean",
+    "build": "tsup",
     "check": "tsc --noEmit",
     "test": "tsx --test src/**/*.test.ts"
   },

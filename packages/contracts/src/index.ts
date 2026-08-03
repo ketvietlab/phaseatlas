@@ -28,6 +28,16 @@ export interface RepositorySummary {
   configuration: "configured" | "legacy";
   workspaceCount: number;
   openedAt: string;
+  runtime?: RepositoryRuntimeSummary;
+}
+
+export type RepositoryLifecycleState = "closed" | "starting" | "online" | "cooling" | "recovery_required";
+
+export interface RepositoryRuntimeSummary {
+  state: RepositoryLifecycleState;
+  recoveryRequired: boolean;
+  lastError?: string;
+  updatedAt: string;
 }
 
 export interface WorkspaceSummary {
@@ -235,6 +245,26 @@ export interface TaskContentRunSummary {
   taskKeys: string[];
 }
 
+export type PersistedRunKind = "planning" | "task_content" | "agent";
+export type PersistedRunStatus = "starting" | "running" | "completed" | "failed" | "cancelled" | "interrupted";
+
+export interface PersistedRunRecord {
+  runId: string;
+  kind: PersistedRunKind;
+  status: PersistedRunStatus;
+  taskKeys: string[];
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface PersistedRunEvent {
+  runId: string;
+  sequence: number;
+  type: string;
+  timestamp: string;
+  payload: Record<string, unknown>;
+}
+
 export type TaskContentEvent =
   | {
       type: "task-content.status";
@@ -352,6 +382,8 @@ export type RepositoryWorkerMethod =
   | "task-content.list"
   | "task-content.cancel"
   | "task-content.save"
+  | "run.list"
+  | "run.events"
   | "file.list"
   | "file.read"
   | "file.save"
@@ -421,6 +453,10 @@ export interface PhaseAtlasDesktopApi {
     start(checkoutId: string, input: PlanningStartInput): Promise<{ runId: string }>;
     cancel(checkoutId: string, runId: string): Promise<void>;
     publish(checkoutId: string, input: PlanningPublishInput): Promise<TaskSnapshot>;
+  };
+  runs: {
+    list(checkoutId: string): Promise<PersistedRunRecord[]>;
+    events(checkoutId: string, runId: string, afterSequence?: number): Promise<PersistedRunEvent[]>;
   };
   events: {
     subscribe(listener: (event: PhaseAtlasDesktopEvent) => void): () => void;

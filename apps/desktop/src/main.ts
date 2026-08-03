@@ -3,12 +3,16 @@ import path from "node:path";
 import { app, BrowserWindow, dialog, ipcMain, shell } from "electron";
 import { RepositoryProcessManager } from "./repository-process-manager.js";
 
+app.setName("PhaseAtlas");
+app.setPath("userData", path.join(app.getPath("appData"), app.name));
+
 const currentDirectory = path.dirname(fileURLToPath(import.meta.url));
 const workerEntry = process.env.PHASEATLAS_WORKER_ENTRY ||
   (app.isPackaged
     ? path.join(process.resourcesPath, "repository-worker", "index.js")
     : path.resolve(currentDirectory, "../../repository-worker/dist/index.js"));
-const repositories = new RepositoryProcessManager(workerEntry, (event) => {
+const applicationSupportRoot = path.join(app.getPath("userData"), "runtime");
+const repositories = new RepositoryProcessManager(workerEntry, applicationSupportRoot, (event) => {
   for (const window of BrowserWindow.getAllWindows()) {
     if (!window.isDestroyed()) window.webContents.send("phaseatlas:event", event);
   }
@@ -43,6 +47,8 @@ function createWindow(): BrowserWindow {
     if (!internalNavigation) event.preventDefault();
   });
   window.once("ready-to-show", () => window.show());
+  const webContentsId = window.webContents.id;
+  window.webContents.once("destroyed", () => repositories.releaseViewsForWebContents(webContentsId));
 
   if (developmentUrl) void window.loadURL(developmentUrl);
   else void window.loadFile(path.resolve(currentDirectory, "../../ui/build/index.html"));
@@ -53,10 +59,10 @@ function createWindow(): BrowserWindow {
 function registerIpc(): void {
   ipcMain.handle("phaseatlas:runtime:platform", () => process.platform);
   ipcMain.handle("phaseatlas:repositories:list", () => repositories.list());
-  ipcMain.handle("phaseatlas:repositories:refresh", (_event, checkoutId: string) => {
-    return repositories.refresh(checkoutId);
+  ipcMain.handle("phaseatlas:repositories:refresh", (event, checkoutId: string) => {
+    return repositories.refresh(checkoutId, event.sender.id);
   });
-  ipcMain.handle("phaseatlas:repositories:open", async () => {
+  ipcMain.handle("phaseatlas:repositories:open", async (event) => {
     const result = await dialog.showOpenDialog({
       title: "Open a repository in PhaseAtlas",
       buttonLabel: "Open repository",
@@ -64,10 +70,10 @@ function registerIpc(): void {
     });
     const selectedPath = result.filePaths[0];
     if (result.canceled || !selectedPath) return null;
-    return repositories.open(selectedPath);
+    return repositories.open(selectedPath, event.sender.id);
   });
-  ipcMain.handle("phaseatlas:repositories:close", (_event, checkoutId: string) => {
-    repositories.close(checkoutId);
+  ipcMain.handle("phaseatlas:repositories:close", (event, checkoutId: string) => {
+    repositories.close(checkoutId, event.sender.id);
   });
   ipcMain.handle("phaseatlas:workspaces:list", (_event, checkoutId: string) => {
     return repositories.listWorkspaces(checkoutId);
@@ -107,6 +113,12 @@ function registerIpc(): void {
   });
   ipcMain.handle("phaseatlas:planning:publish", (_event, checkoutId: string, input) => {
     return repositories.publishProposals(checkoutId, input);
+  });
+  ipcMain.handle("phaseatlas:runs:list", (_event, checkoutId: string) => {
+    return repositories.listRuns(checkoutId);
+  });
+  ipcMain.handle("phaseatlas:runs:events", (_event, checkoutId: string, runId: string, afterSequence = 0) => {
+    return repositories.listRunEvents(checkoutId, runId, afterSequence);
   });
 }
 
