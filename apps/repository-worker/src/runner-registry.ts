@@ -4,23 +4,48 @@ import os from "node:os";
 import path from "node:path";
 import { promisify } from "node:util";
 import {
+  AGENT_RUN_RESULT_SCHEMA,
   TASK_CONTENT_SCHEMA,
   TASK_PROPOSAL_SCHEMA,
+  type AgentEvent,
+  type AgentRunAction,
+  type AgentRunResult,
+  type AgentRunSpec,
+  type AgentSandbox,
   type CanonicalTask,
   type PlanningOutlineSet,
   type PlanningStartInput,
   type RunnerDescriptor,
+  type RunnerModelDescriptor,
   type TaskContentDraft,
   type TaskProposalOutline,
   type WorkspaceSummary,
 } from "@phaseatlas/contracts";
 import {
+  type AgentExecutionAdapter,
   ProposalValidationError,
+  isSafeAgentPath,
+  validateAgentRunResult,
   validatePlanningOutlineSet,
   validateTaskContent,
 } from "@phaseatlas/core";
 
 const execFileAsync = promisify(execFile);
+const EXECUTION_ACTIONS: AgentRunAction[] = ["analyze", "plan", "implement", "review"];
+const EXECUTION_SANDBOXES: AgentSandbox[] = ["read-only", "workspace-write"];
+const RUNNER_CAPABILITIES = [
+  "planning",
+  "execution",
+  "streaming",
+  "structured_output",
+  "repository_read",
+  "repository_write",
+  "cancellation",
+] as const;
+
+function executionDescriptor() {
+  return { actions: [...EXECUTION_ACTIONS], sandboxes: [...EXECUTION_SANDBOXES] };
+}
 
 export interface PlanningContext {
   repositoryRoot: string;
@@ -51,19 +76,26 @@ async function detectRunner(options: {
   provider: string;
   name: string;
   executable: string;
+  discoverModels: (executable: string) => Promise<RunnerModelDescriptor[]>;
 }): Promise<RunnerDescriptor> {
   try {
     const { stdout, stderr } = await execFileAsync(options.executable, ["--version"], {
       timeout: 3_000,
       env: process.env,
     });
+    const models = await options.discoverModels(options.executable).catch(() => []);
     return {
       id: options.id,
       provider: options.provider,
       name: options.name,
       version: `${stdout || stderr}`.trim().split("\n")[0],
       available: true,
-      capabilities: ["planning", "streaming", "structured_output", "repository_read"],
+      capabilities: [...RUNNER_CAPABILITIES],
+      models,
+      modelDiscovery: models.length
+        ? { status: "available" }
+        : { status: "unavailable", unavailableReason: `${options.name} did not return an authenticated model catalog.` },
+      execution: executionDescriptor(),
     };
   } catch (error) {
     return {
@@ -71,8 +103,11 @@ async function detectRunner(options: {
       provider: options.provider,
       name: options.name,
       available: false,
-      unavailableReason: error instanceof Error ? error.message : `${options.executable} is unavailable.`,
-      capabilities: ["planning", "streaming", "structured_output", "repository_read"],
+      unavailableReason: `${options.name} is unavailable.`,
+      capabilities: [...RUNNER_CAPABILITIES],
+      models: [],
+      modelDiscovery: { status: "unavailable", unavailableReason: `${options.name} is unavailable.` },
+      execution: executionDescriptor(),
     };
   }
 }
@@ -113,6 +148,101 @@ async function resolveCodexExecutable(): Promise<{ executable: string; version: 
   const selected = available.sort((left, right) => compareVersions(right.comparable, left.comparable))[0];
   if (!selected) throw new Error("Codex CLI is unavailable.");
   return { executable: selected.executable, version: selected.version };
+}
+
+function safeModelId(value: unknown): string | null {
+  return typeof value === "string" && /^[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}$/.test(value)
+    ? value
+    : null;
+}
+
+function safeModelLabel(value: unknown, fallback: string): string {
+  if (typeof value !== "string") return fallback;
+  const label = value.replace(/[\u0000-\u001f\u007f]/g, "").trim().slice(0, 128);
+  return label || fallback;
+}
+
+export function assertRunnerModel(descriptor: RunnerDescriptor, model?: string): void {
+  if (!model) return;
+  if (!descriptor.models.some((candidate) => candidate.id === model)) {
+    throw new Error(`The selected model is not present in the current ${descriptor.name} catalog.`);
+  }
+}
+
+export function parseCodexModelCatalog(value: string): RunnerModelDescriptor[] {
+  let catalog: unknown;
+  try {
+    catalog = JSON.parse(value) as unknown;
+  } catch {
+    return [];
+  }
+  const record = recordValue(catalog);
+  const entries = Array.isArray(record?.models) ? record.models : [];
+  const projected = entries.flatMap((entry, index) => {
+    const model = recordValue(entry);
+    const id = safeModelId(model?.slug);
+    if (!model || !id || model.visibility === "hide") return [];
+    const reasoningEntries = Array.isArray(model.supported_reasoning_levels)
+      ? model.supported_reasoning_levels
+      : [];
+    const reasoningEfforts = reasoningEntries.flatMap((level) => {
+      const effort = safeModelId(recordValue(level)?.effort);
+      return effort ? [effort] : [];
+    });
+    const priority = typeof model.priority === "number" && Number.isFinite(model.priority)
+      ? model.priority
+      : index + 1;
+    return [{
+      descriptor: {
+        id,
+        displayName: safeModelLabel(model.display_name, id),
+        isDefault: model.is_default === true || priority === 1,
+        reasoningEfforts,
+        ...(safeModelId(model.default_reasoning_level)
+          ? { defaultReasoningEffort: safeModelId(model.default_reasoning_level)! }
+          : {}),
+      } satisfies RunnerModelDescriptor,
+      priority,
+    }];
+  });
+  projected.sort((left, right) => left.priority - right.priority);
+  const firstModel = projected[0];
+  if (firstModel && !projected.some(({ descriptor }) => descriptor.isDefault)) {
+    firstModel.descriptor.isDefault = true;
+  }
+  return projected.map(({ descriptor }) => descriptor);
+}
+
+export function parseClaudeModelHelp(value: string): RunnerModelDescriptor[] {
+  const normalized = value.replace(/\s+/g, " ");
+  const match = normalized.match(/alias for the latest model \(e\.g\.\s*([^)]*)\)/i);
+  const aliases = [...(match?.[1] ?? "").matchAll(/['\"]([^'\"]+)['\"]/g)]
+    .map((candidate) => safeModelId(candidate[1]))
+    .filter((candidate): candidate is string => Boolean(candidate));
+  return [...new Set(aliases)].map((id) => ({
+    id,
+    displayName: id.charAt(0).toUpperCase() + id.slice(1),
+    isDefault: false,
+    reasoningEfforts: [],
+  }));
+}
+
+async function discoverCodexModels(executable: string): Promise<RunnerModelDescriptor[]> {
+  const { stdout } = await execFileAsync(executable, ["debug", "models"], {
+    timeout: 8_000,
+    env: process.env,
+    maxBuffer: 16 * 1024 * 1024,
+  });
+  return parseCodexModelCatalog(stdout);
+}
+
+async function discoverClaudeModels(executable: string): Promise<RunnerModelDescriptor[]> {
+  const { stdout, stderr } = await execFileAsync(executable, ["--help"], {
+    timeout: 3_000,
+    env: process.env,
+    maxBuffer: 1024 * 1024,
+  });
+  return parseClaudeModelHelp(`${stdout}\n${stderr}`);
 }
 
 function planningPrompt(context: PlanningContext): string {
@@ -217,8 +347,7 @@ export function formatCodexJsonEvent(value: unknown): string {
   if (!event || typeof event.type !== "string") return "";
 
   if (event.type === "thread.started") {
-    const threadId = typeof event.thread_id === "string" ? ` · ${event.thread_id.slice(0, 8)}` : "";
-    return `Session opened${threadId}\n`;
+    return "Session opened\n";
   }
   if (event.type === "turn.started") return "Agent is inspecting the repository…\n";
 
@@ -279,7 +408,7 @@ function validatedContent(value: unknown): TaskContentDraft {
   return validation.content;
 }
 
-function runChildProcess(options: {
+export interface ProviderProcessOptions {
   executable: string;
   args: string[];
   cwd: string;
@@ -287,7 +416,11 @@ function runChildProcess(options: {
   signal: AbortSignal;
   onStdout: (chunk: string) => void;
   onStderr?: (chunk: string) => void;
-}): Promise<{ stdout: string; stderr: string }> {
+}
+
+export type ProviderProcessRunner = (options: ProviderProcessOptions) => Promise<{ stdout: string; stderr: string }>;
+
+function runChildProcess(options: ProviderProcessOptions): Promise<{ stdout: string; stderr: string }> {
   return new Promise((resolve, reject) => {
     const child: ChildProcessWithoutNullStreams = spawn(options.executable, options.args, {
       cwd: options.cwd,
@@ -344,21 +477,402 @@ function runChildProcess(options: {
   });
 }
 
+type AgentEventWithoutSequence = AgentEvent extends infer Event
+  ? Event extends { sequence: number } ? Omit<Event, "sequence"> : never
+  : never;
+
+export interface ProviderExecutionAdapter extends AgentExecutionAdapter {
+  readonly id: string;
+  readonly supportedActions: ReadonlyArray<AgentRunAction>;
+  readonly supportedSandboxes: ReadonlyArray<AgentSandbox>;
+}
+
+function sanitizePublicText(value: string, privateValues: string[] = []): string {
+  let sanitized = value.replace(/\u001B\[[0-?]*[ -/]*[@-~]/g, "").replaceAll("\0", "");
+  for (const privateValue of [...privateValues].filter(Boolean).sort((left, right) => right.length - left.length)) {
+    sanitized = sanitized.replaceAll(privateValue, "<redacted>");
+  }
+  sanitized = sanitized
+    .replace(/\b(?:api[_-]?key|token|secret|password|authorization|cookie|home|path)\b\s*[:=]\s*[^\s]+/gi, "<credential:redacted>")
+    .replace(/\bpid\s*[:=]\s*\d+/gi, "pid=<redacted>")
+    .replace(/--permission-mode\s+[^\s]+/gi, "<permission:redacted>")
+    .replace(/--dangerously-[^\s]+(?:\s+[^\s]+)?/gi, "<permission:redacted>")
+    .replace(/(?:[A-Za-z]:[\\/]|\/)[^\s"'`]+/g, "<path>")
+    .trim();
+  return sanitized.length > 8_000 ? `${sanitized.slice(0, 8_000)}…` : sanitized;
+}
+
+function executionPrompt(spec: AgentRunSpec): string {
+  return `You are executing an immutable PhaseAtlas task specification.
+
+Honor the supplied action and sandbox. Do not broaden scope, change canonical task files, expose
+credentials, or claim authority to complete the task. Paths in the result must be repository-relative.
+Return only a result matching the supplied JSON schema. proposedTaskState is advisory but required.
+
+Task specification:
+${JSON.stringify({
+    taskKey: spec.taskKey,
+    taskRevision: spec.taskRevision,
+    action: spec.action,
+    objective: spec.objective,
+    content: spec.content?.body,
+    contextDocuments: spec.contextDocuments,
+    scope: spec.scope,
+    acceptanceCriteria: spec.acceptanceCriteria,
+    verification: spec.verification,
+    sandbox: spec.sandbox,
+  }, null, 2)}`;
+}
+
+function safeChangedPath(value: unknown): string | null {
+  if (typeof value !== "string") return null;
+  const normalized = value.replaceAll("\\", "/");
+  return isSafeAgentPath(normalized) ? normalized : null;
+}
+
+function failureMessage(error: unknown, privateValues: string[]): string {
+  const message = error instanceof Error ? error.message : "Provider execution failed.";
+  return sanitizePublicText(message, privateValues) || "Provider execution failed.";
+}
+
+function validatedPublicResult(value: unknown, privateValues: string[]): AgentRunResult {
+  const result = validateAgentRunResult(value);
+  const publicText = (text: string) => sanitizePublicText(text, privateValues) || "<redacted>";
+  return {
+    ...result,
+    summary: publicText(result.summary),
+    verification: result.verification.map((step) => ({
+      ...step,
+      stepId: publicText(step.stepId),
+      details: publicText(step.details),
+    })),
+    producedEvidence: result.producedEvidence.map((evidence) => ({
+      ...evidence,
+      reference: publicText(evidence.reference),
+    })),
+    blockers: result.blockers.map(publicText),
+    nextAction: publicText(result.nextAction),
+  };
+}
+
+class CodexExecutionAdapter implements ProviderExecutionAdapter {
+  readonly id = "codex-cli";
+  readonly supportedActions = EXECUTION_ACTIONS;
+  readonly supportedSandboxes = EXECUTION_SANDBOXES;
+
+  constructor(
+    private readonly processRunner: ProviderProcessRunner,
+    private readonly executableResolver: () => Promise<{ executable: string; version: string }>,
+  ) {}
+
+  async execute(context: {
+    spec: AgentRunSpec;
+    workingDirectory: string;
+    signal: AbortSignal;
+    emit(event: AgentEventWithoutSequence): void;
+  }): Promise<AgentRunResult> {
+    let executable = "codex";
+    let emittedTerminal = false;
+    try {
+      const resolved = await this.executableResolver();
+      executable = resolved.executable;
+      return await this.executeValidated(context, executable);
+    } catch (error) {
+      if (!emittedTerminal) {
+        context.emit(context.signal.aborted
+          ? { type: "run.status", status: "cancelled" }
+          : { type: "run.failed", message: failureMessage(error, [executable, context.workingDirectory]) });
+        emittedTerminal = true;
+      }
+      throw new Error(context.signal.aborted
+        ? "Agent execution was cancelled."
+        : failureMessage(error, [executable, context.workingDirectory]));
+    }
+  }
+
+  private async executeValidated(
+    context: {
+      spec: AgentRunSpec;
+      workingDirectory: string;
+      signal: AbortSignal;
+      emit(event: AgentEventWithoutSequence): void;
+    },
+    executable: string,
+  ): Promise<AgentRunResult> {
+    const temporaryDirectory = await mkdtemp(path.join(os.tmpdir(), "phaseatlas-codex-run-"));
+    const schemaPath = path.join(temporaryDirectory, "result.schema.json");
+    const outputPath = path.join(temporaryDirectory, "result.json");
+    await writeFile(schemaPath, JSON.stringify(AGENT_RUN_RESULT_SCHEMA), "utf8");
+    const args = [
+      "exec",
+      "--sandbox", context.spec.sandbox,
+      "--ephemeral",
+      "--color", "never",
+      "--json",
+      "--output-schema", schemaPath,
+      "--output-last-message", outputPath,
+      "--cd", context.workingDirectory,
+      "-",
+    ];
+    let lineBuffer = "";
+    let providerFailure = "";
+    let lastSummary = "";
+    let commandCounter = 0;
+    const commandIds = new Map<string, string>();
+    const startedCommands = new Set<string>();
+    const commandId = (item: Record<string, unknown>) => {
+      const providerId = typeof item.id === "string" ? item.id : `anonymous-${commandCounter + 1}`;
+      const existing = commandIds.get(providerId);
+      if (existing) return existing;
+      const normalized = `command-${++commandCounter}`;
+      commandIds.set(providerId, normalized);
+      return normalized;
+    };
+    const consumeLine = (line: string) => {
+      if (!line.trim() || context.signal.aborted) return;
+      let event: Record<string, unknown>;
+      try {
+        const parsed = JSON.parse(line) as unknown;
+        const record = recordValue(parsed);
+        if (!record) return;
+        event = record;
+      } catch {
+        return;
+      }
+      const eventType = typeof event.type === "string" ? event.type : "";
+      if (["turn.failed", "error"].includes(eventType)) {
+        const error = recordValue(event.error);
+        providerFailure = sanitizePublicText(
+          typeof event.message === "string" ? event.message : typeof error?.message === "string" ? error.message : "Codex reported a failure.",
+          [executable, context.workingDirectory],
+        );
+        return;
+      }
+      if (eventType === "turn.completed") {
+        context.emit({ type: "turn.completed", summary: lastSummary || "Provider turn completed." });
+        return;
+      }
+      if (!["item.started", "item.updated", "item.completed"].includes(eventType)) return;
+      const item = recordValue(event.item);
+      if (!item || typeof item.type !== "string") return;
+      if (["reasoning", "agent_message"].includes(item.type) && typeof item.text === "string" && eventType === "item.completed") {
+        const text = sanitizePublicText(item.text, [executable, context.workingDirectory]);
+        if (text) {
+          lastSummary = text;
+          context.emit({ type: "agent.delta", text });
+        }
+      } else if (item.type === "command_execution") {
+        const id = commandId(item);
+        const command = sanitizePublicText(typeof item.command === "string" ? item.command : "repository command", [executable, context.workingDirectory]);
+        if (eventType === "item.started") {
+          startedCommands.add(id);
+          context.emit({ type: "command.started", commandId: id, command });
+        }
+        if (eventType === "item.completed") {
+          const output = sanitizePublicText(typeof item.aggregated_output === "string" ? item.aggregated_output : "", [executable, context.workingDirectory]);
+          if (!startedCommands.has(id)) {
+            startedCommands.add(id);
+            context.emit({ type: "command.started", commandId: id, command });
+          }
+          if (output) context.emit({ type: "command.output", commandId: id, text: output });
+          context.emit({ type: "command.completed", commandId: id, exitCode: Number.isInteger(item.exit_code) ? Number(item.exit_code) : 0 });
+        }
+      } else if (item.type === "file_change") {
+        const changes = Array.isArray(item.changes) ? item.changes : [item];
+        for (const change of changes) {
+          const record = recordValue(change);
+          const changedPath = safeChangedPath(record?.path);
+          if (changedPath) context.emit({ type: "file.changed", path: changedPath });
+        }
+      }
+    };
+    try {
+      await this.processRunner({
+        executable,
+        args,
+        cwd: context.workingDirectory,
+        stdin: executionPrompt(context.spec),
+        signal: context.signal,
+        onStdout: (chunk) => {
+          if (context.signal.aborted) return;
+          lineBuffer += chunk;
+          const lines = lineBuffer.split("\n");
+          lineBuffer = lines.pop() ?? "";
+          lines.forEach(consumeLine);
+        },
+      });
+      consumeLine(lineBuffer);
+      if (providerFailure) throw new Error(providerFailure);
+      return validatedPublicResult(
+        parseJsonText(await readFile(outputPath, "utf8")),
+        [executable, context.workingDirectory],
+      );
+    } finally {
+      await rm(temporaryDirectory, { recursive: true, force: true });
+    }
+  }
+}
+
+class ClaudeExecutionAdapter implements ProviderExecutionAdapter {
+  readonly id = "claude-code";
+  readonly supportedActions = EXECUTION_ACTIONS;
+  readonly supportedSandboxes = EXECUTION_SANDBOXES;
+
+  constructor(private readonly processRunner: ProviderProcessRunner) {}
+
+  async execute(context: {
+    spec: AgentRunSpec;
+    workingDirectory: string;
+    signal: AbortSignal;
+    emit(event: AgentEventWithoutSequence): void;
+  }): Promise<AgentRunResult> {
+    const executable = process.env.PHASEATLAS_CLAUDE_BIN || "claude";
+    try {
+      const args = [
+        "--print",
+        "--output-format", "stream-json",
+        "--include-partial-messages",
+        "--json-schema", JSON.stringify(AGENT_RUN_RESULT_SCHEMA),
+        "--permission-mode", context.spec.sandbox === "read-only" ? "plan" : "acceptEdits",
+        "--tools", context.spec.sandbox === "read-only" ? "Read,Glob,Grep" : "Read,Glob,Grep,Edit,Write,Bash",
+        "--no-session-persistence",
+        "--", executionPrompt(context.spec),
+      ];
+      let lineBuffer = "";
+      let structuredOutput: unknown;
+      let resultText = "";
+      let providerFailure = "";
+      let lastSummary = "";
+      let commandCounter = 0;
+      const commandIds = new Map<string, string>();
+      const normalizedCommandId = (providerId: string) => {
+        const existing = commandIds.get(providerId);
+        if (existing) return existing;
+        const id = `command-${++commandCounter}`;
+        commandIds.set(providerId, id);
+        return id;
+      };
+      const consumeLine = (line: string) => {
+        if (!line.trim() || context.signal.aborted) return;
+        let event: Record<string, unknown>;
+        try {
+          const record = recordValue(JSON.parse(line) as unknown);
+          if (!record) return;
+          event = record;
+        } catch {
+          return;
+        }
+        if (event.type === "stream_event") {
+          const streamEvent = recordValue(event.event);
+          const delta = recordValue(streamEvent?.delta);
+          if (streamEvent?.type === "content_block_delta" && typeof delta?.text === "string") {
+            const text = sanitizePublicText(delta.text, [executable, context.workingDirectory]);
+            if (text) {
+              lastSummary = text;
+              context.emit({ type: "agent.delta", text });
+            }
+          }
+          return;
+        }
+        if (event.type === "assistant") {
+          const message = recordValue(event.message);
+          const content = Array.isArray(message?.content) ? message.content : [];
+          for (const blockValue of content) {
+            const block = recordValue(blockValue);
+            if (block?.type !== "tool_use" || typeof block.id !== "string") continue;
+            const input = recordValue(block.input);
+            if (block.name === "Bash") {
+              const command = sanitizePublicText(typeof input?.command === "string" ? input.command : "repository command", [executable, context.workingDirectory]);
+              context.emit({ type: "command.started", commandId: normalizedCommandId(block.id), command });
+            }
+            if (["Edit", "Write"].includes(String(block.name))) {
+              const changedPath = safeChangedPath(input?.file_path);
+              if (changedPath) context.emit({ type: "file.changed", path: changedPath });
+            }
+          }
+          return;
+        }
+        if (event.type === "user") {
+          const message = recordValue(event.message);
+          const content = Array.isArray(message?.content) ? message.content : [];
+          for (const blockValue of content) {
+            const block = recordValue(blockValue);
+            if (block?.type !== "tool_result" || typeof block.tool_use_id !== "string") continue;
+            const id = normalizedCommandId(block.tool_use_id);
+            const output = sanitizePublicText(typeof block.content === "string" ? block.content : "", [executable, context.workingDirectory]);
+            if (output) context.emit({ type: "command.output", commandId: id, text: output });
+            context.emit({ type: "command.completed", commandId: id, exitCode: block.is_error === true ? 1 : 0 });
+          }
+          return;
+        }
+        if (event.type === "file_changed") {
+          const changedPath = safeChangedPath(event.path);
+          if (changedPath) context.emit({ type: "file.changed", path: changedPath });
+          return;
+        }
+        if (event.type === "result") {
+          structuredOutput = event.structured_output;
+          if (typeof event.result === "string") resultText = event.result;
+          if (event.is_error === true) providerFailure = sanitizePublicText(resultText || "Claude reported a failure.", [executable, context.workingDirectory]);
+          context.emit({ type: "turn.completed", summary: lastSummary || "Provider turn completed." });
+        }
+      };
+      await this.processRunner({
+        executable,
+        args,
+        cwd: context.workingDirectory,
+        signal: context.signal,
+        onStdout: (chunk) => {
+          if (context.signal.aborted) return;
+          lineBuffer += chunk;
+          const lines = lineBuffer.split("\n");
+          lineBuffer = lines.pop() ?? "";
+          lines.forEach(consumeLine);
+        },
+      });
+      consumeLine(lineBuffer);
+      if (providerFailure) throw new Error(providerFailure);
+      return validatedPublicResult(
+        structuredOutput ?? parseJsonText(resultText),
+        [executable, context.workingDirectory],
+      );
+    } catch (error) {
+      context.emit(context.signal.aborted
+        ? { type: "run.status", status: "cancelled" }
+        : { type: "run.failed", message: failureMessage(error, [executable, context.workingDirectory]) });
+      throw new Error(context.signal.aborted
+        ? "Agent execution was cancelled."
+        : failureMessage(error, [executable, context.workingDirectory]));
+    }
+  }
+}
+
 class CodexPlanningAdapter implements PlanningRunnerAdapter {
   readonly id = "codex-cli";
   private executable = "codex";
 
+  constructor(
+    private readonly executableResolver: () => Promise<{ executable: string; version: string }> = resolveCodexExecutable,
+    private readonly modelDiscovery: (executable: string) => Promise<RunnerModelDescriptor[]> = discoverCodexModels,
+  ) {}
+
   async describe(): Promise<RunnerDescriptor> {
     try {
-      const resolved = await resolveCodexExecutable();
+      const resolved = await this.executableResolver();
       this.executable = resolved.executable;
+      const models = await this.modelDiscovery(this.executable).catch(() => []);
       return {
         id: this.id,
         provider: "openai",
         name: "Codex CLI",
         version: resolved.version,
         available: true,
-        capabilities: ["planning", "streaming", "structured_output", "repository_read"],
+        capabilities: [...RUNNER_CAPABILITIES],
+        models,
+        modelDiscovery: models.length
+          ? { status: "available" }
+          : { status: "unavailable", unavailableReason: "Codex CLI did not return an authenticated model catalog." },
+        execution: executionDescriptor(),
       };
     } catch (error) {
       return {
@@ -366,8 +880,11 @@ class CodexPlanningAdapter implements PlanningRunnerAdapter {
         provider: "openai",
         name: "Codex CLI",
         available: false,
-        unavailableReason: error instanceof Error ? error.message : "Codex CLI is unavailable.",
-        capabilities: ["planning", "streaming", "structured_output", "repository_read"],
+        unavailableReason: "Codex CLI is unavailable.",
+        capabilities: [...RUNNER_CAPABILITIES],
+        models: [],
+        modelDiscovery: { status: "unavailable", unavailableReason: "Codex CLI is unavailable." },
+        execution: executionDescriptor(),
       };
     }
   }
@@ -380,7 +897,7 @@ class CodexPlanningAdapter implements PlanningRunnerAdapter {
     schema: unknown,
     temporaryPrefix: string,
   ): Promise<unknown> {
-    const resolved = await resolveCodexExecutable();
+    const resolved = await this.executableResolver();
     this.executable = resolved.executable;
     const temporaryDirectory = await mkdtemp(path.join(os.tmpdir(), temporaryPrefix));
     const schemaPath = path.join(temporaryDirectory, "output.schema.json");
@@ -402,10 +919,14 @@ class CodexPlanningAdapter implements PlanningRunnerAdapter {
     const consumeLine = (line: string): void => {
       if (!line.trim()) return;
       try {
-        const displayText = formatCodexJsonEvent(JSON.parse(line) as unknown);
-        if (displayText) onDelta(displayText);
+        const displayText = sanitizePublicText(
+          formatCodexJsonEvent(JSON.parse(line) as unknown),
+          [this.executable, context.repositoryRoot],
+        );
+        if (displayText) onDelta(`${displayText}\n`);
       } catch {
-        onDelta(`${line}\n`);
+        const displayText = sanitizePublicText(line, [this.executable, context.repositoryRoot]);
+        if (displayText) onDelta(`${displayText}\n`);
       }
     };
     try {
@@ -421,7 +942,10 @@ class CodexPlanningAdapter implements PlanningRunnerAdapter {
           lineBuffer = lines.pop() ?? "";
           lines.forEach(consumeLine);
         },
-        onStderr: onDelta,
+        onStderr: (chunk) => {
+          const displayText = sanitizePublicText(chunk, [this.executable, context.repositoryRoot]);
+          if (displayText) onDelta(`${displayText}\n`);
+        },
       });
       consumeLine(lineBuffer);
       return parseJsonText(await readFile(outputPath, "utf8"));
@@ -462,9 +986,16 @@ class CodexPlanningAdapter implements PlanningRunnerAdapter {
 
 class ClaudePlanningAdapter implements PlanningRunnerAdapter {
   readonly id = "claude-code";
+  private readonly executable = process.env.PHASEATLAS_CLAUDE_BIN || "claude";
 
   describe(): Promise<RunnerDescriptor> {
-    return detectRunner({ id: this.id, provider: "anthropic", name: "Claude Code", executable: "claude" });
+    return detectRunner({
+      id: this.id,
+      provider: "anthropic",
+      name: "Claude Code",
+      executable: this.executable,
+      discoverModels: discoverClaudeModels,
+    });
   }
 
   private async executeStructured(
@@ -498,7 +1029,10 @@ class ClaudePlanningAdapter implements PlanningRunnerAdapter {
           const delta = streamEvent.delta;
           if (streamEvent.type === "content_block_delta" && typeof delta === "object" && delta) {
             const text = (delta as Record<string, unknown>).text;
-            if (typeof text === "string") onDelta(text);
+            if (typeof text === "string") {
+              const displayText = sanitizePublicText(text, [this.executable, context.repositoryRoot]);
+              if (displayText) onDelta(displayText);
+            }
           }
         }
         if (event.type === "result") {
@@ -506,12 +1040,13 @@ class ClaudePlanningAdapter implements PlanningRunnerAdapter {
           if (typeof event.result === "string") resultText = event.result;
         }
       } catch {
-        onDelta(line);
+        const displayText = sanitizePublicText(line, [this.executable, context.repositoryRoot]);
+        if (displayText) onDelta(displayText);
       }
     };
 
     await runChildProcess({
-      executable: "claude",
+      executable: this.executable,
       args,
       cwd: context.repositoryRoot,
       signal,
@@ -521,7 +1056,10 @@ class ClaudePlanningAdapter implements PlanningRunnerAdapter {
         lineBuffer = lines.pop() ?? "";
         lines.forEach(consumeLine);
       },
-      onStderr: onDelta,
+      onStderr: (chunk) => {
+        const displayText = sanitizePublicText(chunk, [this.executable, context.repositoryRoot]);
+        if (displayText) onDelta(displayText);
+      },
     });
     consumeLine(lineBuffer);
     return structuredOutput ?? parseJsonText(resultText);
@@ -556,10 +1094,25 @@ class ClaudePlanningAdapter implements PlanningRunnerAdapter {
 }
 
 export class RunnerRegistry {
-  private readonly adapters: PlanningRunnerAdapter[] = [
-    new CodexPlanningAdapter(),
-    new ClaudePlanningAdapter(),
-  ];
+  private readonly adapters: PlanningRunnerAdapter[];
+  private readonly executionAdapters: ProviderExecutionAdapter[];
+
+  constructor(options: {
+    processRunner?: ProviderProcessRunner;
+    codexExecutableResolver?: () => Promise<{ executable: string; version: string }>;
+    codexModelDiscovery?: (executable: string) => Promise<RunnerModelDescriptor[]>;
+  } = {}) {
+    const processRunner = options.processRunner ?? runChildProcess;
+    const codexExecutableResolver = options.codexExecutableResolver ?? resolveCodexExecutable;
+    this.adapters = [
+      new CodexPlanningAdapter(codexExecutableResolver, options.codexModelDiscovery ?? discoverCodexModels),
+      new ClaudePlanningAdapter(),
+    ];
+    this.executionAdapters = [
+      new CodexExecutionAdapter(processRunner, codexExecutableResolver),
+      new ClaudeExecutionAdapter(processRunner),
+    ];
+  }
 
   list(): Promise<RunnerDescriptor[]> {
     return Promise.all(this.adapters.map((adapter) => adapter.describe()));
@@ -568,6 +1121,18 @@ export class RunnerRegistry {
   get(runnerId: string): PlanningRunnerAdapter {
     const adapter = this.adapters.find((candidate) => candidate.id === runnerId);
     if (!adapter) throw new Error(`Runner ${runnerId} is not registered.`);
+    return adapter;
+  }
+
+  getExecution(runnerId: string, action: AgentRunAction, sandbox: AgentSandbox): ProviderExecutionAdapter {
+    const adapter = this.executionAdapters.find((candidate) => candidate.id === runnerId);
+    if (!adapter) throw new Error(`Runner ${runnerId} does not support execution.`);
+    if (!adapter.supportedActions.includes(action)) {
+      throw new Error(`Runner ${runnerId} does not support ${action}.`);
+    }
+    if (!adapter.supportedSandboxes.includes(sandbox)) {
+      throw new Error(`Runner ${runnerId} cannot honor ${sandbox}.`);
+    }
     return adapter;
   }
 }

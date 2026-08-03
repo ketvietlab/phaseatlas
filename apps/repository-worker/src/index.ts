@@ -6,24 +6,33 @@ import type {
   PlanningPublishInput,
   PlanningStartInput,
   PlanningTarget,
+  PersistedRunStatus,
+  AgentRunCreateInput,
+  AgentRunAction,
+  AgentSandbox,
   TaskContentEvent,
   TaskContentRunStatus,
   TaskContentRunSummary,
   TaskContentStartInput,
   TaskProposalOutline,
+  TerminalCreateInput,
   WorkerEvent,
   WorkerRequest,
   WorkerResponse,
 } from "@phaseatlas/contracts";
 import {
+  AgentExecutionScheduler,
+  CheckoutOperationalStore,
   RepositoryInspector,
   listRepositoryFiles,
   readRepositoryFile,
   saveRepositoryFile,
   writeTaskContent,
+  WorktreeLeaseManager,
 } from "@phaseatlas/core";
 import { watch, type FSWatcher } from "chokidar";
-import { RunnerRegistry } from "./runner-registry.js";
+import { assertRunnerModel, RunnerRegistry } from "./runner-registry.js";
+import { TerminalSessionManager } from "./terminal-session-manager.js";
 
 interface ElectronParentPort {
   on(event: "message", listener: (event: { data: unknown }) => void): void;
@@ -32,6 +41,7 @@ interface ElectronParentPort {
 
 const utilityParentPort = (process as typeof process & { parentPort?: ElectronParentPort }).parentPort;
 const repositoryRoot = process.env.PHASEATLAS_REPO_ROOT;
+const checkoutStorePath = process.env.PHASEATLAS_CHECKOUT_STORE_PATH;
 
 if (!utilityParentPort) {
   throw new Error("Repository worker must be launched as an Electron utility process.");
@@ -39,9 +49,25 @@ if (!utilityParentPort) {
 if (!repositoryRoot) {
   throw new Error("PHASEATLAS_REPO_ROOT is required.");
 }
+if (!checkoutStorePath) {
+  throw new Error("PHASEATLAS_CHECKOUT_STORE_PATH is required.");
+}
 const canonicalRepositoryRoot = repositoryRoot;
 
 const inspector = await RepositoryInspector.open(canonicalRepositoryRoot);
+const initialRepository = await inspector.describe();
+const resolvedCheckoutStorePath = path.resolve(checkoutStorePath);
+if (
+  path.basename(resolvedCheckoutStorePath) !== "operations.sqlite" ||
+  path.basename(path.dirname(resolvedCheckoutStorePath)) !== initialRepository.checkoutId
+) {
+  throw new Error("Checkout operational store path does not match the worker checkout identity.");
+}
+const operationalStore = new CheckoutOperationalStore(resolvedCheckoutStorePath, initialRepository.checkoutId);
+operationalStore.reconcileInterruptedRuns();
+const leaseManager = new WorktreeLeaseManager(canonicalRepositoryRoot, initialRepository.checkoutId, operationalStore);
+const executionScheduler = new AgentExecutionScheduler(inspector, operationalStore, leaseManager);
+const abandonedLeases = await leaseManager.reconcileAbandoned();
 const runners = new RunnerRegistry();
 const parentPort: ElectronParentPort = utilityParentPort;
 const activePlanningRuns = new Map<string, AbortController>();
@@ -50,6 +76,9 @@ const activeTaskContentRuns = new Map<string, {
   status: TaskContentRunStatus;
   taskKeys: string[];
 }>();
+const terminalSessions = new TerminalSessionManager(canonicalRepositoryRoot, (event) => {
+  send({ type: "terminal.event", payload: { event } });
+});
 
 async function mapConcurrent<Input, Output>(
   items: Input[],
@@ -79,6 +108,19 @@ function requestParams(request: WorkerRequest): Record<string, unknown> {
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return Boolean(value && typeof value === "object" && !Array.isArray(value));
+}
+
+function terminalCreateInput(value: unknown): Partial<TerminalCreateInput> {
+  if (value === undefined) return {};
+  if (!isRecord(value)) throw new Error("Terminal create input must be an object.");
+  const allowedFields = new Set(["cols", "rows"]);
+  if (Object.keys(value).some((field) => !allowedFields.has(field))) {
+    throw new Error("Terminal create input contains unsupported fields.");
+  }
+  return {
+    ...(value.cols !== undefined ? { cols: value.cols as number } : {}),
+    ...(value.rows !== undefined ? { rows: value.rows as number } : {}),
+  };
 }
 
 function planningInput(value: unknown): PlanningStartInput {
@@ -114,17 +156,65 @@ function planningInput(value: unknown): PlanningStartInput {
   };
 }
 
+function agentRunInput(value: unknown): AgentRunCreateInput {
+  if (!isRecord(value)) throw new Error("Agent run input is required.");
+  const allowedFields = new Set(["taskKey", "expectedTaskRevision", "expectedCheckoutId", "action", "requestedSandbox"]);
+  if (Object.keys(value).some((field) => !allowedFields.has(field))) {
+    throw new Error("Agent run input contains unsupported fields.");
+  }
+  if (typeof value.taskKey !== "string" || !value.taskKey.trim()) throw new Error("taskKey is required.");
+  const actions = new Set<AgentRunAction>(["analyze", "plan", "implement", "review"]);
+  if (!actions.has(value.action as AgentRunAction)) throw new Error("action is invalid.");
+  if (value.expectedTaskRevision !== undefined && typeof value.expectedTaskRevision !== "string") {
+    throw new Error("expectedTaskRevision must be a string.");
+  }
+  if (value.expectedCheckoutId !== undefined && typeof value.expectedCheckoutId !== "string") {
+    throw new Error("expectedCheckoutId must be a string.");
+  }
+  const sandboxes = new Set<AgentSandbox>(["read-only", "workspace-write"]);
+  if (value.requestedSandbox !== undefined && !sandboxes.has(value.requestedSandbox as AgentSandbox)) {
+    throw new Error("requestedSandbox is invalid.");
+  }
+  return {
+    taskKey: value.taskKey.trim(),
+    action: value.action as AgentRunAction,
+    ...(typeof value.expectedTaskRevision === "string" ? { expectedTaskRevision: value.expectedTaskRevision } : {}),
+    ...(typeof value.expectedCheckoutId === "string" ? { expectedCheckoutId: value.expectedCheckoutId } : {}),
+    ...(value.requestedSandbox ? { requestedSandbox: value.requestedSandbox as AgentSandbox } : {}),
+  };
+}
+
+function durableStatus(value: unknown): PersistedRunStatus | undefined {
+  return ["starting", "running", "completed", "failed", "cancelled", "interrupted"].includes(String(value))
+    ? value as PersistedRunStatus
+    : undefined;
+}
+
+function persistEvent<Event extends PlanningEvent | TaskContentEvent>(event: Event): Event {
+  const status = "status" in event ? durableStatus(event.status) : undefined;
+  const { sequence: _sourceSequence, ...payload } = event;
+  const persisted = operationalStore.appendEvent({
+    runId: event.runId,
+    type: event.type,
+    timestamp: event.timestamp,
+    payload: payload as unknown as Record<string, unknown>,
+    ...(status ? { status } : {}),
+  });
+  return { ...event, sequence: persisted.sequence };
+}
+
 function emitPlanningEvent(event: PlanningEvent): void {
-  send({ type: "planning.event", payload: { event } });
+  send({ type: "planning.event", payload: { event: persistEvent(event) } });
 }
 
 function emitTaskContentEvent(event: TaskContentEvent): void {
-  send({ type: "task-content.event", payload: { event } });
+  send({ type: "task-content.event", payload: { event: persistEvent(event) } });
 }
 
 function startPlanning(input: PlanningStartInput): { runId: string } {
   const runId = randomUUID();
   const controller = new AbortController();
+  operationalStore.recordRun({ runId, kind: "planning", status: "starting" });
   activePlanningRuns.set(runId, controller);
   let sequence = 0;
   let deltaBuffer = "";
@@ -198,6 +288,7 @@ function startPlanning(input: PlanningStartInput): { runId: string } {
         queueDelta(`PhaseAtlas · Checking runner · ${input.runnerId}\n`);
         const descriptor = await runner.describe();
         if (!descriptor.available) throw new Error(descriptor.unavailableReason || `${descriptor.name} is unavailable.`);
+        assertRunnerModel(descriptor, input.model);
 
         status("running");
         heartbeatStage = `${descriptor.name} active`;
@@ -294,6 +385,7 @@ function contentOutline(task: Awaited<ReturnType<typeof inspector.taskSnapshot>>
 function startTaskContent(input: TaskContentStartInput): { runId: string } {
   const runId = randomUUID();
   const controller = new AbortController();
+  operationalStore.recordRun({ runId, kind: "task_content", status: "starting", taskKeys: input.taskKeys });
   activeTaskContentRuns.set(runId, {
     controller,
     status: "starting",
@@ -335,6 +427,7 @@ function startTaskContent(input: TaskContentStartInput): { runId: string } {
         const runner = runners.get(input.runnerId);
         const descriptor = await runner.describe();
         if (!descriptor.available) throw new Error(descriptor.unavailableReason || `${descriptor.name} is unavailable.`);
+        assertRunnerModel(descriptor, input.model);
         status("running");
         await mapConcurrent(tasks, 4, async (task) => {
           const taskKey = `${task.key.workspaceSlug}/${task.key.taskId}`;
@@ -467,6 +560,56 @@ async function dispatch(request: WorkerRequest): Promise<unknown> {
       }
       return inspector.saveTaskContent(taskKey, body);
     }
+    case "run.list":
+      return operationalStore.listRuns();
+    case "run.events": {
+      const { runId, afterSequence } = requestParams(request);
+      if (typeof runId !== "string") throw new Error("runId is required.");
+      if (afterSequence !== undefined && (!Number.isInteger(afterSequence) || Number(afterSequence) < 0)) {
+        throw new Error("afterSequence must be a non-negative integer.");
+      }
+      return operationalStore.listEvents(runId, Number(afterSequence ?? 0));
+    }
+    case "agent-run.prepare":
+      return executionScheduler.prepare(agentRunInput(requestParams(request).input));
+    case "agent-run.leases":
+      return leaseManager.list();
+    case "agent-run.release": {
+      const runId = requestParams(request).runId;
+      if (typeof runId !== "string") throw new Error("runId is required.");
+      const released = await leaseManager.release(runId, "explicit_release");
+      operationalStore.appendEvent({
+        runId,
+        type: "run.cancelled",
+        payload: { reason: "explicit_release" },
+        status: "cancelled",
+      });
+      return released;
+    }
+    case "terminal.list":
+      return terminalSessions.list();
+    case "terminal.create":
+      return terminalSessions.create(terminalCreateInput(requestParams(request).input));
+    case "terminal.write": {
+      const { sessionId, data } = requestParams(request);
+      if (typeof sessionId !== "string" || typeof data !== "string") {
+        throw new Error("sessionId and data are required.");
+      }
+      terminalSessions.write(sessionId, data);
+      return undefined;
+    }
+    case "terminal.resize": {
+      const { sessionId, cols, rows } = requestParams(request);
+      if (typeof sessionId !== "string") throw new Error("sessionId is required.");
+      terminalSessions.resize(sessionId, cols, rows);
+      return undefined;
+    }
+    case "terminal.close": {
+      const { sessionId } = requestParams(request);
+      if (typeof sessionId !== "string") throw new Error("sessionId is required.");
+      terminalSessions.close(sessionId);
+      return undefined;
+    }
     case "file.list": {
       const directory = requestParams(request).directory;
       if (directory !== undefined && typeof directory !== "string") throw new Error("directory must be a string.");
@@ -549,6 +692,8 @@ try {
 process.once("exit", () => {
   for (const controller of activePlanningRuns.values()) controller.abort();
   for (const run of activeTaskContentRuns.values()) run.controller.abort();
+  terminalSessions.dispose();
+  operationalStore.close();
   if (changeTimer) clearTimeout(changeTimer);
   void watcher?.close();
 });
@@ -583,3 +728,4 @@ send({
     processId: process.pid,
   },
 });
+for (const lease of abandonedLeases) send({ type: "lease.recovery", payload: { lease } });

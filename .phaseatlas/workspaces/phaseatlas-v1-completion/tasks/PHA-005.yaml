@@ -3,11 +3,12 @@ id: PHA-005
 title: Deliver provider-neutral execution adapters
 kind: code
 phase: execution-providers
-state: planned
+state: in_review
 priority: high
 objective: Codex CLI and a second provider can run the same validated specification and emit the
   same normalized event and result contracts without exposing credentials, raw process handles, or
-  provider-specific payloads to the renderer.
+  provider-specific payloads to the renderer, while each repository can select a provider-discovered
+  model without free-form model or executable input.
 owners: []
 dependencies:
   - taskKey: PHA-004
@@ -20,6 +21,10 @@ scope:
     - apps/repository-worker/src/runner-registry.ts
     - apps/repository-worker/src/runner-registry.test.ts
     - apps/repository-worker/src
+    - apps/ui/src/routes/+page.svelte
+    - apps/ui/src/app.css
+    - packages/core/src/agent-result-validator.ts
+    - packages/core/src/agent-execution-scheduler.ts
     - docs/contracts/agent-run-contract.md
     - docs/decisions/0004-provider-neutral-planning.md
   forbiddenPaths: []
@@ -52,6 +57,14 @@ acceptanceCriteria:
     verification:
       type: human
       reviewerRole: PhaseAtlas maintainer
+  - id: AC-5
+    statement: Each repository can persist a supported CLI and provider-discovered model selection,
+      and planning or content initialization rejects model IDs absent from the current provider catalog.
+    verification:
+      type: human
+      reviewerRole: PhaseAtlas maintainer
 verification: []
 evidenceRequirements:
   - type: human_review
+content:
+  path: PHA-005.md

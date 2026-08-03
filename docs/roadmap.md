@@ -7,7 +7,7 @@
 - [x] One utility process per active checkout
 - [x] `.phaseatlas/` repository and workspace discovery
 - [x] Worker change notifications
-- [ ] Idle shutdown and crash recovery
+- [x] Idle shutdown and crash recovery
 
 ## M1 — Canonical tasks
 
@@ -28,7 +28,7 @@
 
 ## M3 — Execution
 
-- [ ] Worktree lease manager
+- [x] Worktree lease manager
 - [ ] Provider-neutral execution runner framework
 - [ ] Codex CLI execution adapter
 - [ ] Second execution provider adapter to verify the abstraction
@@ -38,7 +38,7 @@
 
 ## M4 — Persistence and distribution
 
-- [ ] Global catalog and per-checkout SQLite databases
-- [ ] Recovery after worker or application crash
+- [x] Global catalog and per-checkout SQLite databases
+- [x] Recovery after worker or application crash
 - [ ] Static packaged renderer
 - [ ] Electron packaging, signing, notarization, and updates

@@ -14,6 +14,12 @@ module cache, current directory, or failed parser to corrupt another.
 Use Electron as the first desktop runtime. Keep the renderer sandboxed, expose a narrow preload API,
 and start one utility process for every active checkout. Multiple workspaces share that worker.
 
+Integrated terminal sessions are also owned by that checkout utility process. The worker selects the
+shell and binds its working directory to the canonical repository root; the renderer can supply only
+session identifiers, bounded input, and terminal dimensions. A repository worker with retained
+terminal sessions stays active so switching repositories swaps terminal session sets without killing
+their processes.
+
 ## Consequences
 
 - Existing Node repository parsing can move with little rewrite.
@@ -23,4 +29,3 @@ and start one utility process for every active checkout. Multiple workspaces sha
 
 Tauri remains possible after the worker protocol stabilizes, but it would currently require a Node
 sidecar or a rewrite of repository parsing and agent orchestration.
-

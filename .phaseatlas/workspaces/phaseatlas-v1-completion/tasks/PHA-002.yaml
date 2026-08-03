@@ -3,7 +3,7 @@ id: PHA-002
 title: Implement deterministic legacy source adapters
 kind: code
 phase: legacy-ingestion
-state: planned
+state: done
 priority: normal
 objective: Legacy repositories containing the approved source formats produce stable task candidates
   and structured validation issues while configured repositories continue to use canonical

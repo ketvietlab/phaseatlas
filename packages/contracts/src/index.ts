@@ -1,8 +1,10 @@
 import taskProposalSchema from "../schemas/task-proposal.schema.json" with { type: "json" };
 import taskContentSchema from "../schemas/task-content.schema.json" with { type: "json" };
+import agentRunResultSchema from "../schemas/agent-run-result.schema.json" with { type: "json" };
 
 export const TASK_PROPOSAL_SCHEMA = taskProposalSchema;
 export const TASK_CONTENT_SCHEMA = taskContentSchema;
+export const AGENT_RUN_RESULT_SCHEMA = agentRunResultSchema;
 
 export const TASK_STATES = [
   "draft",
@@ -28,6 +30,16 @@ export interface RepositorySummary {
   configuration: "configured" | "legacy";
   workspaceCount: number;
   openedAt: string;
+  runtime?: RepositoryRuntimeSummary;
+}
+
+export type RepositoryLifecycleState = "closed" | "starting" | "online" | "cooling" | "recovery_required";
+
+export interface RepositoryRuntimeSummary {
+  state: RepositoryLifecycleState;
+  recoveryRequired: boolean;
+  lastError?: string;
+  updatedAt: string;
 }
 
 export interface WorkspaceSummary {
@@ -132,6 +144,38 @@ export interface ValidationIssue {
   message: string;
   sourcePath: string;
   field?: string;
+  line?: number;
+  column?: number;
+}
+
+export type LegacySourceFormat = "markdown-checklist/v1";
+export type LegacyCompletionHint = "open" | "completed";
+
+export interface LegacySourceLocation {
+  path: string;
+  nativeId: string;
+  line: number;
+  column: 1;
+}
+
+export interface LegacyTaskCandidate {
+  candidateId: string;
+  sourceFormat: LegacySourceFormat;
+  nativeId: string;
+  title: string;
+  objective: string;
+  phaseId: string;
+  completionHint: LegacyCompletionHint;
+  provenance: {
+    primary: LegacySourceLocation;
+    identicalDuplicates: LegacySourceLocation[];
+  };
+  warnings: ValidationIssue[];
+}
+
+export interface LegacyIngestionSnapshot {
+  candidates: LegacyTaskCandidate[];
+  issues: ValidationIssue[];
 }
 
 export interface TaskGraphEdge {
@@ -153,9 +197,22 @@ export interface TaskSnapshot {
 
 export type RunnerCapability =
   | "planning"
+  | "execution"
   | "streaming"
   | "structured_output"
-  | "repository_read";
+  | "repository_read"
+  | "repository_write"
+  | "cancellation";
+
+export interface RunnerModelDescriptor {
+  id: string;
+  displayName: string;
+  isDefault: boolean;
+  reasoningEfforts: string[];
+  defaultReasoningEffort?: string;
+}
+
+export type RunnerModelDiscoveryStatus = "available" | "unavailable";
 
 export interface RunnerDescriptor {
   id: string;
@@ -165,6 +222,15 @@ export interface RunnerDescriptor {
   available: boolean;
   unavailableReason?: string;
   capabilities: RunnerCapability[];
+  models: RunnerModelDescriptor[];
+  modelDiscovery: {
+    status: RunnerModelDiscoveryStatus;
+    unavailableReason?: string;
+  };
+  execution?: {
+    actions: AgentRunAction[];
+    sandboxes: AgentSandbox[];
+  };
 }
 
 export interface TaskProposalCriterion {
@@ -233,6 +299,26 @@ export interface TaskContentRunSummary {
   runId: string;
   status: TaskContentRunStatus;
   taskKeys: string[];
+}
+
+export type PersistedRunKind = "planning" | "task_content" | "agent";
+export type PersistedRunStatus = "starting" | "running" | "completed" | "failed" | "cancelled" | "interrupted";
+
+export interface PersistedRunRecord {
+  runId: string;
+  kind: PersistedRunKind;
+  status: PersistedRunStatus;
+  taskKeys: string[];
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface PersistedRunEvent {
+  runId: string;
+  sequence: number;
+  type: string;
+  timestamp: string;
+  payload: Record<string, unknown>;
 }
 
 export type TaskContentEvent =
@@ -311,23 +397,85 @@ export type AgentRunStatus =
   | "cancelled"
   | "interrupted";
 
-export interface AgentRunSpec {
-  schemaVersion: "phaseatlas.run/v1";
-  runId: string;
+export type AgentRunAction = "analyze" | "plan" | "implement" | "review";
+export type AgentSandbox = "read-only" | "workspace-write";
+
+export interface AgentRunCreateInput {
   taskKey: string;
-  taskRevision: string;
-  action: "analyze" | "plan" | "implement" | "review";
-  repositoryPath: string;
-  worktreePath?: string;
-  branch?: string;
-  objective: string;
-  content?: TaskContent;
-  contextDocuments: Array<{ path: string; revision?: string }>;
-  scope: TaskScope;
-  acceptanceCriteria: AcceptanceCriterion[];
-  verification: VerificationStep[];
-  sandbox: "read-only" | "workspace-write";
+  expectedTaskRevision?: string;
+  expectedCheckoutId?: string;
+  action: AgentRunAction;
+  requestedSandbox?: AgentSandbox;
+}
+
+export interface AgentCheckoutIdentity {
+  repositoryId: string;
+  checkoutId: string;
+  canonicalPath: string;
+}
+
+export type WorktreeLeaseStatus = "allocating" | "active" | "releasing" | "released" | "abandoned";
+
+export interface WorktreeLeaseRecord {
+  leaseId: string;
+  runId: string;
+  checkoutId: string;
+  worktreePath: string;
+  branch: string;
+  status: WorktreeLeaseStatus;
   createdAt: string;
+  updatedAt: string;
+  recoveryReason?: string;
+  disposition?: string;
+}
+
+export interface AgentRunSpec {
+  readonly schemaVersion: "phaseatlas.run/v1";
+  readonly runId: string;
+  readonly taskKey: string;
+  readonly taskRevision: string;
+  readonly action: AgentRunAction;
+  readonly checkout: AgentCheckoutIdentity;
+  readonly lease?: WorktreeLeaseRecord;
+  readonly executionDirectory: string;
+  readonly objective: string;
+  readonly content?: TaskContent;
+  readonly contextDocuments: ReadonlyArray<{ path: string; revision?: string }>;
+  readonly scope: TaskScope;
+  readonly acceptanceCriteria: ReadonlyArray<AcceptanceCriterion>;
+  readonly verification: ReadonlyArray<VerificationStep>;
+  readonly sandbox: AgentSandbox;
+  readonly createdAt: string;
+}
+
+export type AgentRunOutcome = "completed" | "partial" | "blocked" | "failed";
+export type AgentFileChangeType = "added" | "modified" | "deleted";
+
+export interface AgentRunResult {
+  outcome: AgentRunOutcome;
+  summary: string;
+  changedFiles: Array<{ path: string; changeType: AgentFileChangeType }>;
+  verification: Array<{ stepId: string; status: "passed" | "failed" | "not_run"; details: string }>;
+  producedEvidence: Array<{
+    type: "diff" | "test" | "commit" | "pull_request" | "document";
+    reference: string;
+  }>;
+  blockers: string[];
+  nextAction: string;
+  requiresHumanReview: boolean;
+  proposedTaskState: TaskState;
+}
+
+export interface InspectedAgentChange {
+  path: string;
+  changeType: AgentFileChangeType;
+  policyViolations: string[];
+}
+
+export interface ValidatedAgentRunResult {
+  result: AgentRunResult;
+  inspectedChanges: InspectedAgentChange[];
+  policyViolations: string[];
 }
 
 export type AgentEvent =
@@ -339,6 +487,32 @@ export type AgentEvent =
   | { sequence: number; type: "file.changed"; path: string; patch?: string }
   | { sequence: number; type: "turn.completed"; summary: string }
   | { sequence: number; type: "run.failed"; message: string };
+
+export type TerminalSessionStatus = "running" | "exited";
+
+export interface TerminalSessionSnapshot {
+  sessionId: string;
+  title: string;
+  shell: string;
+  cwd: string;
+  status: TerminalSessionStatus;
+  cols: number;
+  rows: number;
+  output: string;
+  createdAt: string;
+  exitCode?: number;
+  exitSignal?: number;
+}
+
+export interface TerminalCreateInput {
+  cols: number;
+  rows: number;
+}
+
+export type TerminalEvent =
+  | { type: "terminal.output"; sessionId: string; data: string; timestamp: string }
+  | { type: "terminal.exited"; sessionId: string; exitCode: number; exitSignal?: number; timestamp: string }
+  | { type: "terminal.closed"; sessionId: string; timestamp: string };
 
 export type RepositoryWorkerMethod =
   | "repository.describe"
@@ -352,6 +526,16 @@ export type RepositoryWorkerMethod =
   | "task-content.list"
   | "task-content.cancel"
   | "task-content.save"
+  | "run.list"
+  | "run.events"
+  | "agent-run.prepare"
+  | "agent-run.leases"
+  | "agent-run.release"
+  | "terminal.list"
+  | "terminal.create"
+  | "terminal.write"
+  | "terminal.resize"
+  | "terminal.close"
   | "file.list"
   | "file.read"
   | "file.save"
@@ -368,7 +552,7 @@ export type WorkerResponse =
   | { requestId: string; error: { code: string; message: string } };
 
 export interface WorkerEvent {
-  type: "worker.ready" | "repository.changed" | "worker.warning" | "planning.event" | "task-content.event";
+  type: "worker.ready" | "repository.changed" | "worker.warning" | "planning.event" | "task-content.event" | "terminal.event" | "lease.recovery";
   payload: Record<string, unknown>;
 }
 
@@ -390,7 +574,13 @@ export interface TaskContentDesktopEvent {
   event: TaskContentEvent;
 }
 
-export type PhaseAtlasDesktopEvent = RepositoryChangedEvent | PlanningDesktopEvent | TaskContentDesktopEvent;
+export interface TerminalDesktopEvent {
+  type: "terminal.event";
+  checkoutId: string;
+  event: TerminalEvent;
+}
+
+export type PhaseAtlasDesktopEvent = RepositoryChangedEvent | PlanningDesktopEvent | TaskContentDesktopEvent | TerminalDesktopEvent;
 
 export interface PhaseAtlasDesktopApi {
   repositories: {
@@ -421,6 +611,17 @@ export interface PhaseAtlasDesktopApi {
     start(checkoutId: string, input: PlanningStartInput): Promise<{ runId: string }>;
     cancel(checkoutId: string, runId: string): Promise<void>;
     publish(checkoutId: string, input: PlanningPublishInput): Promise<TaskSnapshot>;
+  };
+  runs: {
+    list(checkoutId: string): Promise<PersistedRunRecord[]>;
+    events(checkoutId: string, runId: string, afterSequence?: number): Promise<PersistedRunEvent[]>;
+  };
+  terminals: {
+    list(checkoutId: string): Promise<TerminalSessionSnapshot[]>;
+    create(checkoutId: string, input: TerminalCreateInput): Promise<TerminalSessionSnapshot>;
+    write(checkoutId: string, sessionId: string, data: string): Promise<void>;
+    resize(checkoutId: string, sessionId: string, cols: number, rows: number): Promise<void>;
+    close(checkoutId: string, sessionId: string): Promise<void>;
   };
   events: {
     subscribe(listener: (event: PhaseAtlasDesktopEvent) => void): () => void;

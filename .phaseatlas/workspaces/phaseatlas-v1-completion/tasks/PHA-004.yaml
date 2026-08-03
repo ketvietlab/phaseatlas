@@ -3,7 +3,7 @@ id: PHA-004
 title: Establish isolated execution and worktree leases
 kind: code
 phase: execution-foundation
-state: planned
+state: done
 priority: critical
 objective: Validated agent run specifications execute only within their permitted checkout context,
   with every write-capable implementation run holding one exclusive worktree lease and read-only

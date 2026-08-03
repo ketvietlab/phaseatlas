@@ -1,4 +1,4 @@
-# ADR 0004: Keep planning provider-neutral
+# ADR 0004: Keep planning and execution providers neutral
 
 - Status: accepted
 - Date: 2026-08-03
@@ -22,8 +22,19 @@ Planning targets either an existing workspace or the repository. Repository-scop
 one `WorkspaceProposal` with starter tasks; only the reviewed publisher may promote that proposal into
 the canonical `.phaseatlas/workspaces/` tree.
 
+The same registry exposes an execution facet for immutable agent specifications. Codex CLI and
+Claude Code translate their private JSONL, stream-JSON, sandbox, cancellation, and structured-output
+mechanisms into the same normalized events and validated result. Provider success does not bypass
+shared validation or grant canonical task authority.
+
+Model selection follows provider discovery. The worker projects the installed CLI's current catalog
+into a small shared descriptor and the renderer offers only those values. Repository preferences are
+operational `{runnerId, modelId}` data keyed by checkout; they are neither credentials nor canonical
+repository configuration. The application does not offer arbitrary CLI paths or free-form model IDs.
+
 ## Consequences
 
-Adding a provider requires an adapter and capability mapping, not renderer changes. Provider
+Adding a provider requires an adapter, model-discovery projection, and capability mapping, not
+provider-specific renderer changes. Provider
 credentials remain in provider-owned authentication state. A successful model response is still
 untrusted until backend validation and explicit human publication.

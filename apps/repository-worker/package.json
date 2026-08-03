@@ -5,14 +5,15 @@
   "type": "module",
   "main": "dist/index.js",
   "scripts": {
-    "build": "tsup src/index.ts --format esm --platform node --clean",
+    "build": "tsup",
     "check": "tsc --noEmit",
     "test": "tsx --test src/**/*.test.ts"
   },
   "dependencies": {
     "@phaseatlas/contracts": "workspace:*",
     "@phaseatlas/core": "workspace:*",
-    "chokidar": "^4.0.3"
+    "chokidar": "^4.0.3",
+    "node-pty": "^1.1.0"
   },
   "devDependencies": {
     "@types/node": "^24.3.0",

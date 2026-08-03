@@ -1,6 +1,7 @@
 <script lang="ts">
   import { onMount, tick } from "svelte";
   import RepositoryWorkbench from "$lib/RepositoryWorkbench.svelte";
+  import TerminalPanel from "$lib/TerminalPanel.svelte";
   import TaskContentPanel from "$lib/TaskContentPanel.svelte";
   import TaskMap from "$lib/TaskMap.svelte";
   import type {
@@ -21,6 +22,10 @@
   const TASK_KIND_OPTIONS: TaskKind[] = ["code", "docs", "research", "review", "operations"];
   const TASK_PRIORITY_OPTIONS: TaskPriority[] = ["critical", "high", "normal", "low"];
   const TASK_VIEW_STORAGE_KEY = "phaseatlas.task-view";
+  const PROVIDER_SETTINGS_STORAGE_KEY = "phaseatlas.repository-provider-settings.v1";
+  const TERMINAL_HEIGHT_STORAGE_KEY = "phaseatlas.terminal-height.v1";
+
+  type RepositoryProviderSettings = Record<string, { runnerId: string; modelId: string }>;
 
   let repositories: RepositorySummary[] = [];
   let workspaces: WorkspaceSummary[] = [];
@@ -39,6 +44,7 @@
   let errorMessage = "";
   let refreshTimer = 0;
   let plannerOpen = false;
+  let providerSettingsOpen = false;
   let plannerRequest = "";
   let plannerRunnerId = "";
   let plannerModel = "";
@@ -67,6 +73,10 @@
   let contentLogs: Record<string, string> = {};
   let contentFailures: Record<string, string> = {};
   let openEditorAfterTask: Record<string, boolean> = {};
+  let terminalOpen = false;
+  let terminalMaximized = false;
+  let terminalHeight = 300;
+  let terminalPanel: { focus(): void } | undefined;
 
   $: selectedRepository = repositories.find(
     (repository) => repository.checkoutId === selectedCheckoutId,
@@ -84,6 +94,10 @@
   $: availableContentTasks = missingContentTasks.filter((task) => !activeContentTaskKeys.has(canonicalTaskKey(task)));
   $: availableRunners = runners.filter((runner) => runner.available);
   $: selectedRunner = runners.find((runner) => runner.id === plannerRunnerId);
+  $: selectedModels = selectedRunner?.models ?? [];
+  $: providerSelectionReady = Boolean(
+    selectedRunner?.available && selectedModels.some((model) => model.id === plannerModel),
+  );
   $: planningActive = planningStatus === "starting" || planningStatus === "running";
   $: normalizedPlanningLog = normalizePlanningLog(planningLog);
   $: allPlanningLines = normalizedPlanningLog ? normalizedPlanningLog.split("\n") : [];
@@ -99,10 +113,13 @@
   $: planningSilenceMs = planningActive && planningLastActivityAt
     ? Math.max(planningClock - planningLastActivityAt, 0)
     : 0;
+  $: terminalShortcutLabel = platform === "darwin" ? "⌘`" : "Ctrl+`";
   onMount(() => {
     theme = document.documentElement.dataset.theme === "dark" ? "dark" : "light";
     const savedTaskView = window.localStorage.getItem(TASK_VIEW_STORAGE_KEY);
     if (savedTaskView === "list" || savedTaskView === "map") taskView = savedTaskView;
+    const savedTerminalHeight = Number(window.localStorage.getItem(TERMINAL_HEIGHT_STORAGE_KEY));
+    if (Number.isFinite(savedTerminalHeight) && savedTerminalHeight >= 180) terminalHeight = savedTerminalHeight;
     const planningClockTimer = window.setInterval(() => {
       planningClock = Date.now();
     }, 1_000);
@@ -189,6 +206,7 @@
     errorMessage = "";
     menuOpen = false;
     try {
+      const recoveredRepository = await window.phaseatlas.repositories.refresh(checkoutId);
       const [nextWorkspaces, nextTaskSnapshot, nextRunners, activeContentRuns] = await Promise.all([
         window.phaseatlas.workspaces.list(checkoutId),
         window.phaseatlas.tasks.snapshot(checkoutId),
@@ -196,6 +214,7 @@
         window.phaseatlas.tasks.listContentRuns(checkoutId),
       ]);
       workspaces = nextWorkspaces;
+      repositories = repositories.map((repository) => repository.checkoutId === checkoutId ? recoveredRepository : repository);
       taskSnapshot = nextTaskSnapshot;
       runners = nextRunners;
       contentRuns = Object.fromEntries(activeContentRuns.map((run) => [run.runId, {
@@ -208,11 +227,72 @@
       contentTaskRunIds = Object.fromEntries(activeContentRuns.flatMap((run) =>
         run.taskKeys.map((taskKey) => [taskKey, run.runId]),
       ));
-      plannerRunnerId = runners.find((runner) => runner.available)?.id ?? "";
+      applyRepositoryProviderSettings(checkoutId);
       selectWorkspace(workspaces[0]?.slug ?? "");
     } catch (error) {
       errorMessage = error instanceof Error ? error.message : "The repository workspaces could not be read.";
     }
+  }
+
+  async function toggleTerminal() {
+    if (!selectedCheckoutId) return;
+    terminalOpen = !terminalOpen;
+    if (!terminalOpen) {
+      terminalMaximized = false;
+      return;
+    }
+    await tick();
+    terminalPanel?.focus();
+  }
+
+  function updateTerminalHeight(nextHeight: number) {
+    terminalHeight = Math.round(nextHeight);
+    window.localStorage.setItem(TERMINAL_HEIGHT_STORAGE_KEY, String(terminalHeight));
+  }
+
+  function readRepositoryProviderSettings(): RepositoryProviderSettings {
+    try {
+      const stored = JSON.parse(window.localStorage.getItem(PROVIDER_SETTINGS_STORAGE_KEY) ?? "{}") as unknown;
+      if (!stored || typeof stored !== "object" || Array.isArray(stored)) return {};
+      return stored as RepositoryProviderSettings;
+    } catch {
+      return {};
+    }
+  }
+
+  function defaultModelId(runner: RunnerDescriptor | undefined): string {
+    return runner?.models?.find((model) => model.isDefault)?.id ?? runner?.models?.[0]?.id ?? "";
+  }
+
+  function applyRepositoryProviderSettings(checkoutId: string) {
+    const saved = readRepositoryProviderSettings()[checkoutId];
+    const runner = runners.find((candidate) => candidate.available && candidate.id === saved?.runnerId)
+      ?? runners.find((candidate) => candidate.available && candidate.models?.length > 0)
+      ?? runners.find((candidate) => candidate.available);
+    plannerRunnerId = runner?.id ?? "";
+    plannerModel = runner?.models?.some((model) => model.id === saved?.modelId)
+      ? saved.modelId
+      : defaultModelId(runner);
+    if (plannerRunnerId && plannerModel) persistRepositoryProviderSettings();
+  }
+
+  function persistRepositoryProviderSettings() {
+    if (!selectedCheckoutId || !plannerRunnerId || !plannerModel) return;
+    const settings = readRepositoryProviderSettings();
+    settings[selectedCheckoutId] = { runnerId: plannerRunnerId, modelId: plannerModel };
+    window.localStorage.setItem(PROVIDER_SETTINGS_STORAGE_KEY, JSON.stringify(settings));
+  }
+
+  function selectProviderRunner(runnerId: string) {
+    plannerRunnerId = runnerId;
+    plannerModel = defaultModelId(runners.find((runner) => runner.id === runnerId));
+    persistRepositoryProviderSettings();
+  }
+
+  function selectProviderModel(modelId: string) {
+    if (!selectedModels.some((model) => model.id === modelId)) return;
+    plannerModel = modelId;
+    persistRepositoryProviderSettings();
   }
 
   async function refreshRepository(checkoutId: string) {
@@ -319,8 +399,8 @@
 
   async function initializeTaskContent(taskKeys: string[], openAfter = false) {
     if (!window.phaseatlas || !taskKeys.length) return;
-    if (!plannerRunnerId) {
-      errorMessage = "Select an available runner before initializing task content.";
+    if (!providerSelectionReady) {
+      errorMessage = "Choose a provider model from Repository settings before initializing task content.";
       return;
     }
     const requestedTaskKeys = [...new Set(taskKeys)].filter((taskKey) => !activeContentTaskKeys.has(taskKey));
@@ -391,7 +471,7 @@
     plannerOpen = true;
     plannerError = "";
     published = false;
-    if (!plannerRunnerId) plannerRunnerId = availableRunners[0]?.id ?? "";
+    if (!plannerRunnerId) applyRepositoryProviderSettings(selectedCheckoutId);
   }
 
   function planningTarget(): PlanningTarget {
@@ -511,7 +591,7 @@
     if (
       !window.phaseatlas ||
       (plannerMode === "workspace" && !selectedWorkspaceSlug) ||
-      !plannerRunnerId ||
+      !providerSelectionReady ||
       !plannerRequest.trim()
     ) return;
     planningRunId = "";
@@ -610,7 +690,9 @@
       taskSnapshot = null;
       selectedWorkspaceSlug = "";
       selectedTaskKey = "";
+      terminalMaximized = false;
       if (repositories[0]) await selectRepository(repositories[0].checkoutId);
+      else terminalOpen = false;
     }
   }
 
@@ -621,8 +703,18 @@
   }
 
   function handleWindowKeydown(event: KeyboardEvent) {
+    const modifier = event.metaKey || event.ctrlKey;
+    const terminalShortcut = modifier && !event.shiftKey && !event.altKey && (
+      event.code === "Backquote" || event.key.toLowerCase() === "j"
+    );
+    if (terminalShortcut && !event.repeat && !plannerOpen && !providerSettingsOpen && !editorOpen && !contentPanelTask) {
+      event.preventDefault();
+      void toggleTerminal();
+      return;
+    }
     if (event.key !== "Escape") return;
-    if (plannerOpen) closePlanner();
+    if (terminalMaximized) terminalMaximized = false;
+    else if (plannerOpen) closePlanner();
     else menuOpen = false;
   }
 </script>
@@ -691,12 +783,31 @@
   </header>
   {#if menuOpen}<button class="sidebar-backdrop" type="button" aria-label="Close menu" onclick={() => (menuOpen = false)}></button>{/if}
 
-  <main class="main" id="main-content">
+  <main
+    class:terminal-visible={terminalOpen && Boolean(selectedCheckoutId) && !terminalMaximized}
+    class="main"
+    id="main-content"
+    style={`--terminal-panel-height: ${terminalHeight}px`}
+  >
     <header class="command-bar">
       <div class="breadcrumbs">
         <span>PhaseAtlas</span><span>/</span><strong>{selectedRepository?.name || "Repositories"}</strong>
       </div>
       <div class="command-actions">
+        <button
+          class:active={terminalOpen}
+          class="terminal-toggle"
+          type="button"
+          aria-label={`${terminalOpen ? "Close" : "Open"} repository terminal`}
+          aria-pressed={terminalOpen}
+          title={`Toggle terminal (${terminalShortcutLabel})`}
+          onclick={toggleTerminal}
+          disabled={!selectedCheckoutId}
+        >
+          <svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="m5 7 4.5 5L5 17M12 17h7"/></svg>
+          <span>Terminal</span>
+          <kbd>{terminalShortcutLabel}</kbd>
+        </button>
         <span class="runtime-badge"><span class="live-indicator"></span>{platform} · local</span>
         <button class="theme-toggle" type="button" aria-label={theme === "dark" ? "Switch to light theme" : "Switch to dark theme"} aria-pressed={theme === "dark"} onclick={() => setTheme(theme === "dark" ? "light" : "dark")}>
           <span class="theme-track"><span class="theme-thumb"></span></span>
@@ -730,6 +841,10 @@
             <button class="secondary-button" type="button" onclick={() => openRepositoryEditor()}>
               <svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M4 5h16v14H4zM8 5v14M11 9h6M11 13h4"/></svg>
               Explorer
+            </button>
+            <button class="secondary-button" type="button" onclick={() => providerSettingsOpen = true}>
+              <svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.7 1.7 0 0 0 .3 1.9l.1.1-2.8 2.8-.1-.1a1.7 1.7 0 0 0-1.9-.3 1.7 1.7 0 0 0-1 1.5V21h-4v-.1a1.7 1.7 0 0 0-1-1.5 1.7 1.7 0 0 0-1.9.3l-.1.1L4.2 17l.1-.1a1.7 1.7 0 0 0 .3-1.9A1.7 1.7 0 0 0 3.1 14H3v-4h.1a1.7 1.7 0 0 0 1.5-1 1.7 1.7 0 0 0-.3-1.9L4.2 7 7 4.2l.1.1a1.7 1.7 0 0 0 1.9.3A1.7 1.7 0 0 0 10 3.1V3h4v.1a1.7 1.7 0 0 0 1 1.5 1.7 1.7 0 0 0 1.9-.3l.1-.1L19.8 7l-.1.1a1.7 1.7 0 0 0-.3 1.9 1.7 1.7 0 0 0 1.5 1h.1v4h-.1a1.7 1.7 0 0 0-1.5 1z"/></svg>
+              Provider settings
             </button>
             <button class="secondary-button" type="button" onclick={() => openPlanner("repository")}>
               <svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="4" width="7" height="7" rx="1"/><rect x="14" y="4" width="7" height="7" rx="1"/><rect x="3" y="15" width="7" height="6" rx="1"/><path d="M14 18h7M17.5 14.5v7"/></svg>
@@ -807,7 +922,7 @@
                     <div><p class="eyebrow">{selectedWorkspace.slug}</p><h3>Tasks</h3></div>
                     <div class="task-queue-actions">
                       {#if missingContentTasks.length}
-                        <button type="button" onclick={() => initializeTaskContent(availableContentTasks.map(canonicalTaskKey))} disabled={!availableContentTasks.length || !plannerRunnerId} title="Initialize every task body that is not already running">Initialize {availableContentTasks.length}</button>
+                        <button type="button" onclick={() => initializeTaskContent(availableContentTasks.map(canonicalTaskKey))} disabled={!availableContentTasks.length || !providerSelectionReady} title="Initialize every task body that is not already running">Initialize {availableContentTasks.length}</button>
                       {/if}
                       <span>{workspaceTasks.length}</span>
                     </div>
@@ -877,7 +992,7 @@
                         </footer>
                       {:else}
                         <p>Generate a repository-aware Markdown body when this task is ready for implementation. Publishing the outline does not spend these tokens.</p>
-                        <button class="primary-button" type="button" onclick={() => initializeTaskContent([canonicalTaskKey(selectedTask)], true)} disabled={activeContentTaskKeys.has(canonicalTaskKey(selectedTask)) || !plannerRunnerId}>
+                        <button class="primary-button" type="button" onclick={() => initializeTaskContent([canonicalTaskKey(selectedTask)], true)} disabled={activeContentTaskKeys.has(canonicalTaskKey(selectedTask)) || !providerSelectionReady}>
                           {activeContentTaskKeys.has(canonicalTaskKey(selectedTask)) ? "Initializing…" : "Initialize task content"}
                         </button>
                       {/if}
@@ -946,6 +1061,65 @@
   </main>
 </div>
 
+{#if providerSettingsOpen}
+  <button class="provider-settings-backdrop" type="button" aria-label="Close repository provider settings" onclick={() => providerSettingsOpen = false}></button>
+  <div class="provider-settings-panel" role="dialog" aria-modal="true" aria-labelledby="provider-settings-title">
+    <header>
+      <div>
+        <p class="eyebrow">Repository preferences</p>
+        <h2 id="provider-settings-title">Provider settings</h2>
+        <p>{selectedRepository?.name} · applies to planning and task content</p>
+      </div>
+      <button class="icon-button" type="button" aria-label="Close repository provider settings" onclick={() => providerSettingsOpen = false}>
+        <svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="m7 7 10 10M17 7 7 17"/></svg>
+      </button>
+    </header>
+    <div class="provider-settings-body">
+      <section class="provider-settings-intro">
+        <span class="provider-settings-icon" aria-hidden="true"><svg class="icon" viewBox="0 0 24 24"><path d="M5 5h14v14H5zM9 9h6M9 13h4"/></svg></span>
+        <div><strong>Choose the agent CLI for this repository</strong><p>PhaseAtlas keeps this preference outside source control. Credentials remain managed by the selected CLI.</p></div>
+      </section>
+
+      <label class="provider-settings-field">
+        <span>Provider CLI</span>
+        <select value={plannerRunnerId} onchange={(event) => selectProviderRunner(event.currentTarget.value)}>
+          {#each runners as runner}
+            <option value={runner.id} disabled={!runner.available}>{runner.name}{runner.available ? ` · ${runner.version ?? runner.provider}` : " · unavailable"}</option>
+          {/each}
+        </select>
+      </label>
+
+      <label class="provider-settings-field">
+        <span>Model</span>
+        <select value={plannerModel} onchange={(event) => selectProviderModel(event.currentTarget.value)} disabled={!selectedModels.length}>
+          {#if selectedModels.length}
+            {#each selectedModels as model}
+              <option value={model.id}>{model.displayName}{model.isDefault ? " · provider default" : ""}</option>
+            {/each}
+          {:else}
+            <option value="">No provider models available</option>
+          {/if}
+        </select>
+        <small>{selectedRunner?.modelDiscovery?.status === "available" ? `${selectedModels.length} models discovered from ${selectedRunner.name}.` : selectedRunner?.modelDiscovery?.unavailableReason ?? "Restart PhaseAtlas to load the provider model catalog."}</small>
+      </label>
+
+      {#if selectedRunner}
+        <section class:unavailable={!providerSelectionReady} class="provider-settings-status">
+          <span></span>
+          <div>
+            <strong>{providerSelectionReady ? "Ready for this repository" : "Provider setup required"}</strong>
+            <p>{providerSelectionReady ? `${selectedRunner.name} will use ${selectedModels.find((model) => model.id === plannerModel)?.displayName}.` : selectedRunner.modelDiscovery?.unavailableReason ?? selectedRunner.unavailableReason ?? "Restart PhaseAtlas to refresh provider discovery."}</p>
+          </div>
+        </section>
+      {/if}
+    </div>
+    <footer>
+      <span>Saved automatically on this device</span>
+      <button class="primary-button" type="button" onclick={() => providerSettingsOpen = false} disabled={!providerSelectionReady}>Done</button>
+    </footer>
+  </div>
+{/if}
+
 {#if plannerOpen}
   <button class="planner-backdrop" type="button" aria-label="Close planning studio" onclick={closePlanner}></button>
   <div class="planner-panel" role="dialog" aria-modal="true" aria-labelledby="planner-title">
@@ -966,15 +1140,23 @@
         <div class="runner-fields">
           <label>
             <span>Runner</span>
-            <select bind:value={plannerRunnerId} disabled={planningActive}>
+            <select value={plannerRunnerId} onchange={(event) => selectProviderRunner(event.currentTarget.value)} disabled={planningActive}>
               {#each runners as runner}
                 <option value={runner.id} disabled={!runner.available}>{runner.name}{runner.available ? ` · ${runner.version ?? runner.provider}` : " · unavailable"}</option>
               {/each}
             </select>
           </label>
           <label>
-            <span>Model <small>optional</small></span>
-            <input bind:value={plannerModel} type="text" placeholder="Use runner default" disabled={planningActive} />
+            <span>Model</span>
+            <select value={plannerModel} onchange={(event) => selectProviderModel(event.currentTarget.value)} disabled={planningActive || !selectedModels.length}>
+              {#if selectedModels.length}
+                {#each selectedModels as model}
+                  <option value={model.id}>{model.displayName}{model.isDefault ? " · default" : ""}</option>
+                {/each}
+              {:else}
+                <option value="">Model catalog unavailable</option>
+              {/if}
+            </select>
           </label>
         </div>
         {#if selectedRunner}
@@ -1002,7 +1184,7 @@
           {#if planningActive}
             <button class="secondary-button danger-button" type="button" onclick={cancelPlanning}>Cancel run</button>
           {:else}
-            <button class="primary-button" type="button" onclick={startPlanning} disabled={!plannerRequest.trim() || !selectedRunner?.available}>
+            <button class="primary-button" type="button" onclick={startPlanning} disabled={!plannerRequest.trim() || !providerSelectionReady}>
               <svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="m8 5 11 7-11 7z"/></svg>
               Generate proposals
             </button>
@@ -1156,6 +1338,26 @@
     onEdit={editTaskContent}
     onInitialize={(task) => initializeTaskContent([canonicalTaskKey(task)])}
   />
+{/if}
+
+{#if terminalOpen && selectedCheckoutId && selectedRepository}
+  {#key selectedCheckoutId}
+    <TerminalPanel
+      bind:this={terminalPanel}
+      checkoutId={selectedCheckoutId}
+      repositoryName={selectedRepository.name}
+      theme={theme === "dark" ? "dark" : "light"}
+      height={terminalHeight}
+      maximized={terminalMaximized}
+      shortcutLabel={terminalShortcutLabel}
+      onClose={() => {
+        terminalOpen = false;
+        terminalMaximized = false;
+      }}
+      onHeightChange={updateTerminalHeight}
+      onToggleMaximized={() => terminalMaximized = !terminalMaximized}
+    />
+  {/key}
 {/if}
 
 {#if editorOpen && selectedCheckoutId}

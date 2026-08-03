@@ -40,6 +40,33 @@ const api: PhaseAtlasDesktopApi = {
       input,
     ),
   },
+  runs: {
+    list: (checkoutId) => ipcRenderer.invoke("phaseatlas:runs:list", checkoutId),
+    events: (checkoutId, runId, afterSequence = 0) => ipcRenderer.invoke(
+      "phaseatlas:runs:events",
+      checkoutId,
+      runId,
+      afterSequence,
+    ),
+  },
+  terminals: {
+    list: (checkoutId) => ipcRenderer.invoke("phaseatlas:terminals:list", checkoutId),
+    create: (checkoutId, input) => ipcRenderer.invoke("phaseatlas:terminals:create", checkoutId, input),
+    write: (checkoutId, sessionId, data) => ipcRenderer.invoke(
+      "phaseatlas:terminals:write",
+      checkoutId,
+      sessionId,
+      data,
+    ),
+    resize: (checkoutId, sessionId, cols, rows) => ipcRenderer.invoke(
+      "phaseatlas:terminals:resize",
+      checkoutId,
+      sessionId,
+      cols,
+      rows,
+    ),
+    close: (checkoutId, sessionId) => ipcRenderer.invoke("phaseatlas:terminals:close", checkoutId, sessionId),
+  },
   events: {
     subscribe: (listener) => {
       const handler = (_event: Electron.IpcRendererEvent, payload: PhaseAtlasDesktopEvent) => listener(payload);

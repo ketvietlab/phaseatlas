@@ -5,18 +5,45 @@
 
 ## Decision
 
-Store repository and workspace manifests, canonical task contracts, policies, and promoted evidence in
-the repository under `.phaseatlas/`. Store volatile run state, JSONL events, logs, UI state, and caches
-under the operating system's application-support directory.
+Repository and workspace manifests, canonical task contracts, policies, task Markdown, and promoted
+evidence remain in Git under `.phaseatlas/`.
 
-Use one global catalog database owned by the main process and one database per checkout owned by its
-repository worker. Do not let multiple workers write the same SQLite database in the first release.
+The Electron main process resolves a private runtime root beneath `app.getPath("userData")` and owns:
 
-Secrets belong in the operating system credential store or the provider CLI's own authenticated state.
+```text
+<userData>/runtime/catalog.sqlite
+```
+
+The catalog stores bounded checkout identity, display, visibility, lifecycle, recovery, and last-error
+metadata. It is not a registry of live processes and survives expected shutdown, idle shutdown, and
+application restart.
+
+Each checkout worker is the sole writer of its own operational database:
+
+```text
+<userData>/runtime/checkouts/<checkoutId>/operations.sqlite
+```
+
+That store contains normalized run records and ordered events. A checkout ID is recorded in the
+database metadata and must match when reopened. Different checkout IDs never share a store, including
+when their checkouts share the same configured repository ID.
+
+Both databases use explicit schema version `1`, WAL journaling, and full synchronous commits. An
+unknown schema version or identity mismatch fails closed. This release initializes the known schema;
+it does not provide a general migration mechanism and does not silently replace incompatible data.
+
+## Security and authority boundary
+
+Operational storage must not contain provider credentials, authentication state, environment dumps,
+raw provider protocol payloads, canonical task manifests, policies, or task-completion authority.
+Secrets stay in the operating-system credential store or the provider CLI's authenticated state.
+
+Persisted run events are recoverable operational evidence. Only reviewed Git changes can alter the
+canonical task contract, promote evidence, or mark work complete.
 
 ## Consequences
 
-Task changes are diffable and reviewable. High-frequency execution events do not pollute Git. Multiple
-clones of the same repository share a stable repository identity while retaining separate local run
-state through checkout identity.
-
+Task changes remain diffable and reviewable while high-frequency events do not pollute Git. Multiple
+clones and worktrees share repository identity but retain isolated local histories. The main process
+can restore its repository catalog without eagerly starting every worker, and workers can reconcile
+interrupted runs without treating them as successful.
