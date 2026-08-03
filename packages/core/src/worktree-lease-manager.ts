@@ -159,6 +159,39 @@ export class WorktreeLeaseManager {
     });
   }
 
+  async recoverAbandoned(runId: string, decision: "resume" | "discard"): Promise<WorktreeLeaseRecord> {
+    return this.exclusive(async () => {
+      const lease = this.list().find((candidate) => candidate.runId === runId);
+      if (!lease || lease.status !== "abandoned") throw new Error(`Agent run ${runId} has no abandoned lease to recover.`);
+      this.assertManagedLease(lease);
+      const worktreeList = await this.git(["worktree", "list", "--porcelain"], this.repositoryPath);
+      const canonicalLeasePath = await realpath(lease.worktreePath);
+      const registeredPaths = worktreeList.split("\n")
+        .filter((line) => line.startsWith("worktree "))
+        .map((line) => line.slice("worktree ".length));
+      const registered = (await Promise.all(registeredPaths.map(async (candidate) => {
+        try { return await realpath(candidate); } catch { return ""; }
+      }))).includes(canonicalLeasePath);
+      if (!registered) throw new Error("Abandoned lease worktree is no longer registered.");
+      if (decision === "resume") {
+        return this.appendLeaseEvent({
+          ...lease,
+          status: "active",
+          updatedAt: new Date().toISOString(),
+          recoveryReason: "explicit_review_recovery",
+        });
+      }
+      const releasing = this.appendLeaseEvent({ ...lease, status: "releasing", updatedAt: new Date().toISOString() });
+      await this.git(["worktree", "remove", "--force", lease.worktreePath], this.repositoryPath);
+      return this.appendLeaseEvent({
+        ...releasing,
+        status: "released",
+        updatedAt: new Date().toISOString(),
+        disposition: "recovery_discarded",
+      });
+    });
+  }
+
   private appendLeaseEvent(lease: WorktreeLeaseRecord): WorktreeLeaseRecord {
     const timestamp = lease.updatedAt || new Date().toISOString();
     this.store.appendEvent({

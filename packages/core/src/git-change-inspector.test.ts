@@ -14,7 +14,7 @@ test("flags traversal, git metadata, forbidden paths, out-of-scope files, and sy
   await writeFile(outsidePath, "outside\n");
   await symlink(outsidePath, path.join(worktreePath, "allowed", "link.txt"));
   const git: GitCommand = async (args) => args[0] === "diff"
-    ? "M\0README.md\0M\0forbidden/secret.ts\0M\0../escape\0M\0.git/config\0"
+    ? "M\0README.md\0M\0forbidden/secret.ts\0M\0../escape\0M\0.git/config\0M\0allowed/package.json\0M\0allowed/migrations/001.sql\0"
     : "allowed/link.txt\0allowed/new.ts\0";
   const changes = await inspectGitChanges({
     worktreePath,
@@ -35,4 +35,6 @@ test("flags traversal, git metadata, forbidden paths, out-of-scope files, and sy
   assert.ok(byPath.get("forbidden/secret.ts")?.includes("forbidden_path"));
   assert.deepEqual(byPath.get("../escape"), ["unsafe_path"]);
   assert.deepEqual(byPath.get(".git/config"), ["unsafe_path"]);
+  assert.deepEqual(byPath.get("allowed/package.json"), ["dependency_change_not_allowed"]);
+  assert.deepEqual(byPath.get("allowed/migrations/001.sql"), ["database_migration_not_allowed"]);
 });

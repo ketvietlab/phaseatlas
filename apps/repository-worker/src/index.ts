@@ -17,6 +17,8 @@ import type {
   AgentRunStartInput,
   AgentRunSummary,
   AgentSandbox,
+  ChatEditPrepareInput,
+  ChatEditStartInput,
   PersistedRunEventPage,
   RepositoryChatCreateInput,
   RepositoryChatRenameInput,
@@ -48,6 +50,8 @@ import { assertRunnerModel, RunnerRegistry } from "./runner-registry.js";
 import { TerminalSessionManager } from "./terminal-session-manager.js";
 import { RepositoryChatAdapterRegistry } from "./chat-adapter-registry.js";
 import { RepositoryChatRuntime } from "./repository-chat-runtime.js";
+import { ChatEditAdapterRegistry } from "./chat-edit-adapter-registry.js";
+import { ChatEditRuntime } from "./chat-edit-runtime.js";
 
 interface ElectronParentPort {
   on(event: "message", listener: (event: { data: unknown }) => void): void;
@@ -92,6 +96,16 @@ const chatRuntime = new RepositoryChatRuntime(
   canonicalRepositoryRoot,
   initialRepository.checkoutId,
   (event) => send({ type: "chat.turn.event", payload: { turnId: event.turnId, event } }),
+);
+const chatEditRuntime = new ChatEditRuntime(
+  operationalStore,
+  inspector,
+  leaseManager,
+  runners,
+  new ChatEditAdapterRegistry(),
+  canonicalRepositoryRoot,
+  initialRepository.checkoutId,
+  (editId, event) => send({ type: "chat.edit.event", payload: { editId, event } }),
 );
 const parentPort: ElectronParentPort = utilityParentPort;
 const activePlanningRuns = new Map<string, AbortController>();
@@ -192,6 +206,39 @@ function chatSendInput(value: unknown): RepositoryChatSendInput {
     return { path: attachment.path };
   });
   return { sessionId: value.sessionId, text: value.text, ...(attachments.length ? { attachments } : {}) };
+}
+
+function chatEditPrepareInput(value: unknown): ChatEditPrepareInput {
+  if (!isRecord(value) || Object.keys(value).some((field) => !["sessionId", "prompt", "scope"].includes(field))) {
+    throw new Error("Chat edit preparation input is invalid.");
+  }
+  if (typeof value.sessionId !== "string" || typeof value.prompt !== "string" || !isRecord(value.scope)) {
+    throw new Error("sessionId, prompt, and scope are required.");
+  }
+  if (Object.keys(value.scope).some((field) => !["allowedPaths", "forbiddenPaths"].includes(field))) {
+    throw new Error("Chat edit scope contains unsupported fields.");
+  }
+  if (!Array.isArray(value.scope.allowedPaths) || !Array.isArray(value.scope.forbiddenPaths)) {
+    throw new Error("Chat edit scope paths must be arrays.");
+  }
+  return {
+    sessionId: value.sessionId,
+    prompt: value.prompt,
+    scope: {
+      allowedPaths: value.scope.allowedPaths as string[],
+      forbiddenPaths: value.scope.forbiddenPaths as string[],
+    },
+  };
+}
+
+function chatEditStartInput(value: unknown): ChatEditStartInput {
+  if (!isRecord(value) || Object.keys(value).some((field) => !["editId", "confirmationDigest"].includes(field))) {
+    throw new Error("Chat edit start input is invalid.");
+  }
+  if (typeof value.editId !== "string" || typeof value.confirmationDigest !== "string") {
+    throw new Error("editId and confirmationDigest are required.");
+  }
+  return { editId: value.editId, confirmationDigest: value.confirmationDigest };
 }
 
 function chatRetryInput(value: unknown): RepositoryChatRetryInput {
@@ -1005,6 +1052,56 @@ async function dispatch(request: WorkerRequest): Promise<unknown> {
     }
     case "chat.turn.retry":
       return chatRuntime.retry(chatRetryInput(requestParams(request).input));
+    case "chat.edit.prepare":
+      return chatEditRuntime.prepare(chatEditPrepareInput(requestParams(request).input));
+    case "chat.edit.list": {
+      const sessionId = requestParams(request).sessionId;
+      if (sessionId !== undefined && typeof sessionId !== "string") throw new Error("sessionId must be a string.");
+      return chatEditRuntime.list(sessionId as string | undefined);
+    }
+    case "chat.edit.start":
+      return chatEditRuntime.start(chatEditStartInput(requestParams(request).input));
+    case "chat.edit.events": {
+      const { editId, afterSequence, limit } = requestParams(request);
+      if (typeof editId !== "string") throw new Error("editId is required.");
+      return chatEditRuntime.events(editId, Number(afterSequence ?? 0), Number(limit ?? 200));
+    }
+    case "chat.edit.result": {
+      const editId = requestParams(request).editId;
+      if (typeof editId !== "string") throw new Error("editId is required.");
+      return chatEditRuntime.result(editId);
+    }
+    case "chat.edit.cancel": {
+      const editId = requestParams(request).editId;
+      if (typeof editId !== "string") throw new Error("editId is required.");
+      return chatEditRuntime.cancel(editId);
+    }
+    case "chat.edit.accept": {
+      const editId = requestParams(request).editId;
+      if (typeof editId !== "string") throw new Error("editId is required.");
+      return chatEditRuntime.accept(editId);
+    }
+    case "chat.edit.discard": {
+      const editId = requestParams(request).editId;
+      if (typeof editId !== "string") throw new Error("editId is required.");
+      return chatEditRuntime.discard(editId);
+    }
+    case "chat.edit.retain": {
+      const editId = requestParams(request).editId;
+      if (typeof editId !== "string") throw new Error("editId is required.");
+      return chatEditRuntime.retain(editId);
+    }
+    case "chat.edit.recover": {
+      const input = requestParams(request).input;
+      if (!isRecord(input) || Object.keys(input).some((field) => !["editId", "decision"].includes(field))) {
+        throw new Error("Chat edit recovery input is invalid.");
+      }
+      const { editId, decision } = input;
+      if (typeof editId !== "string" || !["resume_review", "discard"].includes(String(decision))) {
+        throw new Error("Chat edit recovery input is invalid.");
+      }
+      return chatEditRuntime.recover(editId, decision as "resume_review" | "discard");
+    }
     case "file.list": {
       const directory = requestParams(request).directory;
       if (directory !== undefined && typeof directory !== "string") throw new Error("directory must be a string.");
