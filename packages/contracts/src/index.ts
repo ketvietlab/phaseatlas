@@ -197,9 +197,22 @@ export interface TaskSnapshot {
 
 export type RunnerCapability =
   | "planning"
+  | "execution"
   | "streaming"
   | "structured_output"
-  | "repository_read";
+  | "repository_read"
+  | "repository_write"
+  | "cancellation";
+
+export interface RunnerModelDescriptor {
+  id: string;
+  displayName: string;
+  isDefault: boolean;
+  reasoningEfforts: string[];
+  defaultReasoningEffort?: string;
+}
+
+export type RunnerModelDiscoveryStatus = "available" | "unavailable";
 
 export interface RunnerDescriptor {
   id: string;
@@ -209,6 +222,15 @@ export interface RunnerDescriptor {
   available: boolean;
   unavailableReason?: string;
   capabilities: RunnerCapability[];
+  models: RunnerModelDescriptor[];
+  modelDiscovery: {
+    status: RunnerModelDiscoveryStatus;
+    unavailableReason?: string;
+  };
+  execution?: {
+    actions: AgentRunAction[];
+    sandboxes: AgentSandbox[];
+  };
 }
 
 export interface TaskProposalCriterion {
@@ -441,7 +463,7 @@ export interface AgentRunResult {
   blockers: string[];
   nextAction: string;
   requiresHumanReview: boolean;
-  proposedTaskState?: TaskState;
+  proposedTaskState: TaskState;
 }
 
 export interface InspectedAgentChange {

@@ -83,7 +83,7 @@ export function validateAgentRunResult(value: unknown): AgentRunResult {
   if (!Array.isArray(value.blockers) || value.blockers.some((item) => typeof item !== "string" || !item.trim())) {
     throw new Error("blockers must be an array of non-empty strings.");
   }
-  if (value.proposedTaskState !== undefined && !TASK_STATES.includes(value.proposedTaskState as never)) {
+  if (!TASK_STATES.includes(value.proposedTaskState as never)) {
     throw new Error("proposedTaskState is invalid.");
   }
   return {
@@ -95,6 +95,6 @@ export function validateAgentRunResult(value: unknown): AgentRunResult {
     blockers: (value.blockers as string[]).map((item) => item.trim()),
     nextAction,
     requiresHumanReview: value.requiresHumanReview,
-    ...(value.proposedTaskState ? { proposedTaskState: value.proposedTaskState as AgentRunResult["proposedTaskState"] } : {}),
+    proposedTaskState: value.proposedTaskState as AgentRunResult["proposedTaskState"],
   };
 }

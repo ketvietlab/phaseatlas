@@ -66,6 +66,25 @@ run.failed
 The checkout operational store assigns the durable monotonically increasing sequence. Provider
 sequence values are not trusted as persistence authority.
 
+## Provider and model discovery
+
+Repository workers expose providers through stable runner IDs, never executable paths. A runner
+descriptor contains a bounded execution capability projection plus a model catalog discovered from
+the installed, authenticated provider CLI. Each model entry contains only its stable ID, display
+name, provider-default marker, and supported reasoning-effort labels. Raw provider catalog payloads,
+instructions, credentials, executable locations, and authentication details do not cross the worker
+boundary.
+
+Repository UI preferences store only the selected runner and model IDs for a checkout. Before a
+planning or task-content provider handoff, the repository worker compares a supplied model ID with a
+fresh descriptor and rejects an ID that is not present. When model discovery is unavailable, the UI
+disables model-dependent actions; it never substitutes a free-form field or a hardcoded catalog.
+
+Execution adapters receive the same trusted model selection through the provider-neutral execution
+boundary when execution orchestration is enabled. They may translate the ID into their private CLI
+argument, but they cannot accept a renderer-supplied executable, command, working directory, or
+permission flag.
+
 ## Git-derived changes and result validation
 
 For write runs, changed files are independently derived from Git in the leased worktree. Paths are
@@ -76,6 +95,10 @@ replace this inspection.
 Runner results are validated against `packages/contracts/schemas/agent-run-result.schema.json` and the
 shared runtime validator before acceptance. Unsupported fields, unsafe paths, invalid outcomes,
 verification records, evidence records, or proposed states fail closed.
+
+The result schema is strict-compatible: every declared object property is required, including the
+advisory `proposedTaskState`. This keeps the JSON Schema and TypeScript contract aligned for provider
+structured-output APIs.
 
 `proposedTaskState` is always advisory, including `done`. Result acceptance and lease completion never
 write canonical task files, promote evidence, or transition task state. Those actions require a
