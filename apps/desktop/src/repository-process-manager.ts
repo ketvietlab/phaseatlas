@@ -67,6 +67,16 @@ function checkoutIdForPath(canonicalPath: string): string {
   return createHash("sha256").update(canonicalPath).digest("hex").slice(0, 20);
 }
 
+function isLegacyManifestUpgrade(descriptor: RepositorySummary, expected: RepositorySummary): boolean {
+  return expected.configuration === "legacy" &&
+    expected.id === `local-${expected.checkoutId}` &&
+    descriptor.configuration === "configured" &&
+    descriptor.checkoutId === expected.checkoutId &&
+    descriptor.path === expected.path &&
+    Boolean(descriptor.id) &&
+    descriptor.id !== expected.id;
+}
+
 function workerEnvironment(repositoryPath: string, checkoutStorePath: string): Record<string, string> {
   const allowedKeys = [
     "PATH",
@@ -600,7 +610,8 @@ export class RepositoryProcessManager {
   }
 
   private validateDescriptor(descriptor: RepositorySummary, expected: RepositorySummary): void {
-    if (descriptor.checkoutId !== expected.checkoutId || descriptor.path !== expected.path || descriptor.id !== expected.id) {
+    const sameCheckout = descriptor.checkoutId === expected.checkoutId && descriptor.path === expected.path;
+    if (!sameCheckout || (descriptor.id !== expected.id && !isLegacyManifestUpgrade(descriptor, expected))) {
       throw new Error("Repository descriptor does not match the persisted catalog identity.");
     }
   }
