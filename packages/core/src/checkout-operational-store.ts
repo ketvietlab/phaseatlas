@@ -12,6 +12,13 @@ import type {
   PersistedRunKind,
   PersistedRunRecord,
   PersistedRunStatus,
+  PersistedRepositoryChatEvent,
+  RepositoryChatAttachment,
+  RepositoryChatEventPage,
+  RepositoryChatMessage,
+  RepositoryChatSession,
+  RepositoryChatTurn,
+  RepositoryChatTurnStatus,
   ValidatedAgentRunResult,
 } from "@phaseatlas/contracts";
 
@@ -20,6 +27,21 @@ const RUN_KINDS = new Set<PersistedRunKind>(["planning", "task_content", "agent"
 const RUN_STATUSES = new Set<PersistedRunStatus>(["starting", "running", "completed", "failed", "cancelled", "interrupted"]);
 const TERMINAL_RUN_STATUSES = new Set<PersistedRunStatus>(["completed", "failed", "cancelled", "interrupted"]);
 const POST_TERMINAL_AUDIT_PREFIXES = ["lease.", "result.revalidation"];
+const TERMINAL_CHAT_TURN_STATUSES = new Set<RepositoryChatTurnStatus>(["completed", "failed", "cancelled", "interrupted"]);
+const CHAT_EVENT_TYPES = new Set<PersistedRepositoryChatEvent["type"]>([
+  "chat.turn.status",
+  "chat.assistant.delta",
+  "chat.reasoning",
+  "chat.tool.started",
+  "chat.tool.output",
+  "chat.tool.completed",
+  "chat.file.reference",
+  "chat.usage",
+  "chat.turn.completed",
+  "chat.turn.failed",
+  "chat.turn.cancelled",
+  "chat.turn.interrupted",
+]);
 const { DatabaseSync } = createRequire(import.meta.url)("node:" + "sqlite") as {
   DatabaseSync: typeof DatabaseSyncType;
 };
@@ -40,6 +62,15 @@ function parsePayload(value: unknown): Record<string, unknown> {
     throw new Error("Operational store event payload must be an object.");
   }
   return parsed as Record<string, unknown>;
+}
+
+function parseAttachments(value: unknown): RepositoryChatAttachment[] {
+  if (typeof value !== "string") throw new Error("Operational store contains invalid chat attachments.");
+  const parsed = JSON.parse(value) as unknown;
+  if (!Array.isArray(parsed) || parsed.some((item) => !item || typeof item !== "object" || Array.isArray(item) || typeof (item as { path?: unknown }).path !== "string")) {
+    throw new Error("Operational store contains invalid chat attachments.");
+  }
+  return parsed as RepositoryChatAttachment[];
 }
 
 function parseValidatedResult(value: unknown): ValidatedAgentRunResult {
@@ -349,6 +380,354 @@ export class CheckoutOperationalStore {
     return row?.parent_run_id ?? null;
   }
 
+  createChatSession(input: RepositoryChatSession): RepositoryChatSession {
+    if (input.checkoutId !== this.checkoutId) throw new Error("Chat session belongs to a different checkout.");
+    if (!input.sessionId.trim() || !input.runnerId.trim() || !input.model.trim() || !input.title.trim()) {
+      throw new Error("Chat session metadata is incomplete.");
+    }
+    this.database.prepare(`
+      INSERT INTO chat_sessions (
+        session_id, checkout_id, runner_id, model_id, title, state, created_at, updated_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+    `).run(
+      input.sessionId,
+      input.checkoutId,
+      input.runnerId,
+      input.model,
+      input.title,
+      input.state,
+      input.createdAt,
+      input.updatedAt,
+    );
+    return this.getChatSession(input.sessionId);
+  }
+
+  listChatSessions(): RepositoryChatSession[] {
+    const rows = this.database.prepare(`
+      SELECT * FROM chat_sessions ORDER BY updated_at DESC, session_id
+    `).all() as Array<Record<string, unknown>>;
+    return rows.map((row) => this.chatSessionFromRow(row));
+  }
+
+  getChatSession(sessionId: string): RepositoryChatSession {
+    const row = this.database.prepare("SELECT * FROM chat_sessions WHERE session_id = ?").get(sessionId) as Record<string, unknown> | undefined;
+    if (!row) throw new Error(`Chat session ${sessionId} is not registered.`);
+    return this.chatSessionFromRow(row);
+  }
+
+  renameChatSession(sessionId: string, title: string, timestamp = new Date().toISOString()): RepositoryChatSession {
+    if (!title.trim()) throw new Error("Chat session title is required.");
+    this.getChatSession(sessionId);
+    this.database.prepare("UPDATE chat_sessions SET title = ?, updated_at = ? WHERE session_id = ?")
+      .run(title.trim(), timestamp, sessionId);
+    return this.getChatSession(sessionId);
+  }
+
+  closeChatSession(sessionId: string, timestamp = new Date().toISOString()): RepositoryChatSession {
+    const session = this.getChatSession(sessionId);
+    const active = this.database.prepare(`
+      SELECT turn_id FROM chat_turns WHERE session_id = ? AND status IN ('starting', 'running') LIMIT 1
+    `).get(sessionId) as { turn_id?: string } | undefined;
+    if (active?.turn_id) throw new Error("Cancel the active chat turn before closing this session.");
+    if (session.state !== "closed") {
+      this.database.prepare("UPDATE chat_sessions SET state = 'closed', updated_at = ? WHERE session_id = ?")
+        .run(timestamp, sessionId);
+    }
+    return this.getChatSession(sessionId);
+  }
+
+  createChatTurn(input: {
+    turn: RepositoryChatTurn;
+    userMessage?: RepositoryChatMessage;
+  }): RepositoryChatTurn {
+    const session = this.getChatSession(input.turn.sessionId);
+    if (session.state !== "open") throw new Error("Chat session is closed.");
+    if (input.turn.runnerId !== session.runnerId || input.turn.model !== session.model) {
+      throw new Error("Chat turn provider does not match its session.");
+    }
+    if (!input.turn.turnId.trim() || !input.turn.userMessageId.trim() || input.turn.status !== "starting") {
+      throw new Error("Chat turn metadata is invalid.");
+    }
+    const active = this.database.prepare(`
+      SELECT turn_id FROM chat_turns WHERE session_id = ? AND status IN ('starting', 'running') LIMIT 1
+    `).get(session.sessionId) as { turn_id?: string } | undefined;
+    if (active?.turn_id) throw new Error("Chat session already has an active turn.");
+    this.database.exec("BEGIN IMMEDIATE");
+    try {
+      if (input.userMessage) {
+        if (input.userMessage.sessionId !== session.sessionId || input.userMessage.role !== "user") {
+          throw new Error("Chat user message does not match its turn.");
+        }
+        if (
+          input.userMessage.messageId !== input.turn.userMessageId ||
+          input.userMessage.turnId !== input.turn.turnId ||
+          !input.userMessage.content.trim() ||
+          !Number.isInteger(input.userMessage.sequence) || input.userMessage.sequence < 1
+        ) {
+          throw new Error("Chat user message metadata is invalid.");
+        }
+        this.database.prepare(`
+          INSERT INTO chat_messages (
+            message_id, session_id, turn_id, role, content, attachments_json, sequence, created_at
+          ) VALUES (?, ?, ?, 'user', ?, ?, ?, ?)
+        `).run(
+          input.userMessage.messageId,
+          session.sessionId,
+          input.turn.turnId,
+          input.userMessage.content,
+          JSON.stringify(input.userMessage.attachments),
+          input.userMessage.sequence,
+          input.userMessage.createdAt,
+        );
+      } else {
+        const existing = this.getChatMessage(input.turn.userMessageId);
+        if (existing.sessionId !== session.sessionId || existing.role !== "user") {
+          throw new Error("Retry message does not belong to this chat session.");
+        }
+        if (!input.turn.parentTurnId) throw new Error("A reused chat message requires a parent turn.");
+        const parent = this.getChatTurn(input.turn.parentTurnId);
+        if (
+          parent.sessionId !== session.sessionId || parent.status !== "interrupted" ||
+          parent.userMessageId !== input.turn.userMessageId
+        ) {
+          throw new Error("Chat retry does not match an interrupted parent turn.");
+        }
+      }
+      this.database.prepare(`
+        INSERT INTO chat_turns (
+          turn_id, session_id, status, runner_id, model_id, user_message_id,
+          assistant_message_id, parent_turn_id, created_at, updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, NULL, ?, ?, ?)
+      `).run(
+        input.turn.turnId,
+        session.sessionId,
+        input.turn.status,
+        input.turn.runnerId,
+        input.turn.model,
+        input.turn.userMessageId,
+        input.turn.parentTurnId ?? null,
+        input.turn.createdAt,
+        input.turn.updatedAt,
+      );
+      this.database.prepare("UPDATE chat_sessions SET updated_at = ? WHERE session_id = ?")
+        .run(input.turn.updatedAt, session.sessionId);
+      this.database.exec("COMMIT");
+      return this.getChatTurn(input.turn.turnId);
+    } catch (error) {
+      this.database.exec("ROLLBACK");
+      throw error;
+    }
+  }
+
+  nextChatMessageSequence(sessionId: string): number {
+    this.getChatSession(sessionId);
+    const row = this.database.prepare(
+      "SELECT COALESCE(MAX(sequence), 0) + 1 AS next_sequence FROM chat_messages WHERE session_id = ?",
+    ).get(sessionId) as { next_sequence: number };
+    return row.next_sequence;
+  }
+
+  listChatMessages(sessionId: string): RepositoryChatMessage[] {
+    this.getChatSession(sessionId);
+    const rows = this.database.prepare(`
+      SELECT * FROM chat_messages WHERE session_id = ? ORDER BY sequence, message_id
+    `).all(sessionId) as Array<Record<string, unknown>>;
+    return rows.map((row) => this.chatMessageFromRow(row));
+  }
+
+  getChatMessage(messageId: string): RepositoryChatMessage {
+    const row = this.database.prepare("SELECT * FROM chat_messages WHERE message_id = ?").get(messageId) as Record<string, unknown> | undefined;
+    if (!row) throw new Error(`Chat message ${messageId} is not registered.`);
+    return this.chatMessageFromRow(row);
+  }
+
+  listChatTurns(sessionId: string): RepositoryChatTurn[] {
+    this.getChatSession(sessionId);
+    const rows = this.database.prepare(`
+      SELECT * FROM chat_turns WHERE session_id = ? ORDER BY created_at, turn_id
+    `).all(sessionId) as Array<Record<string, unknown>>;
+    return rows.map((row) => this.chatTurnFromRow(row));
+  }
+
+  getChatTurn(turnId: string): RepositoryChatTurn {
+    const row = this.database.prepare("SELECT * FROM chat_turns WHERE turn_id = ?").get(turnId) as Record<string, unknown> | undefined;
+    if (!row) throw new Error(`Chat turn ${turnId} is not registered.`);
+    return this.chatTurnFromRow(row);
+  }
+
+  appendChatEvent(input: {
+    turnId: string;
+    type: PersistedRepositoryChatEvent["type"];
+    payload: Record<string, unknown>;
+    status?: Extract<RepositoryChatTurnStatus, "running">;
+    timestamp?: string;
+  }): PersistedRepositoryChatEvent {
+    if (!CHAT_EVENT_TYPES.has(input.type) || input.type.startsWith("chat.turn.") && input.type !== "chat.turn.status") {
+      throw new Error("Chat adapter event type is invalid.");
+    }
+    const timestamp = input.timestamp ?? new Date().toISOString();
+    this.database.exec("BEGIN IMMEDIATE");
+    try {
+      const turn = this.getChatTurn(input.turnId);
+      if (TERMINAL_CHAT_TURN_STATUSES.has(turn.status)) throw new Error(`Chat turn ${input.turnId} is already terminal.`);
+      const row = this.database.prepare(
+        "SELECT COALESCE(MAX(sequence), 0) + 1 AS next_sequence FROM chat_turn_events WHERE turn_id = ?",
+      ).get(input.turnId) as { next_sequence: number };
+      this.database.prepare(`
+        INSERT INTO chat_turn_events (turn_id, sequence, event_type, timestamp, payload_json)
+        VALUES (?, ?, ?, ?, ?)
+      `).run(input.turnId, row.next_sequence, input.type, timestamp, JSON.stringify(input.payload));
+      this.database.prepare("UPDATE chat_turns SET status = COALESCE(?, status), updated_at = ? WHERE turn_id = ?")
+        .run(input.status ?? null, timestamp, input.turnId);
+      this.database.prepare("UPDATE chat_sessions SET updated_at = ? WHERE session_id = ?")
+        .run(timestamp, turn.sessionId);
+      this.database.exec("COMMIT");
+      return { turnId: input.turnId, sequence: row.next_sequence, type: input.type, timestamp, payload: input.payload };
+    } catch (error) {
+      this.database.exec("ROLLBACK");
+      throw error;
+    }
+  }
+
+  listChatEventPage(turnId: string, afterSequence = 0, limit = 200): RepositoryChatEventPage {
+    if (!Number.isInteger(afterSequence) || afterSequence < 0) throw new Error("afterSequence must be a non-negative integer.");
+    if (!Number.isInteger(limit) || limit < 1 || limit > 500) throw new Error("limit must be between 1 and 500.");
+    this.getChatTurn(turnId);
+    const rows = this.database.prepare(`
+      SELECT * FROM chat_turn_events WHERE turn_id = ? AND sequence > ? ORDER BY sequence LIMIT ?
+    `).all(turnId, afterSequence, limit + 1) as Array<Record<string, unknown>>;
+    const hasMore = rows.length > limit;
+    const events = rows.slice(0, limit).map((row) => this.chatEventFromRow(row));
+    return {
+      turnId,
+      events,
+      afterSequence,
+      nextSequence: events.at(-1)?.sequence ?? afterSequence,
+      hasMore,
+    };
+  }
+
+  completeChatTurn(input: {
+    turnId: string;
+    assistantMessage: RepositoryChatMessage;
+    timestamp?: string;
+  }): { accepted: boolean; turn: RepositoryChatTurn; event?: PersistedRepositoryChatEvent } {
+    const timestamp = input.timestamp ?? input.assistantMessage.createdAt;
+    this.database.exec("BEGIN IMMEDIATE");
+    try {
+      const turn = this.getChatTurn(input.turnId);
+      if (TERMINAL_CHAT_TURN_STATUSES.has(turn.status)) {
+        this.database.exec("COMMIT");
+        return { accepted: false, turn };
+      }
+      if (input.assistantMessage.sessionId !== turn.sessionId || input.assistantMessage.role !== "assistant") {
+        throw new Error("Assistant message does not match its chat turn.");
+      }
+      if (
+        input.assistantMessage.turnId !== input.turnId || !input.assistantMessage.messageId.trim() ||
+        !input.assistantMessage.content.trim() || !Number.isInteger(input.assistantMessage.sequence) ||
+        input.assistantMessage.sequence < 1 || input.assistantMessage.attachments.length
+      ) {
+        throw new Error("Assistant message metadata is invalid.");
+      }
+      const eventRow = this.database.prepare(
+        "SELECT COALESCE(MAX(sequence), 0) + 1 AS next_sequence FROM chat_turn_events WHERE turn_id = ?",
+      ).get(input.turnId) as { next_sequence: number };
+      this.database.prepare(`
+        INSERT INTO chat_messages (
+          message_id, session_id, turn_id, role, content, attachments_json, sequence, created_at
+        ) VALUES (?, ?, ?, 'assistant', ?, '[]', ?, ?)
+      `).run(
+        input.assistantMessage.messageId,
+        turn.sessionId,
+        input.turnId,
+        input.assistantMessage.content,
+        input.assistantMessage.sequence,
+        input.assistantMessage.createdAt,
+      );
+      this.database.prepare(`
+        INSERT INTO chat_turn_events (turn_id, sequence, event_type, timestamp, payload_json)
+        VALUES (?, ?, 'chat.turn.completed', ?, ?)
+      `).run(input.turnId, eventRow.next_sequence, timestamp, JSON.stringify({ messageId: input.assistantMessage.messageId }));
+      this.database.prepare(`
+        UPDATE chat_turns SET status = 'completed', assistant_message_id = ?, updated_at = ? WHERE turn_id = ?
+      `).run(input.assistantMessage.messageId, timestamp, input.turnId);
+      this.database.prepare("UPDATE chat_sessions SET updated_at = ? WHERE session_id = ?")
+        .run(timestamp, turn.sessionId);
+      this.database.exec("COMMIT");
+      return {
+        accepted: true,
+        turn: this.getChatTurn(input.turnId),
+        event: {
+          turnId: input.turnId,
+          sequence: eventRow.next_sequence,
+          type: "chat.turn.completed",
+          timestamp,
+          payload: { messageId: input.assistantMessage.messageId },
+        },
+      };
+    } catch (error) {
+      this.database.exec("ROLLBACK");
+      throw error;
+    }
+  }
+
+  terminalizeChatTurn(input: {
+    turnId: string;
+    status: Extract<RepositoryChatTurnStatus, "failed" | "cancelled" | "interrupted">;
+    type: Extract<PersistedRepositoryChatEvent["type"], "chat.turn.failed" | "chat.turn.cancelled" | "chat.turn.interrupted">;
+    payload: Record<string, unknown>;
+    timestamp?: string;
+  }): { accepted: boolean; turn: RepositoryChatTurn; event?: PersistedRepositoryChatEvent } {
+    const timestamp = input.timestamp ?? new Date().toISOString();
+    this.database.exec("BEGIN IMMEDIATE");
+    try {
+      const turn = this.getChatTurn(input.turnId);
+      if (TERMINAL_CHAT_TURN_STATUSES.has(turn.status)) {
+        this.database.exec("COMMIT");
+        return { accepted: false, turn };
+      }
+      const row = this.database.prepare(
+        "SELECT COALESCE(MAX(sequence), 0) + 1 AS next_sequence FROM chat_turn_events WHERE turn_id = ?",
+      ).get(input.turnId) as { next_sequence: number };
+      this.database.prepare(`
+        INSERT INTO chat_turn_events (turn_id, sequence, event_type, timestamp, payload_json)
+        VALUES (?, ?, ?, ?, ?)
+      `).run(input.turnId, row.next_sequence, input.type, timestamp, JSON.stringify(input.payload));
+      this.database.prepare("UPDATE chat_turns SET status = ?, updated_at = ? WHERE turn_id = ?")
+        .run(input.status, timestamp, input.turnId);
+      this.database.prepare("UPDATE chat_sessions SET updated_at = ? WHERE session_id = ?")
+        .run(timestamp, turn.sessionId);
+      this.database.exec("COMMIT");
+      return {
+        accepted: true,
+        turn: this.getChatTurn(input.turnId),
+        event: { turnId: input.turnId, sequence: row.next_sequence, type: input.type, timestamp, payload: input.payload },
+      };
+    } catch (error) {
+      this.database.exec("ROLLBACK");
+      throw error;
+    }
+  }
+
+  reconcileInterruptedChatTurns(timestamp = new Date().toISOString()): PersistedRepositoryChatEvent[] {
+    const events: PersistedRepositoryChatEvent[] = [];
+    const rows = this.database.prepare(`
+      SELECT turn_id FROM chat_turns WHERE status IN ('starting', 'running') ORDER BY created_at, turn_id
+    `).all() as Array<{ turn_id: string }>;
+    for (const row of rows) {
+      const terminal = this.terminalizeChatTurn({
+        turnId: row.turn_id,
+        status: "interrupted",
+        type: "chat.turn.interrupted",
+        payload: { reason: "worker_restarted" },
+        timestamp,
+      });
+      if (terminal.event) events.push(terminal.event);
+    }
+    return events;
+  }
+
   reconcileInterruptedRuns(timestamp = new Date().toISOString()): PersistedRunEvent[] {
     const interrupted: PersistedRunEvent[] = [];
     for (const run of this.listRuns().filter((item) => item.status === "starting" || item.status === "running")) {
@@ -381,6 +760,85 @@ export class CheckoutOperationalStore {
       taskKeys: parseTaskKeys(row.task_keys_json),
       createdAt: String(row.created_at),
       updatedAt: String(row.updated_at),
+    };
+  }
+
+  private chatSessionFromRow(row: Record<string, unknown>): RepositoryChatSession {
+    const state = String(row.state);
+    if (
+      !String(row.session_id) || String(row.checkout_id) !== this.checkoutId ||
+      !String(row.runner_id) || !String(row.model_id) || !String(row.title) ||
+      !["open", "closed"].includes(state)
+    ) {
+      throw new Error("Operational store contains invalid chat session metadata.");
+    }
+    return {
+      sessionId: String(row.session_id),
+      checkoutId: String(row.checkout_id),
+      runnerId: String(row.runner_id),
+      model: String(row.model_id),
+      title: String(row.title),
+      state: state as RepositoryChatSession["state"],
+      createdAt: String(row.created_at),
+      updatedAt: String(row.updated_at),
+    };
+  }
+
+  private chatMessageFromRow(row: Record<string, unknown>): RepositoryChatMessage {
+    const role = String(row.role);
+    if (
+      !String(row.message_id) || !String(row.session_id) || !String(row.content) ||
+      !["user", "assistant"].includes(role) || !Number.isInteger(Number(row.sequence)) || Number(row.sequence) < 1
+    ) {
+      throw new Error("Operational store contains invalid chat message metadata.");
+    }
+    return {
+      messageId: String(row.message_id),
+      sessionId: String(row.session_id),
+      ...(typeof row.turn_id === "string" ? { turnId: row.turn_id } : {}),
+      role: role as RepositoryChatMessage["role"],
+      content: String(row.content),
+      attachments: parseAttachments(row.attachments_json),
+      sequence: Number(row.sequence),
+      createdAt: String(row.created_at),
+    };
+  }
+
+  private chatTurnFromRow(row: Record<string, unknown>): RepositoryChatTurn {
+    const status = String(row.status) as RepositoryChatTurnStatus;
+    if (
+      !String(row.turn_id) || !String(row.session_id) || !String(row.runner_id) ||
+      !String(row.model_id) || !String(row.user_message_id) ||
+      !["starting", "running", "completed", "failed", "cancelled", "interrupted"].includes(status)
+    ) {
+      throw new Error("Operational store contains invalid chat turn metadata.");
+    }
+    return {
+      turnId: String(row.turn_id),
+      sessionId: String(row.session_id),
+      status,
+      runnerId: String(row.runner_id),
+      model: String(row.model_id),
+      userMessageId: String(row.user_message_id),
+      ...(typeof row.assistant_message_id === "string" ? { assistantMessageId: row.assistant_message_id } : {}),
+      ...(typeof row.parent_turn_id === "string" ? { parentTurnId: row.parent_turn_id } : {}),
+      createdAt: String(row.created_at),
+      updatedAt: String(row.updated_at),
+    };
+  }
+
+  private chatEventFromRow(row: Record<string, unknown>): PersistedRepositoryChatEvent {
+    const type = String(row.event_type) as PersistedRepositoryChatEvent["type"];
+    const sequence = Number(row.sequence);
+    if (!String(row.turn_id) || !CHAT_EVENT_TYPES.has(type) || !Number.isInteger(sequence) || sequence < 1) {
+      throw new Error("Operational store contains invalid chat event metadata.");
+    }
+    return {
+      turnId: String(row.turn_id),
+      sequence,
+      type,
+      timestamp: String(row.timestamp),
+      payload: parsePayload(row.payload_json),
     };
   }
 
@@ -435,6 +893,47 @@ export class CheckoutOperationalStore {
       CREATE TABLE IF NOT EXISTS run_attempt_links (
         run_id TEXT PRIMARY KEY REFERENCES runs(run_id) ON DELETE CASCADE,
         parent_run_id TEXT NOT NULL REFERENCES runs(run_id)
+      );
+      CREATE TABLE IF NOT EXISTS chat_sessions (
+        session_id TEXT PRIMARY KEY,
+        checkout_id TEXT NOT NULL,
+        runner_id TEXT NOT NULL,
+        model_id TEXT NOT NULL,
+        title TEXT NOT NULL,
+        state TEXT NOT NULL CHECK(state IN ('open', 'closed')),
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+      );
+      CREATE TABLE IF NOT EXISTS chat_messages (
+        message_id TEXT PRIMARY KEY,
+        session_id TEXT NOT NULL REFERENCES chat_sessions(session_id) ON DELETE CASCADE,
+        turn_id TEXT,
+        role TEXT NOT NULL CHECK(role IN ('user', 'assistant')),
+        content TEXT NOT NULL,
+        attachments_json TEXT NOT NULL,
+        sequence INTEGER NOT NULL,
+        created_at TEXT NOT NULL,
+        UNIQUE(session_id, sequence)
+      );
+      CREATE TABLE IF NOT EXISTS chat_turns (
+        turn_id TEXT PRIMARY KEY,
+        session_id TEXT NOT NULL REFERENCES chat_sessions(session_id) ON DELETE CASCADE,
+        status TEXT NOT NULL CHECK(status IN ('starting', 'running', 'completed', 'failed', 'cancelled', 'interrupted')),
+        runner_id TEXT NOT NULL,
+        model_id TEXT NOT NULL,
+        user_message_id TEXT NOT NULL REFERENCES chat_messages(message_id),
+        assistant_message_id TEXT REFERENCES chat_messages(message_id),
+        parent_turn_id TEXT REFERENCES chat_turns(turn_id),
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+      );
+      CREATE TABLE IF NOT EXISTS chat_turn_events (
+        turn_id TEXT NOT NULL REFERENCES chat_turns(turn_id) ON DELETE CASCADE,
+        sequence INTEGER NOT NULL,
+        event_type TEXT NOT NULL,
+        timestamp TEXT NOT NULL,
+        payload_json TEXT NOT NULL,
+        PRIMARY KEY (turn_id, sequence)
       );
     `);
     const schema = this.database.prepare("SELECT value FROM store_meta WHERE key = 'schema_version'").get() as { value?: string } | undefined;

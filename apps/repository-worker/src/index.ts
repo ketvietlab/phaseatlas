@@ -18,6 +18,10 @@ import type {
   AgentRunSummary,
   AgentSandbox,
   PersistedRunEventPage,
+  RepositoryChatCreateInput,
+  RepositoryChatRenameInput,
+  RepositoryChatRetryInput,
+  RepositoryChatSendInput,
   TaskContentEvent,
   TaskContentRunStatus,
   TaskContentRunSummary,
@@ -42,6 +46,8 @@ import {
 import { watch, type FSWatcher } from "chokidar";
 import { assertRunnerModel, RunnerRegistry } from "./runner-registry.js";
 import { TerminalSessionManager } from "./terminal-session-manager.js";
+import { RepositoryChatAdapterRegistry } from "./chat-adapter-registry.js";
+import { RepositoryChatRuntime } from "./repository-chat-runtime.js";
 
 interface ElectronParentPort {
   on(event: "message", listener: (event: { data: unknown }) => void): void;
@@ -74,10 +80,19 @@ if (
 }
 const operationalStore = new CheckoutOperationalStore(resolvedCheckoutStorePath, initialRepository.checkoutId);
 operationalStore.reconcileInterruptedRuns();
+operationalStore.reconcileInterruptedChatTurns();
 const leaseManager = new WorktreeLeaseManager(canonicalRepositoryRoot, initialRepository.checkoutId, operationalStore);
 const executionScheduler = new AgentExecutionScheduler(inspector, operationalStore, leaseManager);
 const abandonedLeases = await leaseManager.reconcileAbandoned();
 const runners = new RunnerRegistry();
+const chatRuntime = new RepositoryChatRuntime(
+  operationalStore,
+  runners,
+  new RepositoryChatAdapterRegistry(),
+  canonicalRepositoryRoot,
+  initialRepository.checkoutId,
+  (event) => send({ type: "chat.turn.event", payload: { turnId: event.turnId, event } }),
+);
 const parentPort: ElectronParentPort = utilityParentPort;
 const activePlanningRuns = new Map<string, AbortController>();
 const activeTaskContentRuns = new Map<string, {
@@ -135,6 +150,55 @@ function terminalCreateInput(value: unknown): Partial<TerminalCreateInput> {
     ...(value.cols !== undefined ? { cols: value.cols as number } : {}),
     ...(value.rows !== undefined ? { rows: value.rows as number } : {}),
   };
+}
+
+function chatCreateInput(value: unknown): RepositoryChatCreateInput {
+  if (!isRecord(value)) throw new Error("Chat session input is required.");
+  const allowed = new Set(["runnerId", "model", "title"]);
+  if (Object.keys(value).some((field) => !allowed.has(field))) throw new Error("Chat session input contains unsupported fields.");
+  if (typeof value.runnerId !== "string" || typeof value.model !== "string") {
+    throw new Error("runnerId and model are required.");
+  }
+  if (value.title !== undefined && typeof value.title !== "string") throw new Error("title must be a string.");
+  return {
+    runnerId: value.runnerId,
+    model: value.model,
+    ...(typeof value.title === "string" ? { title: value.title } : {}),
+  };
+}
+
+function chatRenameInput(value: unknown): RepositoryChatRenameInput {
+  if (!isRecord(value) || Object.keys(value).some((field) => !["sessionId", "title"].includes(field))) {
+    throw new Error("Chat rename input is invalid.");
+  }
+  if (typeof value.sessionId !== "string" || typeof value.title !== "string") {
+    throw new Error("sessionId and title are required.");
+  }
+  return { sessionId: value.sessionId, title: value.title };
+}
+
+function chatSendInput(value: unknown): RepositoryChatSendInput {
+  if (!isRecord(value) || Object.keys(value).some((field) => !["sessionId", "text", "attachments"].includes(field))) {
+    throw new Error("Chat turn input is invalid.");
+  }
+  if (typeof value.sessionId !== "string" || typeof value.text !== "string") {
+    throw new Error("sessionId and text are required.");
+  }
+  if (value.attachments !== undefined && !Array.isArray(value.attachments)) throw new Error("attachments must be an array.");
+  const attachments = (value.attachments ?? []).map((attachment) => {
+    if (!isRecord(attachment) || Object.keys(attachment).some((field) => field !== "path") || typeof attachment.path !== "string") {
+      throw new Error("Chat attachment is invalid.");
+    }
+    return { path: attachment.path };
+  });
+  return { sessionId: value.sessionId, text: value.text, ...(attachments.length ? { attachments } : {}) };
+}
+
+function chatRetryInput(value: unknown): RepositoryChatRetryInput {
+  if (!isRecord(value) || Object.keys(value).some((field) => field !== "turnId") || typeof value.turnId !== "string") {
+    throw new Error("Chat retry input is invalid.");
+  }
+  return { turnId: value.turnId };
 }
 
 function planningInput(value: unknown): PlanningStartInput {
@@ -901,6 +965,46 @@ async function dispatch(request: WorkerRequest): Promise<unknown> {
       terminalSessions.close(sessionId);
       return undefined;
     }
+    case "chat.session.create":
+      return chatRuntime.createSession(chatCreateInput(requestParams(request).input));
+    case "chat.session.list":
+      return chatRuntime.listSessions();
+    case "chat.session.get": {
+      const sessionId = requestParams(request).sessionId;
+      if (typeof sessionId !== "string") throw new Error("sessionId is required.");
+      return chatRuntime.getSession(sessionId);
+    }
+    case "chat.session.rename":
+      return chatRuntime.renameSession(chatRenameInput(requestParams(request).input));
+    case "chat.session.close": {
+      const sessionId = requestParams(request).sessionId;
+      if (typeof sessionId !== "string") throw new Error("sessionId is required.");
+      return chatRuntime.closeSession(sessionId);
+    }
+    case "chat.message.list": {
+      const sessionId = requestParams(request).sessionId;
+      if (typeof sessionId !== "string") throw new Error("sessionId is required.");
+      return chatRuntime.listMessages(sessionId);
+    }
+    case "chat.turn.list": {
+      const sessionId = requestParams(request).sessionId;
+      if (typeof sessionId !== "string") throw new Error("sessionId is required.");
+      return chatRuntime.listTurns(sessionId);
+    }
+    case "chat.turn.send":
+      return chatRuntime.send(chatSendInput(requestParams(request).input));
+    case "chat.turn.events": {
+      const { turnId, afterSequence, limit } = requestParams(request);
+      if (typeof turnId !== "string") throw new Error("turnId is required.");
+      return chatRuntime.eventPage(turnId, Number(afterSequence ?? 0), Number(limit ?? 200));
+    }
+    case "chat.turn.cancel": {
+      const turnId = requestParams(request).turnId;
+      if (typeof turnId !== "string") throw new Error("turnId is required.");
+      return chatRuntime.cancel(turnId);
+    }
+    case "chat.turn.retry":
+      return chatRuntime.retry(chatRetryInput(requestParams(request).input));
     case "file.list": {
       const directory = requestParams(request).directory;
       if (directory !== undefined && typeof directory !== "string") throw new Error("directory must be a string.");
@@ -985,6 +1089,7 @@ process.once("exit", () => {
   for (const run of activeTaskContentRuns.values()) run.controller.abort();
   for (const run of activeAgentRuns.values()) run.controller.abort();
   terminalSessions.dispose();
+  chatRuntime.shutdown();
   operationalStore.close();
   if (changeTimer) clearTimeout(changeTimer);
   void watcher?.close();

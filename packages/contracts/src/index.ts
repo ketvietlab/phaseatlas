@@ -604,6 +604,108 @@ export type TerminalEvent =
   | { type: "terminal.exited"; sessionId: string; exitCode: number; exitSignal?: number; timestamp: string }
   | { type: "terminal.closed"; sessionId: string; timestamp: string };
 
+export type RepositoryChatSessionState = "open" | "closed";
+export type RepositoryChatTurnStatus = "starting" | "running" | "completed" | "failed" | "cancelled" | "interrupted";
+export type RepositoryChatMessageRole = "user" | "assistant";
+
+export interface RepositoryChatAttachment {
+  path: string;
+}
+
+export interface RepositoryChatSession {
+  sessionId: string;
+  checkoutId: string;
+  runnerId: string;
+  model: string;
+  title: string;
+  state: RepositoryChatSessionState;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface RepositoryChatMessage {
+  messageId: string;
+  sessionId: string;
+  turnId?: string;
+  role: RepositoryChatMessageRole;
+  content: string;
+  attachments: RepositoryChatAttachment[];
+  sequence: number;
+  createdAt: string;
+}
+
+export interface RepositoryChatTurn {
+  turnId: string;
+  sessionId: string;
+  status: RepositoryChatTurnStatus;
+  runnerId: string;
+  model: string;
+  userMessageId: string;
+  assistantMessageId?: string;
+  parentTurnId?: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface RepositoryChatCreateInput {
+  runnerId: string;
+  model: string;
+  title?: string;
+}
+
+export interface RepositoryChatRenameInput {
+  sessionId: string;
+  title: string;
+}
+
+export interface RepositoryChatSendInput {
+  sessionId: string;
+  text: string;
+  attachments?: RepositoryChatAttachment[];
+}
+
+export interface RepositoryChatRetryInput {
+  turnId: string;
+}
+
+export interface RepositoryChatCancellationResult {
+  turnId: string;
+  status: Extract<RepositoryChatTurnStatus, "completed" | "failed" | "cancelled" | "interrupted">;
+  disposition: "cancelled" | "already_terminal";
+}
+
+export type RepositoryChatAdapterEvent =
+  | { type: "chat.turn.status"; status: "running" }
+  | { type: "chat.assistant.delta"; text: string }
+  | { type: "chat.reasoning"; summary: string }
+  | { type: "chat.tool.started"; toolCallId: string; tool: string; summary: string }
+  | { type: "chat.tool.output"; toolCallId: string; text: string }
+  | { type: "chat.tool.completed"; toolCallId: string; status: "completed" | "failed" }
+  | { type: "chat.file.reference"; path: string }
+  | { type: "chat.usage"; inputTokens?: number; outputTokens?: number };
+
+export type RepositoryChatEventType = RepositoryChatAdapterEvent["type"]
+  | "chat.turn.completed"
+  | "chat.turn.failed"
+  | "chat.turn.cancelled"
+  | "chat.turn.interrupted";
+
+export interface PersistedRepositoryChatEvent {
+  turnId: string;
+  sequence: number;
+  type: RepositoryChatEventType;
+  timestamp: string;
+  payload: Record<string, unknown>;
+}
+
+export interface RepositoryChatEventPage {
+  turnId: string;
+  events: PersistedRepositoryChatEvent[];
+  afterSequence: number;
+  nextSequence: number;
+  hasMore: boolean;
+}
+
 export type RepositoryWorkerMethod =
   | "repository.describe"
   | "repository.refresh"
@@ -633,6 +735,17 @@ export type RepositoryWorkerMethod =
   | "terminal.write"
   | "terminal.resize"
   | "terminal.close"
+  | "chat.session.create"
+  | "chat.session.list"
+  | "chat.session.get"
+  | "chat.session.rename"
+  | "chat.session.close"
+  | "chat.message.list"
+  | "chat.turn.list"
+  | "chat.turn.send"
+  | "chat.turn.events"
+  | "chat.turn.cancel"
+  | "chat.turn.retry"
   | "file.list"
   | "file.read"
   | "file.save"
@@ -649,7 +762,7 @@ export type WorkerResponse =
   | { requestId: string; error: { code: string; message: string } };
 
 export interface WorkerEvent {
-  type: "worker.ready" | "repository.changed" | "worker.warning" | "planning.event" | "task-content.event" | "agent-run.event" | "terminal.event" | "lease.recovery";
+  type: "worker.ready" | "repository.changed" | "worker.warning" | "planning.event" | "task-content.event" | "agent-run.event" | "terminal.event" | "chat.turn.event" | "lease.recovery";
   payload: Record<string, unknown>;
 }
 
