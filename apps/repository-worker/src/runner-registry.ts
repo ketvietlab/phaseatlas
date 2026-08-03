@@ -125,7 +125,7 @@ function compareVersions(left: number[], right: number[]): number {
   return 0;
 }
 
-async function resolveCodexExecutable(): Promise<{ executable: string; version: string }> {
+export async function resolveCodexExecutable(): Promise<{ executable: string; version: string }> {
   const candidates = [
     process.env.PHASEATLAS_CODEX_BIN,
     process.platform === "darwin" ? "/Applications/ChatGPT.app/Contents/Resources/codex" : undefined,
