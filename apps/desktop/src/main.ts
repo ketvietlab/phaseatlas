@@ -150,6 +150,19 @@ function registerIpc(): void {
   ipcMain.handle("phaseatlas:terminals:close", (_event, checkoutId: string, sessionId: string) => {
     return repositories.closeTerminal(checkoutId, sessionId);
   });
+  ipcMain.handle("phaseatlas:chat:sessions:create", (_event, checkoutId: string, input) => {
+    return repositories.createChatSession(checkoutId, input);
+  });
+  ipcMain.handle("phaseatlas:chat:sessions:list", (_event, checkoutId: string) => repositories.listChatSessions(checkoutId));
+  ipcMain.handle("phaseatlas:chat:sessions:get", (_event, checkoutId: string, sessionId: string) => repositories.getChatSession(checkoutId, sessionId));
+  ipcMain.handle("phaseatlas:chat:sessions:rename", (_event, checkoutId: string, input) => repositories.renameChatSession(checkoutId, input));
+  ipcMain.handle("phaseatlas:chat:sessions:close", (_event, checkoutId: string, sessionId: string) => repositories.closeChatSession(checkoutId, sessionId));
+  ipcMain.handle("phaseatlas:chat:messages:list", (_event, checkoutId: string, sessionId: string) => repositories.listChatMessages(checkoutId, sessionId));
+  ipcMain.handle("phaseatlas:chat:turns:list", (_event, checkoutId: string, sessionId: string) => repositories.listChatTurns(checkoutId, sessionId));
+  ipcMain.handle("phaseatlas:chat:turns:send", (_event, checkoutId: string, input) => repositories.sendChatTurn(checkoutId, input));
+  ipcMain.handle("phaseatlas:chat:turns:events", (_event, checkoutId: string, turnId: string, afterSequence = 0, limit = 200) => repositories.listChatEvents(checkoutId, turnId, afterSequence, limit));
+  ipcMain.handle("phaseatlas:chat:turns:cancel", (_event, checkoutId: string, turnId: string) => repositories.cancelChatTurn(checkoutId, turnId));
+  ipcMain.handle("phaseatlas:chat:turns:retry", (_event, checkoutId: string, input) => repositories.retryChatTurn(checkoutId, input));
 }
 
 app.whenReady().then(() => {
