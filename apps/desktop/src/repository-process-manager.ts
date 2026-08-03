@@ -24,6 +24,9 @@ import {
   type TaskContentRunSummary,
   type TaskContentStartInput,
   type TaskSnapshot,
+  type TerminalCreateInput,
+  type TerminalEvent,
+  type TerminalSessionSnapshot,
   type WorkerEvent,
   type WorkerRequest,
   type WorkerResponse,
@@ -83,6 +86,7 @@ function workerEnvironment(repositoryPath: string, checkoutStorePath: string): R
     "HOME",
     "SHELL",
     "TMPDIR",
+    "SSH_AUTH_SOCK",
     "LANG",
     "LC_ALL",
     "CODEX_HOME",
@@ -348,6 +352,7 @@ export class RepositoryProcessManager {
   private readonly idleTimers = new Map<string, NodeJS.Timeout>();
   private readonly viewDemand = new Map<string, Set<number>>();
   private readonly runDemand = new Map<string, Set<string>>();
+  private readonly terminalDemand = new Map<string, Set<string>>();
   private readonly idleMs: number;
   private stopped = false;
 
@@ -446,8 +451,32 @@ export class RepositoryProcessManager {
     return (await this.ensureWorker(checkoutId)).call<PersistedRunEvent[]>("run.events", { runId, afterSequence });
   }
 
+  async listTerminals(checkoutId: string): Promise<TerminalSessionSnapshot[]> {
+    return (await this.ensureWorker(checkoutId)).call<TerminalSessionSnapshot[]>("terminal.list");
+  }
+
+  async createTerminal(checkoutId: string, input: TerminalCreateInput): Promise<TerminalSessionSnapshot> {
+    const snapshot = await (await this.ensureWorker(checkoutId)).call<TerminalSessionSnapshot>("terminal.create", { input });
+    this.trackTerminal(checkoutId, snapshot.sessionId, true);
+    return snapshot;
+  }
+
+  async writeTerminal(checkoutId: string, sessionId: string, data: string): Promise<void> {
+    await (await this.ensureWorker(checkoutId)).call<void>("terminal.write", { sessionId, data });
+  }
+
+  async resizeTerminal(checkoutId: string, sessionId: string, cols: number, rows: number): Promise<void> {
+    await (await this.ensureWorker(checkoutId)).call<void>("terminal.resize", { sessionId, cols, rows });
+  }
+
+  async closeTerminal(checkoutId: string, sessionId: string): Promise<void> {
+    await (await this.ensureWorker(checkoutId)).call<void>("terminal.close", { sessionId });
+    this.trackTerminal(checkoutId, sessionId, false);
+  }
+
   close(checkoutId: string, viewId?: number): void {
     this.catalog.setVisible(checkoutId, false);
+    this.terminalDemand.delete(checkoutId);
     if (viewId !== undefined) this.releaseView(checkoutId, viewId);
     else this.viewDemand.delete(checkoutId);
     this.scheduleIdle(checkoutId);
@@ -556,6 +585,10 @@ export class RepositoryProcessManager {
       const contentEvent = event.payload.event as TaskContentEvent;
       this.trackRun(checkoutId, contentEvent.runId, contentEvent.type === "task-content.status" ? contentEvent.status : undefined);
       this.eventSink?.({ type: "task-content.event", checkoutId, event: contentEvent });
+    } else if (event.type === "terminal.event" && event.payload.event) {
+      const terminalEvent = event.payload.event as TerminalEvent;
+      if (terminalEvent.type === "terminal.closed") this.trackTerminal(checkoutId, terminalEvent.sessionId, false);
+      this.eventSink?.({ type: "terminal.event", checkoutId, event: terminalEvent });
     } else if (event.type === "repository.changed") {
       const paths = Array.isArray(event.payload.paths)
         ? event.payload.paths.filter((item): item is string => typeof item === "string")
@@ -577,10 +610,24 @@ export class RepositoryProcessManager {
     }
   }
 
+  private trackTerminal(checkoutId: string, sessionId: string, active: boolean): void {
+    const sessions = this.terminalDemand.get(checkoutId) ?? new Set<string>();
+    if (active) sessions.add(sessionId);
+    else sessions.delete(sessionId);
+    if (sessions.size) {
+      this.terminalDemand.set(checkoutId, sessions);
+      this.cancelIdle(checkoutId);
+    } else {
+      this.terminalDemand.delete(checkoutId);
+      this.scheduleIdle(checkoutId);
+    }
+  }
+
   private onWorkerExit(checkoutId: string, worker: RepositoryWorkerHandle, error: Error, expected: boolean): void {
     if (this.workers.get(checkoutId) !== worker) return;
     this.workers.delete(checkoutId);
     this.runDemand.delete(checkoutId);
+    this.terminalDemand.delete(checkoutId);
     if (this.stopped) return;
     if (expected) this.catalog.setRuntime(checkoutId, "closed");
     else this.catalog.setRuntime(checkoutId, "recovery_required", error.message);
@@ -588,12 +635,12 @@ export class RepositoryProcessManager {
 
   private scheduleIdle(checkoutId: string): void {
     const worker = this.workers.get(checkoutId);
-    if (!worker || this.viewDemand.get(checkoutId)?.size || this.runDemand.get(checkoutId)?.size) return;
+    if (!worker || this.viewDemand.get(checkoutId)?.size || this.runDemand.get(checkoutId)?.size || this.terminalDemand.get(checkoutId)?.size) return;
     this.cancelIdle(checkoutId);
     this.catalog.setRuntime(checkoutId, "cooling");
     const timer = setTimeout(() => {
       this.idleTimers.delete(checkoutId);
-      if (this.viewDemand.get(checkoutId)?.size || this.runDemand.get(checkoutId)?.size) return;
+      if (this.viewDemand.get(checkoutId)?.size || this.runDemand.get(checkoutId)?.size || this.terminalDemand.get(checkoutId)?.size) return;
       if (this.workers.get(checkoutId) !== worker) return;
       this.workers.delete(checkoutId);
       this.catalog.setRuntime(checkoutId, "closed");

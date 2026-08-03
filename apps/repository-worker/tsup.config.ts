@@ -5,7 +5,7 @@ export default defineConfig({
   format: ["esm"],
   platform: "node",
   target: "node24",
-  external: ["node:sqlite"],
+  external: ["node:sqlite", "node-pty"],
   clean: true,
   esbuildOptions(options) {
     options.supported = { ...options.supported, "node-colon-prefix-import": true };

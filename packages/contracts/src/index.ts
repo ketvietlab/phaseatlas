@@ -488,6 +488,32 @@ export type AgentEvent =
   | { sequence: number; type: "turn.completed"; summary: string }
   | { sequence: number; type: "run.failed"; message: string };
 
+export type TerminalSessionStatus = "running" | "exited";
+
+export interface TerminalSessionSnapshot {
+  sessionId: string;
+  title: string;
+  shell: string;
+  cwd: string;
+  status: TerminalSessionStatus;
+  cols: number;
+  rows: number;
+  output: string;
+  createdAt: string;
+  exitCode?: number;
+  exitSignal?: number;
+}
+
+export interface TerminalCreateInput {
+  cols: number;
+  rows: number;
+}
+
+export type TerminalEvent =
+  | { type: "terminal.output"; sessionId: string; data: string; timestamp: string }
+  | { type: "terminal.exited"; sessionId: string; exitCode: number; exitSignal?: number; timestamp: string }
+  | { type: "terminal.closed"; sessionId: string; timestamp: string };
+
 export type RepositoryWorkerMethod =
   | "repository.describe"
   | "repository.refresh"
@@ -505,6 +531,11 @@ export type RepositoryWorkerMethod =
   | "agent-run.prepare"
   | "agent-run.leases"
   | "agent-run.release"
+  | "terminal.list"
+  | "terminal.create"
+  | "terminal.write"
+  | "terminal.resize"
+  | "terminal.close"
   | "file.list"
   | "file.read"
   | "file.save"
@@ -521,7 +552,7 @@ export type WorkerResponse =
   | { requestId: string; error: { code: string; message: string } };
 
 export interface WorkerEvent {
-  type: "worker.ready" | "repository.changed" | "worker.warning" | "planning.event" | "task-content.event" | "lease.recovery";
+  type: "worker.ready" | "repository.changed" | "worker.warning" | "planning.event" | "task-content.event" | "terminal.event" | "lease.recovery";
   payload: Record<string, unknown>;
 }
 
@@ -543,7 +574,13 @@ export interface TaskContentDesktopEvent {
   event: TaskContentEvent;
 }
 
-export type PhaseAtlasDesktopEvent = RepositoryChangedEvent | PlanningDesktopEvent | TaskContentDesktopEvent;
+export interface TerminalDesktopEvent {
+  type: "terminal.event";
+  checkoutId: string;
+  event: TerminalEvent;
+}
+
+export type PhaseAtlasDesktopEvent = RepositoryChangedEvent | PlanningDesktopEvent | TaskContentDesktopEvent | TerminalDesktopEvent;
 
 export interface PhaseAtlasDesktopApi {
   repositories: {
@@ -578,6 +615,13 @@ export interface PhaseAtlasDesktopApi {
   runs: {
     list(checkoutId: string): Promise<PersistedRunRecord[]>;
     events(checkoutId: string, runId: string, afterSequence?: number): Promise<PersistedRunEvent[]>;
+  };
+  terminals: {
+    list(checkoutId: string): Promise<TerminalSessionSnapshot[]>;
+    create(checkoutId: string, input: TerminalCreateInput): Promise<TerminalSessionSnapshot>;
+    write(checkoutId: string, sessionId: string, data: string): Promise<void>;
+    resize(checkoutId: string, sessionId: string, cols: number, rows: number): Promise<void>;
+    close(checkoutId: string, sessionId: string): Promise<void>;
   };
   events: {
     subscribe(listener: (event: PhaseAtlasDesktopEvent) => void): () => void;

@@ -120,6 +120,21 @@ function registerIpc(): void {
   ipcMain.handle("phaseatlas:runs:events", (_event, checkoutId: string, runId: string, afterSequence = 0) => {
     return repositories.listRunEvents(checkoutId, runId, afterSequence);
   });
+  ipcMain.handle("phaseatlas:terminals:list", (_event, checkoutId: string) => {
+    return repositories.listTerminals(checkoutId);
+  });
+  ipcMain.handle("phaseatlas:terminals:create", (_event, checkoutId: string, input) => {
+    return repositories.createTerminal(checkoutId, input);
+  });
+  ipcMain.handle("phaseatlas:terminals:write", (_event, checkoutId: string, sessionId: string, data: string) => {
+    return repositories.writeTerminal(checkoutId, sessionId, data);
+  });
+  ipcMain.handle("phaseatlas:terminals:resize", (_event, checkoutId: string, sessionId: string, cols: number, rows: number) => {
+    return repositories.resizeTerminal(checkoutId, sessionId, cols, rows);
+  });
+  ipcMain.handle("phaseatlas:terminals:close", (_event, checkoutId: string, sessionId: string) => {
+    return repositories.closeTerminal(checkoutId, sessionId);
+  });
 }
 
 app.whenReady().then(() => {

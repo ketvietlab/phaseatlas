@@ -15,6 +15,7 @@ import type {
   TaskContentRunSummary,
   TaskContentStartInput,
   TaskProposalOutline,
+  TerminalCreateInput,
   WorkerEvent,
   WorkerRequest,
   WorkerResponse,
@@ -31,6 +32,7 @@ import {
 } from "@phaseatlas/core";
 import { watch, type FSWatcher } from "chokidar";
 import { assertRunnerModel, RunnerRegistry } from "./runner-registry.js";
+import { TerminalSessionManager } from "./terminal-session-manager.js";
 
 interface ElectronParentPort {
   on(event: "message", listener: (event: { data: unknown }) => void): void;
@@ -74,6 +76,9 @@ const activeTaskContentRuns = new Map<string, {
   status: TaskContentRunStatus;
   taskKeys: string[];
 }>();
+const terminalSessions = new TerminalSessionManager(canonicalRepositoryRoot, (event) => {
+  send({ type: "terminal.event", payload: { event } });
+});
 
 async function mapConcurrent<Input, Output>(
   items: Input[],
@@ -103,6 +108,19 @@ function requestParams(request: WorkerRequest): Record<string, unknown> {
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return Boolean(value && typeof value === "object" && !Array.isArray(value));
+}
+
+function terminalCreateInput(value: unknown): Partial<TerminalCreateInput> {
+  if (value === undefined) return {};
+  if (!isRecord(value)) throw new Error("Terminal create input must be an object.");
+  const allowedFields = new Set(["cols", "rows"]);
+  if (Object.keys(value).some((field) => !allowedFields.has(field))) {
+    throw new Error("Terminal create input contains unsupported fields.");
+  }
+  return {
+    ...(value.cols !== undefined ? { cols: value.cols as number } : {}),
+    ...(value.rows !== undefined ? { rows: value.rows as number } : {}),
+  };
 }
 
 function planningInput(value: unknown): PlanningStartInput {
@@ -568,6 +586,30 @@ async function dispatch(request: WorkerRequest): Promise<unknown> {
       });
       return released;
     }
+    case "terminal.list":
+      return terminalSessions.list();
+    case "terminal.create":
+      return terminalSessions.create(terminalCreateInput(requestParams(request).input));
+    case "terminal.write": {
+      const { sessionId, data } = requestParams(request);
+      if (typeof sessionId !== "string" || typeof data !== "string") {
+        throw new Error("sessionId and data are required.");
+      }
+      terminalSessions.write(sessionId, data);
+      return undefined;
+    }
+    case "terminal.resize": {
+      const { sessionId, cols, rows } = requestParams(request);
+      if (typeof sessionId !== "string") throw new Error("sessionId is required.");
+      terminalSessions.resize(sessionId, cols, rows);
+      return undefined;
+    }
+    case "terminal.close": {
+      const { sessionId } = requestParams(request);
+      if (typeof sessionId !== "string") throw new Error("sessionId is required.");
+      terminalSessions.close(sessionId);
+      return undefined;
+    }
     case "file.list": {
       const directory = requestParams(request).directory;
       if (directory !== undefined && typeof directory !== "string") throw new Error("directory must be a string.");
@@ -650,6 +692,7 @@ try {
 process.once("exit", () => {
   for (const controller of activePlanningRuns.values()) controller.abort();
   for (const run of activeTaskContentRuns.values()) run.controller.abort();
+  terminalSessions.dispose();
   operationalStore.close();
   if (changeTimer) clearTimeout(changeTimer);
   void watcher?.close();
