@@ -138,3 +138,20 @@ test("releases a write lease when execution fails", async (context) => {
   assert.equal(runtime.store.listRuns()[0]?.status, "failed");
   runtime.store.close();
 });
+
+test("does not duplicate a normalized adapter failure", async (context) => {
+  const runtime = await fixture(context);
+  const adapter: AgentExecutionAdapter = {
+    supportedSandboxes: ["workspace-write"],
+    async execute({ emit }) {
+      emit({ type: "run.failed", message: "Normalized provider failure." });
+      throw new Error("private provider failure");
+    },
+  };
+  await assert.rejects(runtime.scheduler.execute({ taskKey: "core/PHA-001", action: "implement" }, adapter, new AbortController().signal));
+  const run = runtime.store.listRuns()[0];
+  assert.ok(run);
+  assert.equal(runtime.store.listEvents(run.runId).filter((event) => event.type === "run.failed").length, 1);
+  assert.equal(run.status, "failed");
+  runtime.store.close();
+});

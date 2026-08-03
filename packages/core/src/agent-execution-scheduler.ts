@@ -97,16 +97,26 @@ export class AgentExecutionScheduler {
       throw signal.reason instanceof Error ? signal.reason : new Error("Agent run was cancelled.");
     }
     let sequence = 0;
+    let adapterTerminalEvent = false;
     const readOnlyBaseline = spec.sandbox === "read-only"
       ? await captureGitState({ worktreePath: spec.executionDirectory, ...(this.changeGit ? { git: this.changeGit } : {}) })
       : null;
     const emit = (event: AgentEventWithoutSequence) => {
+      if (event.type === "run.failed" || (event.type === "run.status" && event.status === "cancelled")) {
+        adapterTerminalEvent = true;
+      }
       const normalized = { ...event, sequence: ++sequence } as AgentEvent;
       const persisted = this.store.appendEvent({
         runId: spec.runId,
         type: normalized.type,
         payload: { ...normalized, sequence: undefined },
-        ...(normalized.type === "run.status" && normalized.status === "running" ? { status: "running" as const } : {}),
+        ...(normalized.type === "run.status" && normalized.status === "running"
+          ? { status: "running" as const }
+          : normalized.type === "run.failed"
+            ? { status: "failed" as const }
+            : normalized.type === "run.status" && normalized.status === "cancelled"
+              ? { status: "cancelled" as const }
+              : {}),
       });
       onEvent({ ...normalized, sequence: persisted.sequence } as AgentEvent);
     };
@@ -150,12 +160,14 @@ export class AgentExecutionScheduler {
       });
       return validated;
     } catch (error) {
-      this.store.appendEvent({
-        runId: spec.runId,
-        type: signal.aborted ? "run.cancelled" : "run.failed",
-        payload: { message: error instanceof Error ? error.message : "Agent execution failed." },
-        status: signal.aborted ? "cancelled" : "failed",
-      });
+      if (!adapterTerminalEvent) {
+        this.store.appendEvent({
+          runId: spec.runId,
+          type: signal.aborted ? "run.cancelled" : "run.failed",
+          payload: { message: error instanceof Error ? error.message : "Agent execution failed." },
+          status: signal.aborted ? "cancelled" : "failed",
+        });
+      }
       throw error;
     } finally {
       if (prepared.lease) await this.leases.release(spec.runId, signal.aborted ? "cancelled" : "run_finished");

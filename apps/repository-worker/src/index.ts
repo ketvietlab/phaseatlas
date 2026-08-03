@@ -30,7 +30,7 @@ import {
   WorktreeLeaseManager,
 } from "@phaseatlas/core";
 import { watch, type FSWatcher } from "chokidar";
-import { RunnerRegistry } from "./runner-registry.js";
+import { assertRunnerModel, RunnerRegistry } from "./runner-registry.js";
 
 interface ElectronParentPort {
   on(event: "message", listener: (event: { data: unknown }) => void): void;
@@ -270,6 +270,7 @@ function startPlanning(input: PlanningStartInput): { runId: string } {
         queueDelta(`PhaseAtlas · Checking runner · ${input.runnerId}\n`);
         const descriptor = await runner.describe();
         if (!descriptor.available) throw new Error(descriptor.unavailableReason || `${descriptor.name} is unavailable.`);
+        assertRunnerModel(descriptor, input.model);
 
         status("running");
         heartbeatStage = `${descriptor.name} active`;
@@ -408,6 +409,7 @@ function startTaskContent(input: TaskContentStartInput): { runId: string } {
         const runner = runners.get(input.runnerId);
         const descriptor = await runner.describe();
         if (!descriptor.available) throw new Error(descriptor.unavailableReason || `${descriptor.name} is unavailable.`);
+        assertRunnerModel(descriptor, input.model);
         status("running");
         await mapConcurrent(tasks, 4, async (task) => {
           const taskKey = `${task.key.workspaceSlug}/${task.key.taskId}`;
