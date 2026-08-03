@@ -421,6 +421,13 @@ export interface ProviderProcessOptions {
 
 export type ProviderProcessRunner = (options: ProviderProcessOptions) => Promise<{ stdout: string; stderr: string }>;
 
+const PROVIDER_DIAGNOSTIC_TAIL = 64 * 1024;
+
+function appendDiagnosticTail(current: string, chunk: string): string {
+  const combined = `${current}${chunk}`;
+  return combined.length > PROVIDER_DIAGNOSTIC_TAIL ? combined.slice(-PROVIDER_DIAGNOSTIC_TAIL) : combined;
+}
+
 export function runChildProcess(options: ProviderProcessOptions): Promise<{ stdout: string; stderr: string }> {
   return new Promise((resolve, reject) => {
     const child: ChildProcessWithoutNullStreams = spawn(options.executable, options.args, {
@@ -468,12 +475,12 @@ export function runChildProcess(options: ProviderProcessOptions): Promise<{ stdo
     child.stderr.setEncoding("utf8");
     child.stdout.on("data", (chunk: string) => {
       if (options.signal.aborted || settled) return;
-      stdout += chunk;
+      stdout = appendDiagnosticTail(stdout, chunk);
       options.onStdout(chunk);
     });
     child.stderr.on("data", (chunk: string) => {
       if (options.signal.aborted || settled) return;
-      stderr += chunk;
+      stderr = appendDiagnosticTail(stderr, chunk);
       options.onStderr?.(chunk);
     });
     child.once("error", (error) => {

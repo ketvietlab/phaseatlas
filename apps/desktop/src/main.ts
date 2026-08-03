@@ -145,6 +145,9 @@ function registerIpc(): void {
   ipcMain.handle("phaseatlas:agent-runs:events", (_event, checkoutId: string, runId: string, afterSequence = 0, limit = 200) => {
     return repositories.listRunEventPage(checkoutId, runId, afterSequence, limit);
   });
+  ipcMain.handle("phaseatlas:agent-runs:command-output", (_event, checkoutId: string, runId: string, commandId: string, offset = 0, limit = 20_000) => {
+    return repositories.agentRunCommandOutput(checkoutId, runId, commandId, offset, limit);
+  });
   ipcMain.handle("phaseatlas:agent-runs:result", (_event, checkoutId: string, runId: string) => {
     return repositories.agentRunResult(checkoutId, runId);
   });
