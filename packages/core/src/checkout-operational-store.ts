@@ -5,6 +5,7 @@ import type { DatabaseSync as DatabaseSyncType } from "node:sqlite";
 import type {
   AgentResultRevalidationRecord,
   AgentRunAction,
+  AgentRunCommandOutputPage,
   AgentSandbox,
   PersistedAgentRunResult,
   PersistedRunEvent,
@@ -22,7 +23,7 @@ import type {
   ValidatedAgentRunResult,
 } from "@phaseatlas/contracts";
 
-const SCHEMA_VERSION = "1";
+const SCHEMA_VERSION = "2";
 const RUN_KINDS = new Set<PersistedRunKind>(["planning", "task_content", "agent"]);
 const RUN_STATUSES = new Set<PersistedRunStatus>(["starting", "running", "completed", "failed", "cancelled", "interrupted"]);
 const TERMINAL_RUN_STATUSES = new Set<PersistedRunStatus>(["completed", "failed", "cancelled", "interrupted"]);
@@ -145,6 +146,17 @@ export class CheckoutOperationalStore {
     status?: PersistedRunStatus;
   }): PersistedRunEvent {
     const timestamp = input.timestamp ?? new Date().toISOString();
+    let persistedPayload = input.payload;
+    let commandOutput: { commandId: string; text: string } | undefined;
+    if (input.type === "command.output") {
+      const commandId = input.payload.commandId;
+      const text = input.payload.text;
+      if (typeof commandId !== "string" || !commandId.trim() || typeof text !== "string") {
+        throw new Error("Command output requires commandId and text.");
+      }
+      commandOutput = { commandId, text };
+      persistedPayload = { commandId, characterCount: [...text].length };
+    }
     this.database.exec("BEGIN IMMEDIATE");
     try {
       const run = this.database.prepare("SELECT run_id, status FROM runs WHERE run_id = ?").get(input.runId) as { run_id?: string; status?: string } | undefined;
@@ -155,10 +167,17 @@ export class CheckoutOperationalStore {
       const row = this.database.prepare(
         "SELECT COALESCE(MAX(sequence), 0) + 1 AS next_sequence FROM run_events WHERE run_id = ?",
       ).get(input.runId) as { next_sequence: number };
+      if (commandOutput) {
+        this.database.prepare(`
+          INSERT INTO agent_command_outputs (
+            run_id, command_id, chunk_sequence, text, character_count, created_at
+          ) VALUES (?, ?, ?, ?, length(?), ?)
+        `).run(input.runId, commandOutput.commandId, row.next_sequence, commandOutput.text, commandOutput.text, timestamp);
+      }
       this.database.prepare(`
         INSERT INTO run_events (run_id, sequence, event_type, timestamp, payload_json)
         VALUES (?, ?, ?, ?, ?)
-      `).run(input.runId, row.next_sequence, input.type, timestamp, JSON.stringify(input.payload));
+      `).run(input.runId, row.next_sequence, input.type, timestamp, JSON.stringify(persistedPayload));
       if (input.status) {
         this.database.prepare("UPDATE runs SET status = ?, updated_at = ? WHERE run_id = ?")
           .run(input.status, timestamp, input.runId);
@@ -172,7 +191,7 @@ export class CheckoutOperationalStore {
         sequence: row.next_sequence,
         type: input.type,
         timestamp,
-        payload: input.payload,
+        payload: persistedPayload,
       };
     } catch (error) {
       this.database.exec("ROLLBACK");
@@ -232,6 +251,64 @@ export class CheckoutOperationalStore {
       afterSequence,
       nextSequence: events.at(-1)?.sequence ?? afterSequence,
       hasMore,
+    };
+  }
+
+  readAgentCommandOutput(
+    runId: string,
+    commandId: string,
+    offset = 0,
+    limit = 20_000,
+  ): AgentRunCommandOutputPage {
+    if (!commandId.trim()) throw new Error("commandId is required.");
+    if (!Number.isInteger(offset) || offset < 0) throw new Error("offset must be a non-negative integer.");
+    if (!Number.isInteger(limit) || limit < 1 || limit > 50_000) throw new Error("limit must be between 1 and 50000.");
+    const run = this.getRun(runId);
+    if (run.kind !== "agent") throw new Error("Command output belongs to an agent run.");
+    const command = this.database.prepare(`
+      SELECT 1 FROM run_events
+      WHERE run_id = ? AND event_type = 'command.started'
+        AND json_extract(payload_json, '$.commandId') = ?
+      LIMIT 1
+    `).get(runId, commandId);
+    if (!command) throw new Error("Command does not exist in this run.");
+    const totalRow = this.database.prepare(`
+      SELECT COALESCE(SUM(character_count), 0) AS total
+      FROM agent_command_outputs WHERE run_id = ? AND command_id = ?
+    `).get(runId, commandId) as { total: number };
+    const totalCharacters = Number(totalRow.total);
+    const pageOffset = Math.min(offset, totalCharacters);
+    const end = Math.min(pageOffset + limit, totalCharacters);
+    const chunks = this.database.prepare(`
+      SELECT chunk_sequence, character_count
+      FROM agent_command_outputs
+      WHERE run_id = ? AND command_id = ?
+      ORDER BY chunk_sequence
+    `).all(runId, commandId) as Array<{ chunk_sequence: number; character_count: number }>;
+    let chunkStart = 0;
+    let text = "";
+    for (const chunk of chunks) {
+      const chunkEnd = chunkStart + Number(chunk.character_count);
+      if (chunkEnd > pageOffset && chunkStart < end) {
+        const localStart = Math.max(pageOffset - chunkStart, 0);
+        const take = Math.min(chunkEnd, end) - (chunkStart + localStart);
+        const row = this.database.prepare(`
+          SELECT substr(text, ?, ?) AS text FROM agent_command_outputs
+          WHERE run_id = ? AND command_id = ? AND chunk_sequence = ?
+        `).get(localStart + 1, take, runId, commandId, chunk.chunk_sequence) as { text?: string };
+        text += row.text ?? "";
+      }
+      chunkStart = chunkEnd;
+      if (chunkStart >= end) break;
+    }
+    return {
+      runId,
+      commandId,
+      offset: pageOffset,
+      nextOffset: end,
+      totalCharacters,
+      hasMore: end < totalCharacters,
+      text,
     };
   }
 
@@ -882,6 +959,17 @@ export class CheckoutOperationalStore {
         recorded_at TEXT NOT NULL,
         result_json TEXT NOT NULL
       );
+      CREATE TABLE IF NOT EXISTS agent_command_outputs (
+        run_id TEXT NOT NULL REFERENCES runs(run_id) ON DELETE CASCADE,
+        command_id TEXT NOT NULL,
+        chunk_sequence INTEGER NOT NULL,
+        text TEXT NOT NULL,
+        character_count INTEGER NOT NULL,
+        created_at TEXT NOT NULL,
+        PRIMARY KEY (run_id, command_id, chunk_sequence)
+      );
+      CREATE INDEX IF NOT EXISTS agent_command_outputs_lookup
+        ON agent_command_outputs(run_id, command_id, chunk_sequence);
       CREATE TABLE IF NOT EXISTS agent_result_revalidations (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         run_id TEXT NOT NULL REFERENCES agent_run_results(run_id) ON DELETE CASCADE,
@@ -938,7 +1026,8 @@ export class CheckoutOperationalStore {
     `);
     const schema = this.database.prepare("SELECT value FROM store_meta WHERE key = 'schema_version'").get() as { value?: string } | undefined;
     if (existingDatabase && !schema?.value) this.failInitialization("Checkout store schema metadata is missing.");
-    if (schema?.value && schema.value !== SCHEMA_VERSION) {
+    if (schema?.value === "1") this.migrateVersionOne();
+    else if (schema?.value && schema.value !== SCHEMA_VERSION) {
       this.failInitialization(`Unsupported checkout store schema version ${schema.value}.`);
     }
     const identity = this.database.prepare("SELECT value FROM store_meta WHERE key = 'checkout_id'").get() as { value?: string } | undefined;
@@ -948,6 +1037,48 @@ export class CheckoutOperationalStore {
     }
     this.database.prepare("INSERT OR IGNORE INTO store_meta (key, value) VALUES ('schema_version', ?)").run(SCHEMA_VERSION);
     this.database.prepare("INSERT OR IGNORE INTO store_meta (key, value) VALUES ('checkout_id', ?)").run(this.checkoutId);
+  }
+
+  private migrateVersionOne(): void {
+    this.database.exec("BEGIN IMMEDIATE");
+    try {
+      this.database.exec(`
+        INSERT OR IGNORE INTO agent_command_outputs (
+          run_id, command_id, chunk_sequence, text, character_count, created_at
+        )
+        SELECT
+          run_id,
+          json_extract(payload_json, '$.commandId'),
+          sequence,
+          json_extract(payload_json, '$.text'),
+          length(json_extract(payload_json, '$.text')),
+          timestamp
+        FROM run_events
+        WHERE event_type = 'command.output'
+          AND json_type(payload_json, '$.commandId') = 'text'
+          AND json_type(payload_json, '$.text') = 'text';
+
+        UPDATE run_events
+        SET payload_json = json_object(
+          'commandId', json_extract(payload_json, '$.commandId'),
+          'characterCount', length(json_extract(payload_json, '$.text'))
+        )
+        WHERE event_type = 'command.output'
+          AND json_type(payload_json, '$.commandId') = 'text'
+          AND json_type(payload_json, '$.text') = 'text';
+
+        UPDATE run_events
+        SET event_type = 'run.cancelled'
+        WHERE event_type = 'run.status'
+          AND json_extract(payload_json, '$.status') = 'cancelled';
+
+        UPDATE store_meta SET value = '2' WHERE key = 'schema_version';
+      `);
+      this.database.exec("COMMIT");
+    } catch (error) {
+      this.database.exec("ROLLBACK");
+      throw error;
+    }
   }
 
   private failInitialization(message: string): never {

@@ -52,6 +52,11 @@ import { RepositoryChatAdapterRegistry } from "./chat-adapter-registry.js";
 import { RepositoryChatRuntime } from "./repository-chat-runtime.js";
 import { ChatEditAdapterRegistry } from "./chat-edit-adapter-registry.js";
 import { ChatEditRuntime } from "./chat-edit-runtime.js";
+import {
+  AgentTaskRunGuard,
+  canonicalAgentTaskKey,
+  resolveAgentTaskReference,
+} from "./agent-task-run-guard.js";
 
 interface ElectronParentPort {
   on(event: "message", listener: (event: { data: unknown }) => void): void;
@@ -119,6 +124,7 @@ const activeAgentRuns = new Map<string, {
   completion: Promise<void>;
   cancellation?: Promise<AgentRunCancellationResult>;
 }>();
+const agentTaskRunGuard = new AgentTaskRunGuard();
 const terminalSessions = new TerminalSessionManager(canonicalRepositoryRoot, (event) => {
   send({ type: "terminal.event", payload: { event } });
 });
@@ -709,18 +715,16 @@ function listTaskContentRuns(): TaskContentRunSummary[] {
   }));
 }
 
-async function agentRunActions(input: AgentRunActionQuery): Promise<AgentRunActionAvailability[]> {
+async function agentRunActions(
+  input: AgentRunActionQuery,
+  options: { ignoreStartingTaskKey?: string; snapshot?: Awaited<ReturnType<typeof inspector.taskSnapshot>> } = {},
+): Promise<AgentRunActionAvailability[]> {
   const [snapshot, descriptor] = await Promise.all([
-    inspector.taskSnapshot(),
+    options.snapshot ?? inspector.taskSnapshot(),
     runners.get(input.runnerId).describe(),
   ]);
-  const matches = snapshot.tasks.filter((task) =>
-    task.key.taskId === input.taskKey || `${task.key.workspaceSlug}/${task.key.taskId}` === input.taskKey
-  );
-  if (matches.length !== 1) throw new Error("Agent action query does not resolve to one canonical task.");
-  const task = matches[0];
-  if (!task) throw new Error("Canonical task is unavailable.");
-  const taskKey = `${task.key.workspaceSlug}/${task.key.taskId}`;
+  const task = resolveAgentTaskReference(snapshot, input.taskKey);
+  const taskKey = canonicalAgentTaskKey(task);
   const commonReasons: string[] = [];
   if (snapshot.issues.some((issue) => issue.severity === "error")) {
     commonReasons.push("Resolve canonical task validation errors before execution.");
@@ -730,6 +734,12 @@ async function agentRunActions(input: AgentRunActionQuery): Promise<AgentRunActi
     assertRunnerModel(descriptor, input.model);
   } catch (error) {
     commonReasons.push(error instanceof Error ? error.message : "The selected model is unavailable.");
+  }
+  const hasActiveTaskRun = operationalStore.listRuns().some((run) =>
+    run.kind === "agent" && ["starting", "running"].includes(run.status) && operationalStore.getAgentSpec(run.runId)?.taskKey === taskKey
+  );
+  if (hasActiveTaskRun || (agentTaskRunGuard.has(taskKey) && options.ignoreStartingTaskKey !== taskKey)) {
+    commonReasons.push("Another agent run is already active for this task.");
   }
 
   const incompleteDependencies = task.dependencies.flatMap((dependency) => {
@@ -803,50 +813,57 @@ async function listAgentRuns(taskKey?: string): Promise<AgentRunSummary[]> {
 }
 
 async function startAgentRun(input: AgentRunStartInput, parentRunId?: string): Promise<{ runId: string }> {
-  const availability = (await agentRunActions({
-    taskKey: input.taskKey,
-    runnerId: input.runnerId,
-    ...(input.model ? { model: input.model } : {}),
-  })).find((candidate) => candidate.action === input.action);
-  if (!availability?.available) {
-    throw new Error(availability?.blockingReasons.join(" ") || `Action ${input.action} is unavailable.`);
+  const snapshot = await inspector.taskSnapshot();
+  const taskKey = canonicalAgentTaskKey(resolveAgentTaskReference(snapshot, input.taskKey));
+  const releaseTaskStart = agentTaskRunGuard.acquire(taskKey);
+  try {
+    const availability = (await agentRunActions({
+      taskKey,
+      runnerId: input.runnerId,
+      ...(input.model ? { model: input.model } : {}),
+    }, { ignoreStartingTaskKey: taskKey, snapshot })).find((candidate) => candidate.action === input.action);
+    if (!availability?.available) {
+      throw new Error(availability?.blockingReasons.join(" ") || `Action ${input.action} is unavailable.`);
+    }
+    const runner = runners.get(input.runnerId);
+    const descriptor = await runner.describe();
+    if (!descriptor.available) throw new Error(descriptor.unavailableReason || `${descriptor.name} is unavailable.`);
+    assertRunnerModel(descriptor, input.model);
+    const expectedSandbox: AgentSandbox = input.action === "implement" ? "workspace-write" : "read-only";
+    const adapter = runners.getExecution(input.runnerId, input.action, expectedSandbox);
+    const request: AgentRunCreateInput = {
+      taskKey,
+      action: input.action,
+      ...(input.expectedTaskRevision ? { expectedTaskRevision: input.expectedTaskRevision } : {}),
+      ...(input.expectedCheckoutId ? { expectedCheckoutId: input.expectedCheckoutId } : {}),
+      ...(input.requestedSandbox ? { requestedSandbox: input.requestedSandbox } : {}),
+    };
+    const prepared = await executionScheduler.prepare(request, {
+      runnerId: input.runnerId,
+      ...(input.model ? { model: input.model } : {}),
+    });
+    if (parentRunId) operationalStore.linkRunAttempt(prepared.spec.runId, parentRunId);
+    const controller = new AbortController();
+    const entry: {
+      controller: AbortController;
+      completion: Promise<void>;
+      cancellation?: Promise<AgentRunCancellationResult>;
+    } = { controller, completion: Promise.resolve() };
+    entry.completion = executionScheduler.executePrepared(
+      prepared,
+      adapter,
+      controller.signal,
+      (event) => send({ type: "agent-run.event", payload: { runId: prepared.spec.runId, event } }),
+      input.model,
+    ).then(() => undefined).finally(() => {
+      if (activeAgentRuns.get(prepared.spec.runId) === entry) activeAgentRuns.delete(prepared.spec.runId);
+    });
+    activeAgentRuns.set(prepared.spec.runId, entry);
+    void entry.completion.catch(() => undefined);
+    return { runId: prepared.spec.runId };
+  } finally {
+    releaseTaskStart();
   }
-  const runner = runners.get(input.runnerId);
-  const descriptor = await runner.describe();
-  if (!descriptor.available) throw new Error(descriptor.unavailableReason || `${descriptor.name} is unavailable.`);
-  assertRunnerModel(descriptor, input.model);
-  const expectedSandbox: AgentSandbox = input.action === "implement" ? "workspace-write" : "read-only";
-  const adapter = runners.getExecution(input.runnerId, input.action, expectedSandbox);
-  const request: AgentRunCreateInput = {
-    taskKey: input.taskKey,
-    action: input.action,
-    ...(input.expectedTaskRevision ? { expectedTaskRevision: input.expectedTaskRevision } : {}),
-    ...(input.expectedCheckoutId ? { expectedCheckoutId: input.expectedCheckoutId } : {}),
-    ...(input.requestedSandbox ? { requestedSandbox: input.requestedSandbox } : {}),
-  };
-  const prepared = await executionScheduler.prepare(request, {
-    runnerId: input.runnerId,
-    ...(input.model ? { model: input.model } : {}),
-  });
-  if (parentRunId) operationalStore.linkRunAttempt(prepared.spec.runId, parentRunId);
-  const controller = new AbortController();
-  const entry: {
-    controller: AbortController;
-    completion: Promise<void>;
-    cancellation?: Promise<AgentRunCancellationResult>;
-  } = { controller, completion: Promise.resolve() };
-  entry.completion = executionScheduler.executePrepared(
-    prepared,
-    adapter,
-    controller.signal,
-    (event) => send({ type: "agent-run.event", payload: { runId: prepared.spec.runId, event } }),
-    input.model,
-  ).then(() => undefined).finally(() => {
-    if (activeAgentRuns.get(prepared.spec.runId) === entry) activeAgentRuns.delete(prepared.spec.runId);
-  });
-  activeAgentRuns.set(prepared.spec.runId, entry);
-  void entry.completion.catch(() => undefined);
-  return { runId: prepared.spec.runId };
 }
 
 async function cancelAgentRun(runId: string): Promise<AgentRunCancellationResult> {
@@ -959,6 +976,17 @@ async function dispatch(request: WorkerRequest): Promise<unknown> {
       const taskKey = requestParams(request).taskKey;
       if (taskKey !== undefined && typeof taskKey !== "string") throw new Error("taskKey must be a string.");
       return listAgentRuns(taskKey);
+    }
+    case "agent-run.command-output": {
+      const { runId, commandId, offset, limit } = requestParams(request);
+      if (typeof runId !== "string" || !/^[a-f0-9-]{8,64}$/i.test(runId)) throw new Error("runId is invalid.");
+      if (typeof commandId !== "string" || !/^command-[1-9][0-9]*$/.test(commandId)) throw new Error("commandId is invalid.");
+      return operationalStore.readAgentCommandOutput(
+        runId,
+        commandId,
+        Number(offset ?? 0),
+        Number(limit ?? 20_000),
+      );
     }
     case "agent-run.start":
       return startAgentRun(agentRunStartInput(requestParams(request).input));
