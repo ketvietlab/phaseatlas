@@ -40,14 +40,20 @@ const api: PhaseAtlasDesktopApi = {
       input,
     ),
   },
-  runs: {
-    list: (checkoutId) => ipcRenderer.invoke("phaseatlas:runs:list", checkoutId),
-    events: (checkoutId, runId, afterSequence = 0) => ipcRenderer.invoke(
-      "phaseatlas:runs:events",
+  agentRuns: {
+    actions: (checkoutId, input) => ipcRenderer.invoke("phaseatlas:agent-runs:actions", checkoutId, input),
+    list: (checkoutId, taskKey) => ipcRenderer.invoke("phaseatlas:agent-runs:list", checkoutId, taskKey),
+    start: (checkoutId, input) => ipcRenderer.invoke("phaseatlas:agent-runs:start", checkoutId, input),
+    cancel: (checkoutId, runId) => ipcRenderer.invoke("phaseatlas:agent-runs:cancel", checkoutId, runId),
+    events: (checkoutId, runId, afterSequence = 0, limit = 200) => ipcRenderer.invoke(
+      "phaseatlas:agent-runs:events",
       checkoutId,
       runId,
       afterSequence,
+      limit,
     ),
+    result: (checkoutId, runId) => ipcRenderer.invoke("phaseatlas:agent-runs:result", checkoutId, runId),
+    recover: (checkoutId, input) => ipcRenderer.invoke("phaseatlas:agent-runs:recover", checkoutId, input),
   },
   events: {
     subscribe: (listener) => {

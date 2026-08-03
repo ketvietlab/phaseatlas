@@ -3,7 +3,7 @@ id: PHA-007
 title: Build the execution history and run workbench
 kind: code
 phase: execution-experience
-state: planned
+state: in_review
 priority: high
 objective: Users can start permitted task actions, inspect durable run history and live normalized
   events, review commands and changed files, cancel active runs, and recognize interrupted or stale
@@ -19,6 +19,7 @@ scope:
     - apps/desktop/src/preload.ts
     - apps/desktop/src/main.ts
     - apps/desktop/src/repository-process-manager.ts
+    - apps/repository-worker/src/index.ts
     - apps/ui/src/routes/+page.svelte
     - apps/ui/src/app.css
     - docs/development.md
@@ -61,3 +62,5 @@ acceptanceCriteria:
 verification: []
 evidenceRequirements:
   - type: human_review
+content:
+  path: PHA-007.md

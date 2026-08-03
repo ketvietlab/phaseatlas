@@ -413,6 +413,19 @@ export interface AgentRunStartInput extends AgentRunCreateInput {
   model?: string;
 }
 
+export interface AgentRunActionQuery {
+  taskKey: string;
+  runnerId: string;
+  model?: string;
+}
+
+export interface AgentRunActionAvailability {
+  action: AgentRunAction;
+  sandbox: AgentSandbox;
+  available: boolean;
+  blockingReasons: string[];
+}
+
 export type AgentRunRecoveryDecision = "leave_interrupted" | "retry";
 
 export interface AgentRunRecoveryInput {
@@ -531,6 +544,22 @@ export interface AgentResultReview {
   reason?: string;
 }
 
+export interface AgentRunSummary {
+  runId: string;
+  taskKey: string;
+  taskRevision: string;
+  action: AgentRunAction;
+  sandbox: AgentSandbox;
+  runnerId: string;
+  model?: string;
+  status: PersistedRunStatus;
+  parentRunId?: string;
+  freshness?: AgentResultFreshness;
+  promotable?: boolean;
+  createdAt: string;
+  updatedAt: string;
+}
+
 export interface PersistedRunEventPage {
   runId: string;
   events: PersistedRunEvent[];
@@ -565,6 +594,8 @@ export type RepositoryWorkerMethod =
   | "run.events"
   | "run.events-page"
   | "agent-run.prepare"
+  | "agent-run.actions"
+  | "agent-run.list"
   | "agent-run.start"
   | "agent-run.cancel"
   | "agent-run.result"
@@ -648,9 +679,14 @@ export interface PhaseAtlasDesktopApi {
     cancel(checkoutId: string, runId: string): Promise<void>;
     publish(checkoutId: string, input: PlanningPublishInput): Promise<TaskSnapshot>;
   };
-  runs: {
-    list(checkoutId: string): Promise<PersistedRunRecord[]>;
-    events(checkoutId: string, runId: string, afterSequence?: number): Promise<PersistedRunEvent[]>;
+  agentRuns: {
+    actions(checkoutId: string, input: AgentRunActionQuery): Promise<AgentRunActionAvailability[]>;
+    list(checkoutId: string, taskKey?: string): Promise<AgentRunSummary[]>;
+    start(checkoutId: string, input: AgentRunStartInput): Promise<{ runId: string }>;
+    cancel(checkoutId: string, runId: string): Promise<AgentRunCancellationResult>;
+    events(checkoutId: string, runId: string, afterSequence?: number, limit?: number): Promise<PersistedRunEventPage>;
+    result(checkoutId: string, runId: string): Promise<AgentResultReview>;
+    recover(checkoutId: string, input: AgentRunRecoveryInput): Promise<AgentRunRecoveryResult>;
   };
   events: {
     subscribe(listener: (event: PhaseAtlasDesktopEvent) => void): () => void;

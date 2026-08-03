@@ -4,7 +4,12 @@
   import TaskContentPanel from "$lib/TaskContentPanel.svelte";
   import TaskMap from "$lib/TaskMap.svelte";
   import type {
+    AgentResultReview,
+    AgentRunAction,
+    AgentRunActionAvailability,
+    AgentRunSummary,
     CanonicalTask,
+    PersistedRunEvent,
     PlanningProposalSet,
     PlanningStatus,
     PlanningTarget,
@@ -22,8 +27,16 @@
   const TASK_PRIORITY_OPTIONS: TaskPriority[] = ["critical", "high", "normal", "low"];
   const TASK_VIEW_STORAGE_KEY = "phaseatlas.task-view";
   const PROVIDER_SETTINGS_STORAGE_KEY = "phaseatlas.repository-provider-settings.v1";
+  const SELECTED_AGENT_RUN_STORAGE_KEY = "phaseatlas.selected-agent-run.v1";
 
   type RepositoryProviderSettings = Record<string, { runnerId: string; modelId: string }>;
+  type CommandCard = {
+    commandId: string;
+    command: string;
+    output: string;
+    exitCode?: number;
+    sequence: number;
+  };
 
   let repositories: RepositorySummary[] = [];
   let workspaces: WorkspaceSummary[] = [];
@@ -71,6 +84,27 @@
   let contentLogs: Record<string, string> = {};
   let contentFailures: Record<string, string> = {};
   let openEditorAfterTask: Record<string, boolean> = {};
+  let executionOpen = false;
+  let executionActions: AgentRunActionAvailability[] = [];
+  let executionActionsLoading = false;
+  let executionError = "";
+  let executionNotice = "";
+  let executionStartingAction: AgentRunAction | "" = "";
+  let executionConfirmAction: AgentRunActionAvailability | null = null;
+  let executionScopeConfirmed = false;
+  let agentRuns: AgentRunSummary[] = [];
+  let selectedAgentRunId = "";
+  let agentEvents: Record<string, PersistedRunEvent[]> = {};
+  let agentEventCursors: Record<string, number> = {};
+  let agentResultReviews: Record<string, AgentResultReview> = {};
+  let cancellingAgentRunId = "";
+  let recoveringAgentRunId = "";
+  const reconcilingAgentRuns = new Set<string>();
+  let executionPanelElement: HTMLElement;
+  let executionConfirmElement: HTMLElement;
+  let executionReturnFocus: HTMLElement | null = null;
+  let executionActionRequest = 0;
+  let agentRunListRequest = 0;
 
   $: selectedRepository = repositories.find(
     (repository) => repository.checkoutId === selectedCheckoutId,
@@ -107,6 +141,16 @@
   $: planningSilenceMs = planningActive && planningLastActivityAt
     ? Math.max(planningClock - planningLastActivityAt, 0)
     : 0;
+  $: selectedAgentRun = agentRuns.find((run) => run.runId === selectedAgentRunId) ?? null;
+  $: selectedAgentEvents = selectedAgentRunId ? agentEvents[selectedAgentRunId] ?? [] : [];
+  $: selectedAgentReview = selectedAgentRunId ? agentResultReviews[selectedAgentRunId] : undefined;
+  $: selectedCommandCards = buildCommandCards(selectedAgentEvents);
+  $: selectedTimelineEvents = selectedAgentEvents.filter((event) =>
+    !["command.output", "command.completed"].includes(event.type)
+  );
+  $: selectedTaskRuns = selectedTask
+    ? agentRuns.filter((run) => run.taskKey === canonicalTaskKey(selectedTask))
+    : [];
   onMount(() => {
     theme = document.documentElement.dataset.theme === "dark" ? "dark" : "light";
     const savedTaskView = window.localStorage.getItem(TASK_VIEW_STORAGE_KEY);
@@ -128,6 +172,10 @@
       }
       if (event.type === "task-content.event") {
         handleTaskContentEvent(event.event);
+        return;
+      }
+      if (event.type === "agent-run.event") {
+        void handleAgentRunEvent(event.runId, event.event);
         return;
       }
       if (event.type === "repository.changed") {
@@ -194,15 +242,25 @@
     contentLogs = {};
     contentFailures = {};
     openEditorAfterTask = {};
+    executionOpen = false;
+    executionActions = [];
+    executionError = "";
+    executionNotice = "";
+    agentRuns = [];
+    selectedAgentRunId = "";
+    agentEvents = {};
+    agentEventCursors = {};
+    agentResultReviews = {};
     errorMessage = "";
     menuOpen = false;
     try {
       const recoveredRepository = await window.phaseatlas.repositories.refresh(checkoutId);
-      const [nextWorkspaces, nextTaskSnapshot, nextRunners, activeContentRuns] = await Promise.all([
+      const [nextWorkspaces, nextTaskSnapshot, nextRunners, activeContentRuns, nextAgentRuns] = await Promise.all([
         window.phaseatlas.workspaces.list(checkoutId),
         window.phaseatlas.tasks.snapshot(checkoutId),
         window.phaseatlas.runners.list(checkoutId),
         window.phaseatlas.tasks.listContentRuns(checkoutId),
+        window.phaseatlas.agentRuns.list(checkoutId),
       ]);
       workspaces = nextWorkspaces;
       repositories = repositories.map((repository) => repository.checkoutId === checkoutId ? recoveredRepository : repository);
@@ -218,6 +276,11 @@
       contentTaskRunIds = Object.fromEntries(activeContentRuns.flatMap((run) =>
         run.taskKeys.map((taskKey) => [taskKey, run.runId]),
       ));
+      agentRuns = nextAgentRuns;
+      const savedAgentRun = readSelectedAgentRuns()[checkoutId];
+      selectedAgentRunId = nextAgentRuns.some((run) => run.runId === savedAgentRun)
+        ? savedAgentRun
+        : nextAgentRuns[0]?.runId ?? "";
       applyRepositoryProviderSettings(checkoutId);
       selectWorkspace(workspaces[0]?.slug ?? "");
     } catch (error) {
@@ -262,12 +325,14 @@
     plannerRunnerId = runnerId;
     plannerModel = defaultModelId(runners.find((runner) => runner.id === runnerId));
     persistRepositoryProviderSettings();
+    if (executionOpen && selectedTask) void loadExecutionActions(selectedTask);
   }
 
   function selectProviderModel(modelId: string) {
     if (!selectedModels.some((model) => model.id === modelId)) return;
     plannerModel = modelId;
     persistRepositoryProviderSettings();
+    if (executionOpen && selectedTask) void loadExecutionActions(selectedTask);
   }
 
   async function refreshRepository(checkoutId: string) {
@@ -287,6 +352,7 @@
         ? selectedWorkspaceSlug
         : nextWorkspaces[0]?.slug ?? "";
       selectWorkspace(workspaceSlug, selectedTaskKey);
+      if (executionOpen) await loadAgentRuns(selectedAgentRunId);
     } catch (error) {
       errorMessage = error instanceof Error ? error.message : "The repository could not be refreshed.";
     } finally {
@@ -305,6 +371,7 @@
   function selectTask(task: CanonicalTask) {
     selectedTaskKey = canonicalTaskKey(task);
     contentPanelTaskKey = canonicalTaskKey(task);
+    if (executionOpen) void loadExecutionActions(task);
   }
 
   function openTaskDetails(task: CanonicalTask) {
@@ -431,6 +498,351 @@
   async function handleEditorSaved(path: string) {
     if (!window.phaseatlas || !path.startsWith(".phaseatlas/")) return;
     taskSnapshot = await window.phaseatlas.tasks.snapshot(selectedCheckoutId);
+  }
+
+  function readSelectedAgentRuns(): Record<string, string> {
+    try {
+      const value = JSON.parse(window.localStorage.getItem(SELECTED_AGENT_RUN_STORAGE_KEY) ?? "{}") as unknown;
+      return value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, string> : {};
+    } catch {
+      return {};
+    }
+  }
+
+  function rememberSelectedAgentRun(runId: string) {
+    if (!selectedCheckoutId || !runId) return;
+    const selections = readSelectedAgentRuns();
+    selections[selectedCheckoutId] = runId;
+    window.localStorage.setItem(SELECTED_AGENT_RUN_STORAGE_KEY, JSON.stringify(selections));
+  }
+
+  async function openExecutionWorkbench(task: CanonicalTask | undefined = selectedTask) {
+    if (!window.phaseatlas) return;
+    if (!executionOpen) {
+      executionReturnFocus = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+    }
+    if (task) selectedTaskKey = canonicalTaskKey(task);
+    contentPanelTaskKey = "";
+    executionOpen = true;
+    executionError = "";
+    executionNotice = "";
+    await tick();
+    executionPanelElement?.focus();
+    await Promise.all([
+      loadAgentRuns(selectedAgentRunId),
+      task ? loadExecutionActions(task) : Promise.resolve(),
+    ]);
+    if (selectedAgentRunId) await selectAgentRun(selectedAgentRunId);
+  }
+
+  function closeExecutionWorkbench() {
+    const returnFocus = executionReturnFocus;
+    executionOpen = false;
+    executionConfirmAction = null;
+    executionScopeConfirmed = false;
+    executionError = "";
+    executionReturnFocus = null;
+    void tick().then(() => returnFocus?.focus());
+  }
+
+  async function loadExecutionActions(task: CanonicalTask) {
+    if (!window.phaseatlas) return;
+    const requestId = ++executionActionRequest;
+    const checkoutId = selectedCheckoutId;
+    executionActionsLoading = true;
+    executionError = "";
+    if (!providerSelectionReady) {
+      executionActions = (["analyze", "plan", "implement", "review"] as AgentRunAction[]).map((action) => ({
+        action,
+        sandbox: action === "implement" ? "workspace-write" : "read-only",
+        available: false,
+        blockingReasons: ["Choose an available provider model in Repository settings."],
+      }));
+      executionActionsLoading = false;
+      return;
+    }
+    try {
+      const nextActions = await window.phaseatlas.agentRuns.actions(checkoutId, {
+        taskKey: canonicalTaskKey(task),
+        runnerId: plannerRunnerId,
+        ...(plannerModel ? { model: plannerModel } : {}),
+      });
+      if (requestId === executionActionRequest && checkoutId === selectedCheckoutId) executionActions = nextActions;
+    } catch (error) {
+      if (requestId === executionActionRequest && checkoutId === selectedCheckoutId) {
+        executionActions = [];
+        executionError = error instanceof Error ? error.message : "Task actions could not be evaluated.";
+      }
+    } finally {
+      if (requestId === executionActionRequest) executionActionsLoading = false;
+    }
+  }
+
+  async function loadAgentRuns(preferredRunId = "") {
+    if (!window.phaseatlas || !selectedCheckoutId) return;
+    const requestId = ++agentRunListRequest;
+    const checkoutId = selectedCheckoutId;
+    try {
+      const nextRuns = await window.phaseatlas.agentRuns.list(checkoutId);
+      if (requestId !== agentRunListRequest || checkoutId !== selectedCheckoutId) return;
+      agentRuns = nextRuns;
+      const nextSelected = nextRuns.find((run) => run.runId === preferredRunId)?.runId
+        ?? nextRuns.find((run) => run.runId === selectedAgentRunId)?.runId
+        ?? nextRuns[0]?.runId
+        ?? "";
+      selectedAgentRunId = nextSelected;
+      if (nextSelected) rememberSelectedAgentRun(nextSelected);
+    } catch (error) {
+      if (requestId === agentRunListRequest && checkoutId === selectedCheckoutId) {
+        executionError = error instanceof Error ? error.message : "Run history could not be loaded.";
+      }
+    }
+  }
+
+  function requestAgentAction(availability: AgentRunActionAvailability) {
+    if (!availability.available || executionStartingAction) return;
+    executionError = "";
+    executionNotice = "";
+    if (availability.sandbox === "workspace-write") {
+      executionConfirmAction = availability;
+      executionScopeConfirmed = false;
+      void tick().then(() => executionConfirmElement?.focus());
+      return;
+    }
+    void startAgentRun(availability);
+  }
+
+  async function startAgentRun(availability: AgentRunActionAvailability) {
+    if (!window.phaseatlas || !selectedTask || !availability.available || executionStartingAction) return;
+    executionStartingAction = availability.action;
+    executionError = "";
+    executionNotice = `Preparing ${availability.action} run…`;
+    try {
+      const started = await window.phaseatlas.agentRuns.start(selectedCheckoutId, {
+        taskKey: canonicalTaskKey(selectedTask),
+        expectedTaskRevision: selectedTask.revision,
+        expectedCheckoutId: selectedCheckoutId,
+        action: availability.action,
+        requestedSandbox: availability.sandbox,
+        runnerId: plannerRunnerId,
+        ...(plannerModel ? { model: plannerModel } : {}),
+      });
+      executionConfirmAction = null;
+      executionScopeConfirmed = false;
+      executionNotice = `${actionLabel(availability.action)} run started.`;
+      await loadAgentRuns(started.runId);
+      await selectAgentRun(started.runId);
+    } catch (error) {
+      executionError = error instanceof Error ? error.message : "The agent run could not start.";
+      executionNotice = "";
+      if (selectedTask) await loadExecutionActions(selectedTask);
+    } finally {
+      executionStartingAction = "";
+    }
+  }
+
+  async function selectAgentRun(runId: string) {
+    if (!runId) return;
+    selectedAgentRunId = runId;
+    rememberSelectedAgentRun(runId);
+    executionError = "";
+    await reconcileAgentEvents(runId);
+    const run = agentRuns.find((candidate) => candidate.runId === runId);
+    if (run && ["completed", "failed"].includes(run.status)) await loadAgentResult(runId);
+  }
+
+  function mergeAgentEvents(runId: string, incoming: PersistedRunEvent[]) {
+    const merged = new Map((agentEvents[runId] ?? []).map((event) => [event.sequence, event]));
+    for (const event of incoming) merged.set(event.sequence, event);
+    const ordered = [...merged.values()].sort((left, right) => left.sequence - right.sequence);
+    let contiguous = 0;
+    for (const event of ordered) {
+      if (event.sequence !== contiguous + 1) break;
+      contiguous = event.sequence;
+    }
+    agentEvents = { ...agentEvents, [runId]: ordered };
+    agentEventCursors = { ...agentEventCursors, [runId]: contiguous };
+  }
+
+  async function reconcileAgentEvents(runId: string) {
+    if (!window.phaseatlas) return;
+    const checkoutId = selectedCheckoutId;
+    const reconciliationKey = `${checkoutId}:${runId}`;
+    if (reconcilingAgentRuns.has(reconciliationKey)) return;
+    reconcilingAgentRuns.add(reconciliationKey);
+    let stalledOnGap = false;
+    try {
+      let cursor = agentEventCursors[runId] ?? 0;
+      for (;;) {
+        const page = await window.phaseatlas.agentRuns.events(checkoutId, runId, cursor, 200);
+        if (checkoutId !== selectedCheckoutId) return;
+        if (page.runId !== runId || page.afterSequence !== cursor) {
+          throw new Error("Persisted event page does not match the requested run cursor.");
+        }
+        const previousCursor = cursor;
+        mergeAgentEvents(runId, page.events);
+        cursor = agentEventCursors[runId] ?? cursor;
+        if (page.events.length && cursor === previousCursor) {
+          stalledOnGap = true;
+          throw new Error(`Persisted event sequence has a gap after ${previousCursor}.`);
+        }
+        if (page.hasMore && !page.events.length) {
+          stalledOnGap = true;
+          throw new Error("Persisted event page cannot advance its cursor.");
+        }
+        if (!page.hasMore) break;
+      }
+    } catch (error) {
+      executionError = error instanceof Error ? error.message : "Run events could not be resumed.";
+    } finally {
+      reconcilingAgentRuns.delete(reconciliationKey);
+      const highestObserved = (agentEvents[runId] ?? []).at(-1)?.sequence ?? 0;
+      if (!stalledOnGap && checkoutId === selectedCheckoutId && highestObserved > (agentEventCursors[runId] ?? 0)) {
+        void reconcileAgentEvents(runId);
+      }
+    }
+  }
+
+  async function handleAgentRunEvent(runId: string, event: PersistedRunEvent) {
+    const priorCursor = agentEventCursors[runId] ?? 0;
+    mergeAgentEvents(runId, [event]);
+    if (event.sequence > priorCursor + 1) await reconcileAgentEvents(runId);
+    const status = agentEventStatus(event);
+    if (status) {
+      if (agentRuns.some((run) => run.runId === runId)) {
+        agentRuns = agentRuns.map((run) => run.runId === runId
+          ? { ...run, status, updatedAt: event.timestamp }
+          : run);
+      } else {
+        await loadAgentRuns(runId);
+      }
+      if (["completed", "failed", "cancelled", "interrupted"].includes(status)) {
+        await loadAgentRuns(runId);
+        if (["completed", "failed"].includes(status)) await loadAgentResult(runId);
+      }
+    }
+  }
+
+  function agentEventStatus(event: PersistedRunEvent): AgentRunSummary["status"] | undefined {
+    if (event.type === "run.status" && ["starting", "running"].includes(String(event.payload.status))) {
+      return event.payload.status as "starting" | "running";
+    }
+    if (event.type === "agent.result" && ["completed", "failed"].includes(String(event.payload.status))) {
+      return event.payload.status as "completed" | "failed";
+    }
+    if (event.type === "run.failed") return "failed";
+    if (event.type === "run.cancelled") return "cancelled";
+    if (event.type === "run.interrupted") return "interrupted";
+    return undefined;
+  }
+
+  async function loadAgentResult(runId: string) {
+    if (!window.phaseatlas) return;
+    const checkoutId = selectedCheckoutId;
+    try {
+      const review = await window.phaseatlas.agentRuns.result(checkoutId, runId);
+      if (checkoutId === selectedCheckoutId) agentResultReviews = { ...agentResultReviews, [runId]: review };
+    } catch {
+      if (checkoutId === selectedCheckoutId) {
+        agentResultReviews = Object.fromEntries(Object.entries(agentResultReviews).filter(([key]) => key !== runId));
+      }
+    }
+  }
+
+  async function cancelAgentRun(runId: string) {
+    if (!window.phaseatlas || cancellingAgentRunId) return;
+    cancellingAgentRunId = runId;
+    executionError = "";
+    executionNotice = "Stopping the owned provider process…";
+    try {
+      const result = await window.phaseatlas.agentRuns.cancel(selectedCheckoutId, runId);
+      executionNotice = result.status === "cancelled" ? "Run cancelled after provider exit." : `Run is already ${result.status}.`;
+      await Promise.all([loadAgentRuns(runId), reconcileAgentEvents(runId)]);
+    } catch (error) {
+      executionError = error instanceof Error ? error.message : "The run could not be cancelled.";
+    } finally {
+      cancellingAgentRunId = "";
+    }
+  }
+
+  async function recoverAgentRun(runId: string, decision: "leave_interrupted" | "retry") {
+    if (!window.phaseatlas || recoveringAgentRunId) return;
+    recoveringAgentRunId = runId;
+    executionError = "";
+    try {
+      const result = await window.phaseatlas.agentRuns.recover(selectedCheckoutId, {
+        runId,
+        decision,
+        ...(decision === "retry" ? {
+          runnerId: plannerRunnerId,
+          ...(plannerModel ? { model: plannerModel } : {}),
+        } : {}),
+      });
+      executionNotice = decision === "retry" ? "A linked retry was created from the current task revision." : "Interrupted attempt retained as history.";
+      await loadAgentRuns(result.retryRunId ?? runId);
+      if (result.retryRunId) await selectAgentRun(result.retryRunId);
+    } catch (error) {
+      executionError = error instanceof Error ? error.message : "The interrupted run could not be recovered.";
+    } finally {
+      recoveringAgentRunId = "";
+    }
+  }
+
+  function buildCommandCards(events: PersistedRunEvent[]): CommandCard[] {
+    const commands = new Map<string, CommandCard>();
+    for (const event of events) {
+      const commandId = typeof event.payload.commandId === "string" ? event.payload.commandId : "";
+      if (!commandId) continue;
+      const current = commands.get(commandId) ?? { commandId, command: "Repository command", output: "", sequence: event.sequence };
+      if (event.type === "command.started" && typeof event.payload.command === "string") current.command = event.payload.command;
+      if (event.type === "command.output" && typeof event.payload.text === "string") {
+        current.output = `${current.output}${event.payload.text}`.slice(-30_000);
+      }
+      if (event.type === "command.completed" && typeof event.payload.exitCode === "number") current.exitCode = event.payload.exitCode;
+      commands.set(commandId, current);
+    }
+    return [...commands.values()].sort((left, right) => left.sequence - right.sequence);
+  }
+
+  function commandForEvent(event: PersistedRunEvent) {
+    const commandId = typeof event.payload.commandId === "string" ? event.payload.commandId : "";
+    return selectedCommandCards.find((command) => command.commandId === commandId);
+  }
+
+  function eventHeading(event: PersistedRunEvent) {
+    const labels: Record<string, string> = {
+      "agent.prepared": "Run prepared",
+      "run.status": `Run ${String(event.payload.status ?? "updated")}`,
+      "agent.delta": "Agent message",
+      "command.started": "Command",
+      "file.changed": "File changed",
+      "turn.completed": "Turn completed",
+      "agent.result": "Validated result",
+      "run.failed": "Run failed",
+      "run.cancelled": "Run cancelled",
+      "run.interrupted": "Run interrupted",
+    };
+    return labels[event.type] ?? event.type.replaceAll(".", " ");
+  }
+
+  function eventBody(event: PersistedRunEvent) {
+    for (const key of ["text", "summary", "message", "path", "reason"] as const) {
+      if (typeof event.payload[key] === "string") return event.payload[key] as string;
+    }
+    return "";
+  }
+
+  function actionLabel(action: AgentRunAction) {
+    return ({ analyze: "Analyze", plan: "Plan", implement: "Implement", review: "Review" })[action];
+  }
+
+  function formatRunTime(value: string) {
+    const date = new Date(value);
+    return Number.isNaN(date.getTime()) ? "Unknown time" : date.toLocaleString([], { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" });
+  }
+
+  function isAgentRunActive(run: AgentRunSummary | null) {
+    return Boolean(run && (run.status === "starting" || run.status === "running"));
   }
 
   function canonicalTaskKey(task: CanonicalTask) {
@@ -665,6 +1077,10 @@
       taskSnapshot = null;
       selectedWorkspaceSlug = "";
       selectedTaskKey = "";
+      executionOpen = false;
+      agentRuns = [];
+      agentEvents = {};
+      agentEventCursors = {};
       if (repositories[0]) await selectRepository(repositories[0].checkoutId);
     }
   }
@@ -676,8 +1092,29 @@
   }
 
   function handleWindowKeydown(event: KeyboardEvent) {
+    if (event.key === "Tab" && executionOpen && executionPanelElement) {
+      const focusable = [...executionPanelElement.querySelectorAll<HTMLElement>(
+        'button:not([disabled]), input:not([disabled]), [href], [tabindex]:not([tabindex="-1"])',
+      )].filter((element) => !element.hidden && element.getClientRects().length > 0);
+      const first = focusable[0];
+      const last = focusable.at(-1);
+      if (first && last && event.shiftKey && document.activeElement === first) {
+        event.preventDefault();
+        last.focus();
+      } else if (first && last && !event.shiftKey && document.activeElement === last) {
+        event.preventDefault();
+        first.focus();
+      }
+      return;
+    }
     if (event.key !== "Escape") return;
-    if (plannerOpen) closePlanner();
+    if (executionConfirmAction) {
+      executionConfirmAction = null;
+      executionScopeConfirmed = false;
+      executionPanelElement?.focus();
+    }
+    else if (executionOpen) closeExecutionWorkbench();
+    else if (plannerOpen) closePlanner();
     else menuOpen = false;
   }
 </script>
@@ -785,6 +1222,10 @@
             <button class="secondary-button" type="button" onclick={() => openRepositoryEditor()}>
               <svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M4 5h16v14H4zM8 5v14M11 9h6M11 13h4"/></svg>
               Explorer
+            </button>
+            <button class="secondary-button" type="button" onclick={() => openExecutionWorkbench()}>
+              <svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M5 4h14v16H5zM8 8h8M8 12h5M8 16h7"/><path d="m15 11 4 2.5-4 2.5z"/></svg>
+              Runs
             </button>
             <button class="secondary-button" type="button" onclick={() => providerSettingsOpen = true}>
               <svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.7 1.7 0 0 0 .3 1.9l.1.1-2.8 2.8-.1-.1a1.7 1.7 0 0 0-1.9-.3 1.7 1.7 0 0 0-1 1.5V21h-4v-.1a1.7 1.7 0 0 0-1-1.5 1.7 1.7 0 0 0-1.9.3l-.1.1L4.2 17l.1-.1a1.7 1.7 0 0 0 .3-1.9A1.7 1.7 0 0 0 3.1 14H3v-4h.1a1.7 1.7 0 0 0 1.5-1 1.7 1.7 0 0 0-.3-1.9L4.2 7 7 4.2l.1.1a1.7 1.7 0 0 0 1.9.3A1.7 1.7 0 0 0 10 3.1V3h4v.1a1.7 1.7 0 0 0 1 1.5 1.7 1.7 0 0 0 1.9-.3l.1-.1L19.8 7l-.1.1a1.7 1.7 0 0 0-.3 1.9 1.7 1.7 0 0 0 1.5 1h.1v4h-.1a1.7 1.7 0 0 0-1.5 1z"/></svg>
@@ -898,7 +1339,13 @@
                         <h2>{selectedTask.title}</h2>
                         <p>{selectedTask.objective}</p>
                       </div>
-                      <div class="task-badges"><span class="state-badge" data-state={selectedTask.state}>{stateLabel(selectedTask.state)}</span><span class="priority-badge" data-priority={selectedTask.priority}>{selectedTask.priority}</span></div>
+                      <div class="task-header-actions">
+                        <div class="task-badges"><span class="state-badge" data-state={selectedTask.state}>{stateLabel(selectedTask.state)}</span><span class="priority-badge" data-priority={selectedTask.priority}>{selectedTask.priority}</span></div>
+                        <button class="primary-button task-run-button" type="button" onclick={() => openExecutionWorkbench(selectedTask)}>
+                          <svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="m8 5 11 7-11 7z"/></svg>
+                          Run task{selectedTaskRuns.length ? ` · ${selectedTaskRuns.length}` : ""}
+                        </button>
+                      </div>
                     </header>
 
                     <div class="task-detail-grid">
@@ -1061,6 +1508,200 @@
       <span>Saved automatically on this device</span>
       <button class="primary-button" type="button" onclick={() => providerSettingsOpen = false} disabled={!providerSelectionReady}>Done</button>
     </footer>
+  </div>
+{/if}
+
+{#if executionOpen}
+  <button class="execution-backdrop" type="button" aria-label="Close execution workbench" onclick={closeExecutionWorkbench}></button>
+  <div class="execution-panel" role="dialog" aria-modal="true" aria-labelledby="execution-title" tabindex="-1" bind:this={executionPanelElement}>
+    <header class="execution-header">
+      <div class="execution-header-mark" aria-hidden="true"><svg class="icon" viewBox="0 0 24 24"><path d="M5 4h14v16H5zM8 8h8M8 12h5M8 16h7"/><path d="m15 11 4 2.5-4 2.5z"/></svg></div>
+      <div>
+        <p class="eyebrow">Durable execution</p>
+        <h2 id="execution-title">Run workbench</h2>
+        <p>{selectedRepository?.name} · persisted events remain available after restart</p>
+      </div>
+      <button class="icon-button" type="button" aria-label="Close execution workbench" onclick={closeExecutionWorkbench}>
+        <svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="m7 7 10 10M17 7 7 17"/></svg>
+      </button>
+    </header>
+
+    <div class="execution-layout">
+      <aside class="execution-history" aria-label="Agent run history">
+        <header>
+          <div><p class="eyebrow">Repository history</p><h3>{agentRuns.length} {agentRuns.length === 1 ? "run" : "runs"}</h3></div>
+          <button class="run-refresh-button" type="button" aria-label="Refresh run history" onclick={() => loadAgentRuns(selectedAgentRunId)}>
+            <svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M20 11a8 8 0 1 0-2.3 5.7M20 5v6h-6"/></svg>
+          </button>
+        </header>
+        {#if agentRuns.length}
+          <div class="execution-history-list">
+            {#each agentRuns as run}
+              <button class:active={run.runId === selectedAgentRunId} class="execution-history-row" type="button" onclick={() => selectAgentRun(run.runId)}>
+                <span class="run-status-orbit" data-status={run.status}><i></i></span>
+                <span class="execution-history-copy">
+                  <small>{run.taskKey} · {actionLabel(run.action)}</small>
+                  <strong>{run.status.replaceAll("_", " ")}</strong>
+                  <span>{formatRunTime(run.updatedAt)} · {run.runnerId}</span>
+                </span>
+                {#if run.freshness === "stale"}<span class="run-freshness-chip stale">stale</span>{/if}
+              </button>
+            {/each}
+          </div>
+        {:else}
+          <div class="execution-history-empty"><strong>No task runs yet</strong><p>Choose an available action to create the first durable attempt.</p></div>
+        {/if}
+      </aside>
+
+      <div class="execution-main">
+        {#if selectedTask}
+          <section class="execution-launchpad" aria-labelledby="execution-task-title">
+            <header>
+              <div><p class="eyebrow">Selected task</p><h3 id="execution-task-title">{selectedTask.key.taskId} · {selectedTask.title}</h3><p>{selectedTask.objective}</p></div>
+              <code>{selectedTask.revision.slice(0, 10)}</code>
+            </header>
+            <div class="execution-action-grid" aria-busy={executionActionsLoading}>
+              {#if executionActionsLoading}
+                <div class="execution-actions-loading"><span class="task-content-spinner"></span>Evaluating provider and task policy…</div>
+              {:else}
+                {#each executionActions as availability}
+                  <div class="execution-action-slot">
+                    <button
+                      class:write-action={availability.sandbox === "workspace-write"}
+                      class="execution-action"
+                      type="button"
+                      disabled={!availability.available || Boolean(executionStartingAction)}
+                      title={availability.blockingReasons.join(" ")}
+                      onclick={() => requestAgentAction(availability)}
+                    >
+                      <span class="execution-action-icon" aria-hidden="true"><svg class="icon" viewBox="0 0 24 24"><path d={availability.action === "implement" ? "M5 19 19 5M14 5h5v5M5 14v5h5" : availability.action === "review" ? "M4 5h16v14H4zM8 10l2 2 5-5" : availability.action === "plan" ? "M5 6h14M5 12h9M5 18h11" : "M4 12h16M12 4v16M7 7l10 10M17 7 7 17"}/></svg></span>
+                      <span><strong>{executionStartingAction === availability.action ? "Starting…" : actionLabel(availability.action)}</strong><small>{availability.sandbox === "workspace-write" ? "Isolated worktree" : "Read-only checkout"}</small></span>
+                      <i data-available={availability.available}></i>
+                    </button>
+                    {#if !availability.available && availability.blockingReasons.length}
+                      <p class="execution-action-reason"><strong>Blocked:</strong> {availability.blockingReasons[0]}</p>
+                    {/if}
+                  </div>
+                {/each}
+              {/if}
+            </div>
+          </section>
+        {/if}
+
+        {#if executionConfirmAction && selectedTask}
+          <div class="execution-confirm" role="alertdialog" aria-labelledby="execution-confirm-title" tabindex="-1" bind:this={executionConfirmElement}>
+            <header><span aria-hidden="true">!</span><div><p class="eyebrow">Write boundary</p><h3 id="execution-confirm-title">Confirm isolated implementation</h3></div></header>
+            <p>The provider will write only inside a PhaseAtlas-owned worktree. The canonical checkout and task state remain unchanged until a separate review.</p>
+            <dl>
+              <div><dt>Repository</dt><dd>{selectedRepository?.name}</dd></div>
+              <div><dt>Provider</dt><dd>{selectedRunner?.name} · {selectedModels.find((model) => model.id === plannerModel)?.displayName}</dd></div>
+              <div><dt>Sandbox</dt><dd>{executionConfirmAction.sandbox}</dd></div>
+              <div><dt>Network</dt><dd>{selectedTask.scope.allowExternalNetwork ? "Allowed by task" : "Blocked"}</dd></div>
+            </dl>
+            <div class="execution-confirm-scope"><span>Writable scope</span>{#each selectedTask.scope.allowedPaths as allowedPath}<code>{allowedPath}</code>{/each}</div>
+            <label class="execution-confirm-check"><input type="checkbox" bind:checked={executionScopeConfirmed} /><span>I reviewed the task revision, provider, sandbox, and writable scope.</span></label>
+            <footer><button class="secondary-button" type="button" onclick={() => executionConfirmAction = null}>Back</button><button class="primary-button" type="button" disabled={!executionScopeConfirmed || Boolean(executionStartingAction)} onclick={() => executionConfirmAction && startAgentRun(executionConfirmAction)}>Start isolated run</button></footer>
+          </div>
+        {/if}
+
+        {#if executionError}<div class="execution-message error" role="alert"><strong>Execution needs attention</strong><span>{executionError}</span></div>{/if}
+        {#if executionNotice}<div class="execution-message" role="status"><span class="live-indicator"></span><span>{executionNotice}</span></div>{/if}
+
+        {#if selectedAgentRun}
+          <section class="execution-run" aria-labelledby="selected-run-title">
+            <header class="execution-run-header">
+              <div>
+                <div class="execution-run-kicker"><span class="run-status-orbit" data-status={selectedAgentRun.status}><i></i></span><span>{selectedAgentRun.status.replaceAll("_", " ")}</span><code>{selectedAgentRun.runId.slice(0, 8)}</code></div>
+                <h3 id="selected-run-title">{actionLabel(selectedAgentRun.action)} · {selectedAgentRun.taskKey}</h3>
+                <p>{selectedAgentRun.runnerId}{selectedAgentRun.model ? ` / ${selectedAgentRun.model}` : ""} · revision {selectedAgentRun.taskRevision.slice(0, 10)}</p>
+              </div>
+              <div class="execution-run-actions">
+                {#if isAgentRunActive(selectedAgentRun)}
+                  <button class="secondary-button danger-button" type="button" disabled={Boolean(cancellingAgentRunId)} onclick={() => cancelAgentRun(selectedAgentRun.runId)}>{cancellingAgentRunId ? "Stopping provider…" : "Cancel run"}</button>
+                {:else if selectedAgentRun.status === "interrupted"}
+                  <button class="secondary-button" type="button" disabled={Boolean(recoveringAgentRunId)} onclick={() => recoverAgentRun(selectedAgentRun.runId, "leave_interrupted")}>Keep as history</button>
+                  <button class="primary-button" type="button" disabled={Boolean(recoveringAgentRunId) || !providerSelectionReady} onclick={() => recoverAgentRun(selectedAgentRun.runId, "retry")}>Retry current task</button>
+                {/if}
+              </div>
+            </header>
+
+            <div class="execution-run-meta">
+              <span><small>Started</small>{formatRunTime(selectedAgentRun.createdAt)}</span>
+              <span><small>Sandbox</small>{selectedAgentRun.sandbox}</span>
+              <span><small>Events</small>{selectedAgentEvents.length}</span>
+              <span><small>Freshness</small>{selectedAgentRun.freshness ?? "pending"}</span>
+            </div>
+
+            <div class="execution-timeline" aria-live={isAgentRunActive(selectedAgentRun) ? "polite" : "off"}>
+              {#if selectedTimelineEvents.length}
+                {#each selectedTimelineEvents as event}
+                  <article class="execution-event" data-type={event.type}>
+                    <span class="execution-event-sequence">{String(event.sequence).padStart(2, "0")}</span>
+                    <div class="execution-event-content">
+                      <header><strong>{eventHeading(event)}</strong><time>{formatRunTime(event.timestamp)}</time></header>
+                      {#if event.type === "command.started"}
+                        {@const command = commandForEvent(event)}
+                        {#if command}
+                          <div class="execution-command" data-exit={command.exitCode ?? "running"}>
+                            <div><code>{command.command}</code><span>{command.exitCode === undefined ? "running" : `exit ${command.exitCode}`}</span></div>
+                            {#if command.output}<pre>{command.output}</pre>{:else if command.exitCode === undefined}<p>Waiting for command output…</p>{/if}
+                          </div>
+                        {/if}
+                      {:else if eventBody(event)}
+                        <p>{eventBody(event)}</p>
+                      {/if}
+                    </div>
+                  </article>
+                {/each}
+              {:else}
+                <div class="execution-timeline-empty"><span class="run-waiting-signal" aria-hidden="true"><i></i><i></i><i></i></span><div><strong>{isAgentRunActive(selectedAgentRun) ? "Agent is active" : "No persisted events"}</strong><p>{isAgentRunActive(selectedAgentRun) ? "The next normalized event will appear here." : "Refresh history to retry durable replay."}</p></div></div>
+              {/if}
+            </div>
+
+            {#if selectedAgentReview}
+              <section class="execution-result" data-freshness={selectedAgentReview.freshness}>
+                <header>
+                  <div><p class="eyebrow">Validated result</p><h3>{selectedAgentReview.persisted.validated.result.summary}</h3></div>
+                  <span class="result-freshness">{selectedAgentReview.freshness}</span>
+                </header>
+                {#if selectedAgentReview.reason}<p class="execution-result-warning">{selectedAgentReview.reason}</p>{/if}
+                <div class="execution-result-grid">
+                  <section><span>Outcome</span><strong>{selectedAgentReview.persisted.validated.result.outcome}</strong><small>{selectedAgentReview.promotable ? "Eligible for separate promotion review" : "Not promotable"}</small></section>
+                  <section><span>Next action</span><strong>{selectedAgentReview.persisted.validated.result.nextAction}</strong><small>{selectedAgentReview.persisted.validated.result.requiresHumanReview ? "Human review required" : "No review requested"}</small></section>
+                </div>
+                <div class="execution-result-columns">
+                  <section>
+                    <header><strong>Changed files</strong><span>{selectedAgentReview.persisted.validated.inspectedChanges.length}</span></header>
+                    {#if selectedAgentReview.persisted.validated.inspectedChanges.length}
+                      <ul class="execution-file-list">{#each selectedAgentReview.persisted.validated.inspectedChanges as change}<li><span data-change={change.changeType}>{change.changeType.slice(0, 1).toUpperCase()}</span><code>{change.path}</code>{#if change.policyViolations.length}<small>{change.policyViolations.join(" · ")}</small>{/if}</li>{/each}</ul>
+                    {:else}<p class="execution-result-empty">No Git-derived changes.</p>{/if}
+                  </section>
+                  <section>
+                    <header><strong>Verification</strong><span>{selectedAgentReview.persisted.validated.result.verification.length}</span></header>
+                    {#if selectedAgentReview.persisted.validated.result.verification.length}
+                      <ul class="execution-verification-list">{#each selectedAgentReview.persisted.validated.result.verification as check}<li><span data-status={check.status}></span><div><strong>{check.stepId}</strong><small>{check.details}</small></div></li>{/each}</ul>
+                    {:else}<p class="execution-result-empty">No verification records.</p>{/if}
+                  </section>
+                </div>
+                {#if selectedAgentReview.persisted.validated.result.producedEvidence.length}
+                  <div class="execution-evidence">
+                    <strong>Produced evidence</strong>
+                    <ul>
+                      {#each selectedAgentReview.persisted.validated.result.producedEvidence as evidence}
+                        <li><span>{evidence.type.replaceAll("_", " ")}</span><code>{evidence.reference}</code></li>
+                      {/each}
+                    </ul>
+                  </div>
+                {/if}
+                {#if selectedAgentReview.persisted.validated.result.blockers.length}<div class="execution-blockers"><strong>Blockers</strong>{#each selectedAgentReview.persisted.validated.result.blockers as blocker}<p>{blocker}</p>{/each}</div>{/if}
+              </section>
+            {/if}
+          </section>
+        {:else}
+          <div class="execution-run-empty"><span class="execution-header-mark" aria-hidden="true"><svg class="icon" viewBox="0 0 24 24"><path d="M5 4h14v16H5zM8 8h8M8 12h5M8 16h7"/></svg></span><h3>No run selected</h3><p>Start an action or choose a durable attempt from repository history.</p></div>
+        {/if}
+      </div>
+    </div>
   </div>
 {/if}
 

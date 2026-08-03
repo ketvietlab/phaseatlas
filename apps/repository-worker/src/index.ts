@@ -9,10 +9,13 @@ import type {
   PersistedRunStatus,
   AgentRunCreateInput,
   AgentRunAction,
+  AgentRunActionAvailability,
+  AgentRunActionQuery,
   AgentRunCancellationResult,
   AgentRunRecoveryInput,
   AgentRunRecoveryResult,
   AgentRunStartInput,
+  AgentRunSummary,
   AgentSandbox,
   PersistedRunEventPage,
   TaskContentEvent,
@@ -194,6 +197,24 @@ function agentRunStartInput(value: unknown): AgentRunStartInput {
   ));
   return {
     ...request,
+    runnerId: value.runnerId.trim(),
+    ...(typeof value.model === "string" ? { model: value.model.trim() } : {}),
+  };
+}
+
+function agentRunActionQuery(value: unknown): AgentRunActionQuery {
+  if (!isRecord(value)) throw new Error("Agent run action query is required.");
+  const allowedFields = new Set(["taskKey", "runnerId", "model"]);
+  if (Object.keys(value).some((field) => !allowedFields.has(field))) {
+    throw new Error("Agent run action query contains unsupported fields.");
+  }
+  if (typeof value.taskKey !== "string" || !value.taskKey.trim()) throw new Error("taskKey is required.");
+  if (typeof value.runnerId !== "string" || !value.runnerId.trim()) throw new Error("runnerId is required.");
+  if (value.model !== undefined && (typeof value.model !== "string" || !value.model.trim())) {
+    throw new Error("model must be a non-empty string.");
+  }
+  return {
+    taskKey: value.taskKey.trim(),
     runnerId: value.runnerId.trim(),
     ...(typeof value.model === "string" ? { model: value.model.trim() } : {}),
   };
@@ -559,7 +580,108 @@ function listTaskContentRuns(): TaskContentRunSummary[] {
   }));
 }
 
+async function agentRunActions(input: AgentRunActionQuery): Promise<AgentRunActionAvailability[]> {
+  const [snapshot, descriptor] = await Promise.all([
+    inspector.taskSnapshot(),
+    runners.get(input.runnerId).describe(),
+  ]);
+  const matches = snapshot.tasks.filter((task) =>
+    task.key.taskId === input.taskKey || `${task.key.workspaceSlug}/${task.key.taskId}` === input.taskKey
+  );
+  if (matches.length !== 1) throw new Error("Agent action query does not resolve to one canonical task.");
+  const task = matches[0];
+  if (!task) throw new Error("Canonical task is unavailable.");
+  const taskKey = `${task.key.workspaceSlug}/${task.key.taskId}`;
+  const commonReasons: string[] = [];
+  if (snapshot.issues.some((issue) => issue.severity === "error")) {
+    commonReasons.push("Resolve canonical task validation errors before execution.");
+  }
+  if (!descriptor.available) commonReasons.push(descriptor.unavailableReason || `${descriptor.name} is unavailable.`);
+  try {
+    assertRunnerModel(descriptor, input.model);
+  } catch (error) {
+    commonReasons.push(error instanceof Error ? error.message : "The selected model is unavailable.");
+  }
+
+  const incompleteDependencies = task.dependencies.flatMap((dependency) => {
+    if (dependency.relation !== "blocks_start") return [];
+    const dependencyTask = snapshot.tasks.find((candidate) =>
+      `${candidate.key.workspaceSlug}/${candidate.key.taskId}` === dependency.taskKey ||
+      candidate.key.taskId === dependency.taskKey
+    );
+    const requiredState = dependency.requiredState ?? "done";
+    return dependencyTask?.state === requiredState
+      ? []
+      : [`Dependency ${dependency.taskKey} must be ${requiredState.replaceAll("_", " ")}.`];
+  });
+  const hasAbandonedAttempt = leaseManager.list().some((lease) => {
+    if (lease.status !== "abandoned") return false;
+    return operationalStore.getAgentSpec(lease.runId)?.taskKey === taskKey;
+  });
+  const actions: AgentRunAction[] = ["analyze", "plan", "implement", "review"];
+  return actions.map((action) => {
+    const sandbox: AgentSandbox = action === "implement" ? "workspace-write" : "read-only";
+    const blockingReasons = [...commonReasons];
+    if (!descriptor.execution?.actions.includes(action)) {
+      blockingReasons.push(`${descriptor.name} does not support ${action} runs.`);
+    }
+    if (!descriptor.execution?.sandboxes.includes(sandbox)) {
+      blockingReasons.push(`${descriptor.name} cannot enforce the required ${sandbox} sandbox.`);
+    }
+    if (action === "implement") {
+      if (!task.scope.writable) blockingReasons.push("This task contract does not permit repository writes.");
+      if (!["ready", "in_progress", "in_review"].includes(task.state)) {
+        blockingReasons.push(`Task state ${task.state.replaceAll("_", " ")} is not execution-ready.`);
+      }
+      blockingReasons.push(...incompleteDependencies);
+      if (hasAbandonedAttempt) blockingReasons.push("Resolve the abandoned worktree attempt before starting another implementation.");
+    }
+    return { action, sandbox, available: blockingReasons.length === 0, blockingReasons };
+  });
+}
+
+async function listAgentRuns(taskKey?: string): Promise<AgentRunSummary[]> {
+  if (taskKey !== undefined && (!taskKey.trim() || taskKey.length > 160)) throw new Error("taskKey is invalid.");
+  const summaries: AgentRunSummary[] = [];
+  for (const run of operationalStore.listRuns().filter((candidate) => candidate.kind === "agent")) {
+    const spec = operationalStore.getAgentSpec(run.runId);
+    if (!spec || (taskKey && spec.taskKey !== taskKey)) continue;
+    let review: Awaited<ReturnType<typeof reviewAgentResult>> | undefined;
+    if (operationalStore.getAgentResult(run.runId)) {
+      try {
+        review = await reviewAgentResult(operationalStore, inspector, run.runId);
+      } catch {
+        review = undefined;
+      }
+    }
+    const parentRunId = operationalStore.parentRunId(run.runId);
+    summaries.push({
+      runId: run.runId,
+      taskKey: spec.taskKey,
+      taskRevision: spec.taskRevision,
+      action: spec.action,
+      sandbox: spec.sandbox,
+      runnerId: spec.runnerId,
+      ...(spec.model ? { model: spec.model } : {}),
+      status: run.status,
+      ...(parentRunId ? { parentRunId } : {}),
+      ...(review ? { freshness: review.freshness, promotable: review.promotable } : {}),
+      createdAt: run.createdAt,
+      updatedAt: run.updatedAt,
+    });
+  }
+  return summaries;
+}
+
 async function startAgentRun(input: AgentRunStartInput, parentRunId?: string): Promise<{ runId: string }> {
+  const availability = (await agentRunActions({
+    taskKey: input.taskKey,
+    runnerId: input.runnerId,
+    ...(input.model ? { model: input.model } : {}),
+  })).find((candidate) => candidate.action === input.action);
+  if (!availability?.available) {
+    throw new Error(availability?.blockingReasons.join(" ") || `Action ${input.action} is unavailable.`);
+  }
   const runner = runners.get(input.runnerId);
   const descriptor = await runner.describe();
   if (!descriptor.available) throw new Error(descriptor.unavailableReason || `${descriptor.name} is unavailable.`);
@@ -702,6 +824,13 @@ async function dispatch(request: WorkerRequest): Promise<unknown> {
     }
     case "agent-run.prepare":
       return executionScheduler.prepare(agentRunInput(requestParams(request).input));
+    case "agent-run.actions":
+      return agentRunActions(agentRunActionQuery(requestParams(request).input));
+    case "agent-run.list": {
+      const taskKey = requestParams(request).taskKey;
+      if (taskKey !== undefined && typeof taskKey !== "string") throw new Error("taskKey must be a string.");
+      return listAgentRuns(taskKey);
+    }
     case "agent-run.start":
       return startAgentRun(agentRunStartInput(requestParams(request).input));
     case "agent-run.cancel": {

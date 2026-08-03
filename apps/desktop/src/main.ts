@@ -114,11 +114,26 @@ function registerIpc(): void {
   ipcMain.handle("phaseatlas:planning:publish", (_event, checkoutId: string, input) => {
     return repositories.publishProposals(checkoutId, input);
   });
-  ipcMain.handle("phaseatlas:runs:list", (_event, checkoutId: string) => {
-    return repositories.listRuns(checkoutId);
+  ipcMain.handle("phaseatlas:agent-runs:actions", (_event, checkoutId: string, input) => {
+    return repositories.agentRunActions(checkoutId, input);
   });
-  ipcMain.handle("phaseatlas:runs:events", (_event, checkoutId: string, runId: string, afterSequence = 0) => {
-    return repositories.listRunEvents(checkoutId, runId, afterSequence);
+  ipcMain.handle("phaseatlas:agent-runs:list", (_event, checkoutId: string, taskKey?: string) => {
+    return repositories.listAgentRuns(checkoutId, taskKey);
+  });
+  ipcMain.handle("phaseatlas:agent-runs:start", (_event, checkoutId: string, input) => {
+    return repositories.startAgentRun(checkoutId, input);
+  });
+  ipcMain.handle("phaseatlas:agent-runs:cancel", (_event, checkoutId: string, runId: string) => {
+    return repositories.cancelAgentRun(checkoutId, runId);
+  });
+  ipcMain.handle("phaseatlas:agent-runs:events", (_event, checkoutId: string, runId: string, afterSequence = 0, limit = 200) => {
+    return repositories.listRunEventPage(checkoutId, runId, afterSequence, limit);
+  });
+  ipcMain.handle("phaseatlas:agent-runs:result", (_event, checkoutId: string, runId: string) => {
+    return repositories.agentRunResult(checkoutId, runId);
+  });
+  ipcMain.handle("phaseatlas:agent-runs:recover", (_event, checkoutId: string, input) => {
+    return repositories.recoverAgentRun(checkoutId, input);
   });
 }
 
