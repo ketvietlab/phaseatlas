@@ -1,7 +1,7 @@
 <script lang="ts">
   import { onMount, tick } from "svelte";
-  import { FitAddon } from "@xterm/addon-fit";
-  import { Terminal as XTerm, type ITheme } from "@xterm/xterm";
+  import type { FitAddon as FitAddonInstance } from "@xterm/addon-fit";
+  import type { Terminal as XTermInstance, ITheme } from "@xterm/xterm";
   import "@xterm/xterm/css/xterm.css";
   import type { TerminalEvent, TerminalSessionSnapshot } from "@phaseatlas/contracts";
 
@@ -18,8 +18,8 @@
   export let onToggleMaximized: () => void;
 
   let terminalHost: HTMLDivElement;
-  let terminal: XTerm | null = null;
-  let fitAddon: FitAddon | null = null;
+  let terminal: XTermInstance | null = null;
+  let fitAddon: FitAddonInstance | null = null;
   let resizeObserver: ResizeObserver | null = null;
   let sessions: TerminalSessionSnapshot[] = [];
   let activeSessionId = "";
@@ -33,32 +33,45 @@
   $: if (terminal && theme) applyTerminalTheme();
 
   onMount(() => {
-    terminal = new XTerm({
-      allowProposedApi: false,
-      convertEol: false,
-      cursorBlink: true,
-      cursorStyle: "bar",
-      fontFamily: '"SFMono-Regular", "Cascadia Code", Consolas, monospace',
-      fontSize: 12,
-      lineHeight: 1.28,
-      scrollback: 10_000,
-      tabStopWidth: 2,
+    let unsubscribe: (() => void) | undefined;
+    void initializeTerminal().catch((error) => {
+      showError(error);
+      loading = false;
     });
-    fitAddon = new FitAddon();
-    terminal.loadAddon(fitAddon);
-    applyTerminalTheme();
-    terminal.open(terminalHost);
-    terminal.onData((data) => {
-      if (!activeSessionId || !window.phaseatlas) return;
-      void window.phaseatlas.terminals.write(checkoutId, activeSessionId, data).catch(showError);
-    });
-    resizeObserver = new ResizeObserver(() => scheduleFit());
-    resizeObserver.observe(terminalHost);
-    const unsubscribe = window.phaseatlas?.events.subscribe((desktopEvent) => {
-      if (desktopEvent.type !== "terminal.event" || desktopEvent.checkoutId !== checkoutId) return;
-      handleTerminalEvent(desktopEvent.event);
-    });
-    void loadSessions();
+
+    async function initializeTerminal(): Promise<void> {
+      const [{ Terminal }, { FitAddon }] = await Promise.all([
+        import("@xterm/xterm"),
+        import("@xterm/addon-fit"),
+      ]);
+      if (disposed) return;
+      terminal = new Terminal({
+        allowProposedApi: false,
+        convertEol: false,
+        cursorBlink: true,
+        cursorStyle: "bar",
+        fontFamily: '"SFMono-Regular", "Cascadia Code", Consolas, monospace',
+        fontSize: 12,
+        lineHeight: 1.28,
+        scrollback: 10_000,
+        tabStopWidth: 2,
+      });
+      fitAddon = new FitAddon();
+      terminal.loadAddon(fitAddon);
+      applyTerminalTheme();
+      terminal.open(terminalHost);
+      terminal.onData((data) => {
+        if (!activeSessionId || !window.phaseatlas) return;
+        void window.phaseatlas.terminals.write(checkoutId, activeSessionId, data).catch(showError);
+      });
+      resizeObserver = new ResizeObserver(() => scheduleFit());
+      resizeObserver.observe(terminalHost);
+      unsubscribe = window.phaseatlas?.events.subscribe((desktopEvent) => {
+        if (desktopEvent.type !== "terminal.event" || desktopEvent.checkoutId !== checkoutId) return;
+        handleTerminalEvent(desktopEvent.event);
+      });
+      await loadSessions();
+    }
 
     return () => {
       disposed = true;
