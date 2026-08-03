@@ -26,7 +26,7 @@ const SCHEMA_VERSION = "1";
 const RUN_KINDS = new Set<PersistedRunKind>(["planning", "task_content", "agent"]);
 const RUN_STATUSES = new Set<PersistedRunStatus>(["starting", "running", "completed", "failed", "cancelled", "interrupted"]);
 const TERMINAL_RUN_STATUSES = new Set<PersistedRunStatus>(["completed", "failed", "cancelled", "interrupted"]);
-const POST_TERMINAL_AUDIT_PREFIXES = ["lease.", "result.revalidation"];
+const POST_TERMINAL_AUDIT_PREFIXES = ["lease.", "result.revalidation", "chat.edit.audit."];
 const TERMINAL_CHAT_TURN_STATUSES = new Set<RepositoryChatTurnStatus>(["completed", "failed", "cancelled", "interrupted"]);
 const CHAT_EVENT_TYPES = new Set<PersistedRepositoryChatEvent["type"]>([
   "chat.turn.status",

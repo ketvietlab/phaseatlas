@@ -30,6 +30,15 @@ function policyViolations(filePath: string, scope: TaskScope): string[] {
   if (!scope.writable) violations.push("task_scope_read_only");
   if (!scope.allowedPaths.some((rule) => matchesRule(filePath, rule))) violations.push("outside_allowed_paths");
   if (scope.forbiddenPaths.some((rule) => matchesRule(filePath, rule))) violations.push("forbidden_path");
+  const baseName = path.posix.basename(filePath.toLowerCase());
+  if (!scope.allowDependencyChanges && new Set([
+    "package.json", "package-lock.json", "pnpm-lock.yaml", "yarn.lock", "bun.lock", "bun.lockb",
+    "cargo.toml", "cargo.lock", "go.mod", "go.sum", "pyproject.toml", "poetry.lock", "requirements.txt",
+    "gemfile", "gemfile.lock", "composer.json", "composer.lock",
+  ]).has(baseName)) violations.push("dependency_change_not_allowed");
+  if (!scope.allowDatabaseMigrations && /(^|\/)(?:migrations?|prisma\/migrations?)(\/|$)/i.test(filePath)) {
+    violations.push("database_migration_not_allowed");
+  }
   return violations;
 }
 

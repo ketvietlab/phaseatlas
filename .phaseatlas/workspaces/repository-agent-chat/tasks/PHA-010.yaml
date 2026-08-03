@@ -3,7 +3,7 @@ id: PHA-010
 title: Deliver the desktop agent chat workspace
 kind: code
 phase: agent-chat-desktop
-state: in_review
+state: done
 priority: high
 objective: The desktop application provides a professional multi-session repository chat workspace
   with streaming messages, tool activity, provider/model visibility, attachments, and durable reload

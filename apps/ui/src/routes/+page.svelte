@@ -160,6 +160,7 @@
     ? agentRuns.filter((run) => run.taskKey === canonicalTaskKey(selectedTask))
     : [];
   $: terminalShortcutLabel = platform === "darwin" ? "⌘`" : "Ctrl+`";
+  $: chatShortcutLabel = platform === "darwin" ? "⌥L" : "Alt+L";
   onMount(() => {
     theme = document.documentElement.dataset.theme === "dark" ? "dark" : "light";
     const savedTaskView = window.localStorage.getItem(TASK_VIEW_STORAGE_KEY);
@@ -1138,6 +1139,14 @@
       }
       return;
     }
+    const chatShortcut = event.altKey && !event.metaKey && !event.ctrlKey && !event.shiftKey && event.key.toLowerCase() === "l";
+    if (chatShortcut && !event.repeat && selectedCheckoutId) {
+      if (chatOpen || (!executionOpen && !plannerOpen && !providerSettingsOpen && !editorOpen && !contentPanelTask)) {
+        event.preventDefault();
+        chatOpen = !chatOpen;
+      }
+      return;
+    }
     const modifier = event.metaKey || event.ctrlKey;
     const terminalShortcut = modifier && !event.shiftKey && !event.altKey && (
       event.code === "Backquote" || event.key.toLowerCase() === "j"
@@ -1242,11 +1251,13 @@
           type="button"
           aria-label={`${chatOpen ? "Close" : "Open"} repository agent chat`}
           aria-pressed={chatOpen}
+          title={`Toggle agent chat (${chatShortcutLabel})`}
           onclick={() => chatOpen = !chatOpen}
           disabled={!selectedCheckoutId}
         >
           <svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M5 5h14v10H9l-4 4z"/><path d="M9 9h6M9 12h4"/></svg>
           <span>Chat</span>
+          <kbd>{chatShortcutLabel}</kbd>
         </button>
         <button
           class:active={terminalOpen}
@@ -1994,6 +2005,15 @@
       runnerId={plannerRunnerId}
       modelId={plannerModel}
       onClose={() => chatOpen = false}
+      onOpenExplorer={() => {
+        chatOpen = false;
+        openRepositoryEditor();
+      }}
+      onCreateTaskProposal={(request) => {
+        chatOpen = false;
+        plannerRequest = request;
+        openPlanner(selectedWorkspaceSlug ? "workspace" : "repository");
+      }}
       onOpenProviderSettings={() => {
         chatOpen = false;
         providerSettingsOpen = true;
