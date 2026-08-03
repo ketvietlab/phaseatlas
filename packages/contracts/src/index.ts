@@ -979,6 +979,7 @@ export interface PhaseAtlasDesktopApi {
   };
   runtime: {
     platform(): Promise<string>;
+    onCloseSurface(listener: () => void): () => void;
   };
 }
 

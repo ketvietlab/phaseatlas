@@ -119,9 +119,62 @@
     onClose();
   }
 
+  export function closeActiveSurface() {
+    if (activePath) {
+      closeTab(activePath);
+      return;
+    }
+    requestClose();
+  }
+
   function languageFor(path: string) {
+    const fileName = path.split("/").pop()?.toLowerCase() ?? "";
+    const namedLanguages: Record<string, string> = {
+      dockerfile: "dockerfile",
+      makefile: "plaintext",
+    };
+    if (namedLanguages[fileName]) return namedLanguages[fileName];
     const extension = path.split(".").pop()?.toLowerCase();
-    return ({ md: "markdown", json: "json", yaml: "yaml", yml: "yaml", ts: "typescript", js: "javascript", css: "css", html: "html", svelte: "html" } as Record<string, string>)[extension ?? ""] ?? "plaintext";
+    return ({
+      bash: "shell",
+      c: "cpp",
+      cc: "cpp",
+      cjs: "javascript",
+      cpp: "cpp",
+      cs: "csharp",
+      css: "css",
+      go: "go",
+      h: "cpp",
+      hpp: "cpp",
+      html: "html",
+      java: "java",
+      js: "javascript",
+      json: "json",
+      jsx: "javascript",
+      less: "less",
+      lua: "lua",
+      md: "markdown",
+      mdx: "mdx",
+      mjs: "javascript",
+      php: "php",
+      prisma: "graphql",
+      py: "python",
+      rb: "ruby",
+      rs: "rust",
+      scss: "scss",
+      sh: "shell",
+      sql: "sql",
+      svelte: "html",
+      swift: "swift",
+      toml: "ini",
+      ts: "typescript",
+      tsx: "typescript",
+      vue: "html",
+      xml: "xml",
+      yaml: "yaml",
+      yml: "yaml",
+      zsh: "shell",
+    } as Record<string, string>)[extension ?? ""] ?? "plaintext";
   }
 
   function fileLabel(row: RepositoryFileEntry) {

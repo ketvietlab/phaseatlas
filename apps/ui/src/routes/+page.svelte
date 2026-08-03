@@ -52,6 +52,8 @@
   let platform = "desktop";
   let theme = "light";
   let loading = true;
+  let repositoryLoading = false;
+  let repositoryLoadRequest = 0;
   let opening = false;
   let refreshing = false;
   let menuOpen = false;
@@ -112,6 +114,7 @@
   let terminalMaximized = false;
   let terminalHeight = 300;
   let terminalPanel: { focus(): void } | undefined;
+  let repositoryWorkbench: { closeActiveSurface(): void } | undefined;
   let chatOpen = false;
 
   $: selectedRepository = repositories.find(
@@ -156,6 +159,10 @@
   $: selectedTimelineEvents = selectedAgentEvents.filter((event) =>
     !["command.output", "command.completed"].includes(event.type)
   );
+  $: selectedTaskRuns = selectedTask
+    ? agentRuns.filter((run) => run.taskKey === canonicalTaskKey(selectedTask))
+    : [];
+  $: explorerShortcutLabel = platform === "darwin" ? "⌘⇧E" : "Ctrl+Shift+E";
   $: terminalShortcutLabel = platform === "darwin" ? "⌘`" : "Ctrl+`";
   $: chatShortcutLabel = platform === "darwin" ? "⌥L" : "Alt+L";
   onMount(() => {
@@ -192,12 +199,14 @@
         refreshTimer = window.setTimeout(() => void refreshRepository(event.checkoutId), 180);
       }
     });
+    const unsubscribeCloseSurface = window.phaseatlas.runtime.onCloseSurface(closeCurrentSurface);
 
     void initialize();
     return () => {
       window.clearTimeout(refreshTimer);
       window.clearInterval(planningClockTimer);
       unsubscribe();
+      unsubscribeCloseSurface();
     };
   });
 
@@ -237,6 +246,8 @@
 
   async function selectRepository(checkoutId: string) {
     if (!window.phaseatlas) return;
+    const requestId = ++repositoryLoadRequest;
+    repositoryLoading = true;
     selectedCheckoutId = checkoutId;
     workspaces = [];
     runners = [];
@@ -265,6 +276,7 @@
     menuOpen = false;
     try {
       const recoveredRepository = await window.phaseatlas.repositories.refresh(checkoutId);
+      if (requestId !== repositoryLoadRequest || checkoutId !== selectedCheckoutId) return;
       const [nextWorkspaces, nextTaskSnapshot, nextRunners, activeContentRuns, nextAgentRuns] = await Promise.all([
         window.phaseatlas.workspaces.list(checkoutId),
         window.phaseatlas.tasks.snapshot(checkoutId),
@@ -272,6 +284,7 @@
         window.phaseatlas.tasks.listContentRuns(checkoutId),
         window.phaseatlas.agentRuns.list(checkoutId),
       ]);
+      if (requestId !== repositoryLoadRequest || checkoutId !== selectedCheckoutId) return;
       workspaces = nextWorkspaces;
       repositories = repositories.map((repository) => repository.checkoutId === checkoutId ? recoveredRepository : repository);
       taskSnapshot = nextTaskSnapshot;
@@ -294,7 +307,10 @@
       applyRepositoryProviderSettings(checkoutId);
       selectWorkspace(workspaces[0]?.slug ?? "");
     } catch (error) {
+      if (requestId !== repositoryLoadRequest || checkoutId !== selectedCheckoutId) return;
       errorMessage = error instanceof Error ? error.message : "The repository workspaces could not be read.";
+    } finally {
+      if (requestId === repositoryLoadRequest && checkoutId === selectedCheckoutId) repositoryLoading = false;
     }
   }
 
@@ -1097,6 +1113,8 @@
     await window.phaseatlas.repositories.close(checkoutId);
     repositories = repositories.filter((repository) => repository.checkoutId !== checkoutId);
     if (selectedCheckoutId === checkoutId) {
+      repositoryLoadRequest += 1;
+      repositoryLoading = false;
       selectedCheckoutId = "";
       workspaces = [];
       runners = [];
@@ -1118,6 +1136,31 @@
     theme = nextTheme;
     document.documentElement.dataset.theme = nextTheme;
     localStorage.setItem("phaseatlas-theme", nextTheme);
+  }
+
+  function closeCurrentSurface() {
+    if (editorOpen) {
+      repositoryWorkbench?.closeActiveSurface();
+    } else if (chatOpen) {
+      chatOpen = false;
+    } else if (providerSettingsOpen) {
+      providerSettingsOpen = false;
+    } else if (executionConfirmAction) {
+      executionConfirmAction = null;
+      executionScopeConfirmed = false;
+      executionPanelElement?.focus();
+    } else if (executionOpen) {
+      closeExecutionWorkbench();
+    } else if (contentPanelTask) {
+      contentPanelTaskKey = "";
+    } else if (plannerOpen) {
+      closePlanner();
+    } else if (terminalOpen) {
+      terminalOpen = false;
+      terminalMaximized = false;
+    } else {
+      menuOpen = false;
+    }
   }
 
   function handleWindowKeydown(event: KeyboardEvent) {
@@ -1145,6 +1188,27 @@
       return;
     }
     const modifier = event.metaKey || event.ctrlKey;
+    const closeShortcut = modifier && !event.shiftKey && !event.altKey && event.key.toLowerCase() === "w";
+    if (closeShortcut) {
+      event.preventDefault();
+      event.stopPropagation();
+      if (!event.repeat) closeCurrentSurface();
+      return;
+    }
+    const explorerShortcut = modifier && event.shiftKey && !event.altKey && event.code === "KeyE";
+    if (explorerShortcut) {
+      event.preventDefault();
+      if (
+        !event.repeat &&
+        selectedCheckoutId &&
+        !chatOpen &&
+        !executionOpen &&
+        !plannerOpen &&
+        !providerSettingsOpen &&
+        !contentPanelTask
+      ) openRepositoryEditor();
+      return;
+    }
     const terminalShortcut = modifier && !event.shiftKey && !event.altKey && (
       event.code === "Backquote" || event.key.toLowerCase() === "j"
     );
@@ -1183,7 +1247,7 @@
   <aside class:mobile-open={menuOpen} class="sidebar" aria-label="Repository navigation">
     <div class="brand-lockup">
       <img class="product-mark" src="./assets/phaseatlas-logo-mark.png" width="1254" height="1254" alt="" />
-      <span class="product-name"><strong>PhaseAtlas</strong><small>KétViệt workspace</small></span>
+      <span class="product-name"><strong>PhaseAtlas</strong><small>Unify AI Tool</small></span>
     </div>
 
     <div class="sidebar-section-heading">
@@ -1200,7 +1264,6 @@
       {#each repositories as repository}
         <div class:active={repository.checkoutId === selectedCheckoutId} class="repository-row">
           <button class="repository-select" type="button" onclick={() => selectRepository(repository.checkoutId)}>
-            <span class="repository-mark" aria-hidden="true">{repository.name.slice(0, 2).toUpperCase()}</span>
             <span class="repository-copy">
               <strong>{repository.name}</strong>
               <small>{repository.workspaceCount} {repository.workspaceCount === 1 ? "workspace" : "workspaces"}</small>
@@ -1223,7 +1286,7 @@
   <header class="mobile-topbar">
     <div class="mobile-brand">
       <img class="product-mark" src="./assets/phaseatlas-logo-mark.png" width="1254" height="1254" alt="" />
-      <span class="product-name"><strong>PhaseAtlas</strong><small>KétViệt workspace</small></span>
+      <span class="product-name"><strong>PhaseAtlas</strong><small>Unify AI Tool</small></span>
     </div>
     <button class="icon-button" type="button" aria-label={menuOpen ? "Close menu" : "Open menu"} aria-expanded={menuOpen} onclick={() => (menuOpen = !menuOpen)}>
       <svg class="icon" viewBox="0 0 24 24" aria-hidden="true">{#if menuOpen}<path d="m6 6 12 12M18 6 6 18"/>{:else}<path d="M4 7h16M4 12h16M4 17h16"/>{/if}</svg>
@@ -1255,6 +1318,20 @@
           <svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M5 5h14v10H9l-4 4z"/><path d="M9 9h6M9 12h4"/></svg>
           <span>Chat</span>
           <kbd>{chatShortcutLabel}</kbd>
+        </button>
+        <button
+          class:active={editorOpen}
+          class="terminal-toggle"
+          type="button"
+          aria-label="Open repository explorer"
+          aria-pressed={editorOpen}
+          title={`Open explorer (${explorerShortcutLabel})`}
+          onclick={() => openRepositoryEditor()}
+          disabled={!selectedCheckoutId}
+        >
+          <svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M4 5h16v14H4zM8 5v14M11 9h6M11 13h4"/></svg>
+          <span>Explorer</span>
+          <kbd>{explorerShortcutLabel}</kbd>
         </button>
         <button
           class:active={terminalOpen}
@@ -1300,10 +1377,6 @@
             </div>
           </div>
           <div class="repository-toolbar-actions">
-            <button class="secondary-button" type="button" onclick={() => openRepositoryEditor()}>
-              <svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M4 5h16v14H4zM8 5v14M11 9h6M11 13h4"/></svg>
-              Explorer
-            </button>
             <button class="secondary-button" type="button" onclick={() => openExecutionWorkbench()}>
               <svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M5 4h14v16H5zM8 8h8M8 12h5M8 16h7"/><path d="m15 11 4 2.5-4 2.5z"/></svg>
               Runs
@@ -1328,7 +1401,12 @@
         {/if}
 
         <section class="workspace-section">
-          {#if workspaces.length}
+          {#if repositoryLoading}
+            <div class="card loading-state repository-loading-state" aria-live="polite" aria-busy="true">
+              <span class="loading-mark" aria-hidden="true"></span>
+              <div><h2>Loading repository</h2><p>Reading workspaces and canonical tasks for {selectedRepository.name}…</p></div>
+            </div>
+          {:else if workspaces.length}
             {#if selectedWorkspace}
               <div class="card workspace-switcher">
                 <span class="workspace-switcher-icon" aria-hidden="true"><svg class="icon" viewBox="0 0 24 24"><rect x="3" y="4" width="7" height="7" rx="1"/><rect x="14" y="4" width="7" height="7" rx="1"/><rect x="3" y="15" width="7" height="6" rx="1"/><path d="M14 18h7M17.5 14.5v7"/></svg></span>
@@ -1499,7 +1577,7 @@
                 {/if}
               </section>
             {/if}
-          {:else}
+          {:else if !errorMessage}
             <div class="card empty-state">
               <img src="./assets/phaseatlas-logo-mark.png" width="1254" height="1254" alt="" aria-hidden="true" />
               <div><h2>This repository has no workspaces</h2><p>Let a read-only runner inspect the repository and propose its first workspace with starter tasks.</p><button class="primary-button empty-state-action" type="button" onclick={() => openPlanner("repository")}>Plan first workspace</button></div>
@@ -2053,6 +2131,7 @@
 
 {#if editorOpen && selectedCheckoutId}
   <RepositoryWorkbench
+    bind:this={repositoryWorkbench}
     checkoutId={selectedCheckoutId}
     initialPath={editorInitialPath}
     theme={theme === "dark" ? "dark" : "light"}

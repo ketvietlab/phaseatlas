@@ -107,6 +107,11 @@ const api: PhaseAtlasDesktopApi = {
   },
   runtime: {
     platform: () => ipcRenderer.invoke("phaseatlas:runtime:platform"),
+    onCloseSurface: (listener) => {
+      const handler = () => listener();
+      ipcRenderer.on("phaseatlas:shortcut:close-surface", handler);
+      return () => ipcRenderer.removeListener("phaseatlas:shortcut:close-surface", handler);
+    },
   },
 };
 
