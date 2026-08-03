@@ -40,6 +40,15 @@ const api: PhaseAtlasDesktopApi = {
       input,
     ),
   },
+  runs: {
+    list: (checkoutId) => ipcRenderer.invoke("phaseatlas:runs:list", checkoutId),
+    events: (checkoutId, runId, afterSequence = 0) => ipcRenderer.invoke(
+      "phaseatlas:runs:events",
+      checkoutId,
+      runId,
+      afterSequence,
+    ),
+  },
   events: {
     subscribe: (listener) => {
       const handler = (_event: Electron.IpcRendererEvent, payload: PhaseAtlasDesktopEvent) => listener(payload);

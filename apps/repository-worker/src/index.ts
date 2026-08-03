@@ -6,6 +6,7 @@ import type {
   PlanningPublishInput,
   PlanningStartInput,
   PlanningTarget,
+  PersistedRunStatus,
   TaskContentEvent,
   TaskContentRunStatus,
   TaskContentRunSummary,
@@ -16,6 +17,7 @@ import type {
   WorkerResponse,
 } from "@phaseatlas/contracts";
 import {
+  CheckoutOperationalStore,
   RepositoryInspector,
   listRepositoryFiles,
   readRepositoryFile,
@@ -32,6 +34,7 @@ interface ElectronParentPort {
 
 const utilityParentPort = (process as typeof process & { parentPort?: ElectronParentPort }).parentPort;
 const repositoryRoot = process.env.PHASEATLAS_REPO_ROOT;
+const checkoutStorePath = process.env.PHASEATLAS_CHECKOUT_STORE_PATH;
 
 if (!utilityParentPort) {
   throw new Error("Repository worker must be launched as an Electron utility process.");
@@ -39,9 +42,22 @@ if (!utilityParentPort) {
 if (!repositoryRoot) {
   throw new Error("PHASEATLAS_REPO_ROOT is required.");
 }
+if (!checkoutStorePath) {
+  throw new Error("PHASEATLAS_CHECKOUT_STORE_PATH is required.");
+}
 const canonicalRepositoryRoot = repositoryRoot;
 
 const inspector = await RepositoryInspector.open(canonicalRepositoryRoot);
+const initialRepository = await inspector.describe();
+const resolvedCheckoutStorePath = path.resolve(checkoutStorePath);
+if (
+  path.basename(resolvedCheckoutStorePath) !== "operations.sqlite" ||
+  path.basename(path.dirname(resolvedCheckoutStorePath)) !== initialRepository.checkoutId
+) {
+  throw new Error("Checkout operational store path does not match the worker checkout identity.");
+}
+const operationalStore = new CheckoutOperationalStore(resolvedCheckoutStorePath, initialRepository.checkoutId);
+operationalStore.reconcileInterruptedRuns();
 const runners = new RunnerRegistry();
 const parentPort: ElectronParentPort = utilityParentPort;
 const activePlanningRuns = new Map<string, AbortController>();
@@ -114,17 +130,37 @@ function planningInput(value: unknown): PlanningStartInput {
   };
 }
 
+function durableStatus(value: unknown): PersistedRunStatus | undefined {
+  return ["starting", "running", "completed", "failed", "cancelled", "interrupted"].includes(String(value))
+    ? value as PersistedRunStatus
+    : undefined;
+}
+
+function persistEvent<Event extends PlanningEvent | TaskContentEvent>(event: Event): Event {
+  const status = "status" in event ? durableStatus(event.status) : undefined;
+  const { sequence: _sourceSequence, ...payload } = event;
+  const persisted = operationalStore.appendEvent({
+    runId: event.runId,
+    type: event.type,
+    timestamp: event.timestamp,
+    payload: payload as unknown as Record<string, unknown>,
+    ...(status ? { status } : {}),
+  });
+  return { ...event, sequence: persisted.sequence };
+}
+
 function emitPlanningEvent(event: PlanningEvent): void {
-  send({ type: "planning.event", payload: { event } });
+  send({ type: "planning.event", payload: { event: persistEvent(event) } });
 }
 
 function emitTaskContentEvent(event: TaskContentEvent): void {
-  send({ type: "task-content.event", payload: { event } });
+  send({ type: "task-content.event", payload: { event: persistEvent(event) } });
 }
 
 function startPlanning(input: PlanningStartInput): { runId: string } {
   const runId = randomUUID();
   const controller = new AbortController();
+  operationalStore.recordRun({ runId, kind: "planning", status: "starting" });
   activePlanningRuns.set(runId, controller);
   let sequence = 0;
   let deltaBuffer = "";
@@ -294,6 +330,7 @@ function contentOutline(task: Awaited<ReturnType<typeof inspector.taskSnapshot>>
 function startTaskContent(input: TaskContentStartInput): { runId: string } {
   const runId = randomUUID();
   const controller = new AbortController();
+  operationalStore.recordRun({ runId, kind: "task_content", status: "starting", taskKeys: input.taskKeys });
   activeTaskContentRuns.set(runId, {
     controller,
     status: "starting",
@@ -467,6 +504,16 @@ async function dispatch(request: WorkerRequest): Promise<unknown> {
       }
       return inspector.saveTaskContent(taskKey, body);
     }
+    case "run.list":
+      return operationalStore.listRuns();
+    case "run.events": {
+      const { runId, afterSequence } = requestParams(request);
+      if (typeof runId !== "string") throw new Error("runId is required.");
+      if (afterSequence !== undefined && (!Number.isInteger(afterSequence) || Number(afterSequence) < 0)) {
+        throw new Error("afterSequence must be a non-negative integer.");
+      }
+      return operationalStore.listEvents(runId, Number(afterSequence ?? 0));
+    }
     case "file.list": {
       const directory = requestParams(request).directory;
       if (directory !== undefined && typeof directory !== "string") throw new Error("directory must be a string.");
@@ -549,6 +596,7 @@ try {
 process.once("exit", () => {
   for (const controller of activePlanningRuns.values()) controller.abort();
   for (const run of activeTaskContentRuns.values()) run.controller.abort();
+  operationalStore.close();
   if (changeTimer) clearTimeout(changeTimer);
   void watcher?.close();
 });

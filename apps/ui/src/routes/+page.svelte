@@ -189,6 +189,7 @@
     errorMessage = "";
     menuOpen = false;
     try {
+      const recoveredRepository = await window.phaseatlas.repositories.refresh(checkoutId);
       const [nextWorkspaces, nextTaskSnapshot, nextRunners, activeContentRuns] = await Promise.all([
         window.phaseatlas.workspaces.list(checkoutId),
         window.phaseatlas.tasks.snapshot(checkoutId),
@@ -196,6 +197,7 @@
         window.phaseatlas.tasks.listContentRuns(checkoutId),
       ]);
       workspaces = nextWorkspaces;
+      repositories = repositories.map((repository) => repository.checkoutId === checkoutId ? recoveredRepository : repository);
       taskSnapshot = nextTaskSnapshot;
       runners = nextRunners;
       contentRuns = Object.fromEntries(activeContentRuns.map((run) => [run.runId, {
