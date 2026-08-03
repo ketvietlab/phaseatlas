@@ -1,0 +1,59 @@
+schemaVersion: phaseatlas.task/v1
+id: PHA-010
+title: Deliver the desktop agent chat workspace
+kind: code
+phase: agent-chat-desktop
+state: planned
+priority: high
+objective: The desktop application provides a professional multi-session repository chat workspace
+  with streaming messages, tool activity, provider/model visibility, attachments, and durable reload
+  recovery so users do not need to switch to Codex, Claude, or Cursor for ordinary repository dialogue.
+owners: []
+dependencies:
+  - taskKey: PHA-009
+    relation: blocks_start
+    requiredState: done
+scope:
+  allowedPaths:
+    - packages/contracts/src/index.ts
+    - apps/desktop/src/main.ts
+    - apps/desktop/src/preload.ts
+    - apps/desktop/src/repository-process-manager.ts
+    - apps/ui/src
+    - docs/development.md
+    - .phaseatlas/workspaces/repository-agent-chat
+  forbiddenPaths: []
+  writable: true
+  allowDependencyChanges: false
+  allowDatabaseMigrations: false
+  allowExternalNetwork: false
+acceptanceCriteria:
+  - id: AC-1
+    statement: A repository-level Chat action opens a workspace with session history, transcript, and
+      composer without requiring a selected workspace or task.
+    verification:
+      type: human
+      reviewerRole: PhaseAtlas maintainer
+  - id: AC-2
+    statement: Multiple chat sessions stream and recover independently, and reload reconstructs each
+      transcript exactly once from persisted sequence cursors.
+    verification:
+      type: human
+      reviewerRole: PhaseAtlas maintainer
+  - id: AC-3
+    statement: Tool calls, command lifecycle, file references, failures, cancellation, and provider
+      silence are rendered as structured activity rather than an apparently frozen terminal.
+    verification:
+      type: human
+      reviewerRole: PhaseAtlas maintainer
+  - id: AC-4
+    statement: The chat workspace is keyboard accessible, responsive, theme-aware, and uses the same
+      KétViệt operational design system as the repository workbench.
+    verification:
+      type: human
+      reviewerRole: PhaseAtlas maintainer
+verification: []
+evidenceRequirements:
+  - type: human_review
+content:
+  path: PHA-010.md

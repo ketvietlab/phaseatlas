@@ -408,6 +408,32 @@ export interface AgentRunCreateInput {
   requestedSandbox?: AgentSandbox;
 }
 
+export interface AgentRunStartInput extends AgentRunCreateInput {
+  runnerId: string;
+  model?: string;
+}
+
+export type AgentRunRecoveryDecision = "leave_interrupted" | "retry";
+
+export interface AgentRunRecoveryInput {
+  runId: string;
+  decision: AgentRunRecoveryDecision;
+  runnerId?: string;
+  model?: string;
+}
+
+export interface AgentRunCancellationResult {
+  runId: string;
+  status: Extract<PersistedRunStatus, "completed" | "failed" | "cancelled" | "interrupted">;
+  disposition: "cancelled" | "already_terminal";
+}
+
+export interface AgentRunRecoveryResult {
+  originalRunId: string;
+  decision: AgentRunRecoveryDecision;
+  retryRunId?: string;
+}
+
 export interface AgentCheckoutIdentity {
   repositoryId: string;
   checkoutId: string;
@@ -478,6 +504,41 @@ export interface ValidatedAgentRunResult {
   policyViolations: string[];
 }
 
+export type AgentResultFreshness = "current" | "stale" | "unverifiable";
+
+export interface PersistedAgentRunResult {
+  runId: string;
+  taskKey: string;
+  taskRevision: string;
+  recordedAt: string;
+  validated: ValidatedAgentRunResult;
+}
+
+export interface AgentResultRevalidationRecord {
+  runId: string;
+  taskRevision: string;
+  outcome: "passed" | "failed";
+  reviewer: string;
+  recordedAt: string;
+}
+
+export interface AgentResultReview {
+  persisted: PersistedAgentRunResult;
+  freshness: AgentResultFreshness;
+  currentTaskRevision?: string;
+  revalidation?: AgentResultRevalidationRecord;
+  promotable: boolean;
+  reason?: string;
+}
+
+export interface PersistedRunEventPage {
+  runId: string;
+  events: PersistedRunEvent[];
+  afterSequence: number;
+  nextSequence: number;
+  hasMore: boolean;
+}
+
 export type AgentEvent =
   | { sequence: number; type: "run.status"; status: AgentRunStatus }
   | { sequence: number; type: "agent.delta"; text: string }
@@ -502,7 +563,12 @@ export type RepositoryWorkerMethod =
   | "task-content.save"
   | "run.list"
   | "run.events"
+  | "run.events-page"
   | "agent-run.prepare"
+  | "agent-run.start"
+  | "agent-run.cancel"
+  | "agent-run.result"
+  | "agent-run.recover"
   | "agent-run.leases"
   | "agent-run.release"
   | "file.list"
@@ -521,7 +587,7 @@ export type WorkerResponse =
   | { requestId: string; error: { code: string; message: string } };
 
 export interface WorkerEvent {
-  type: "worker.ready" | "repository.changed" | "worker.warning" | "planning.event" | "task-content.event" | "lease.recovery";
+  type: "worker.ready" | "repository.changed" | "worker.warning" | "planning.event" | "task-content.event" | "agent-run.event" | "lease.recovery";
   payload: Record<string, unknown>;
 }
 
@@ -543,7 +609,14 @@ export interface TaskContentDesktopEvent {
   event: TaskContentEvent;
 }
 
-export type PhaseAtlasDesktopEvent = RepositoryChangedEvent | PlanningDesktopEvent | TaskContentDesktopEvent;
+export interface AgentRunDesktopEvent {
+  type: "agent-run.event";
+  checkoutId: string;
+  runId: string;
+  event: PersistedRunEvent;
+}
+
+export type PhaseAtlasDesktopEvent = RepositoryChangedEvent | PlanningDesktopEvent | TaskContentDesktopEvent | AgentRunDesktopEvent;
 
 export interface PhaseAtlasDesktopApi {
   repositories: {

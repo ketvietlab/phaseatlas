@@ -416,28 +416,41 @@ export interface ProviderProcessOptions {
   signal: AbortSignal;
   onStdout: (chunk: string) => void;
   onStderr?: (chunk: string) => void;
+  terminationGraceMs?: number;
 }
 
 export type ProviderProcessRunner = (options: ProviderProcessOptions) => Promise<{ stdout: string; stderr: string }>;
 
-function runChildProcess(options: ProviderProcessOptions): Promise<{ stdout: string; stderr: string }> {
+export function runChildProcess(options: ProviderProcessOptions): Promise<{ stdout: string; stderr: string }> {
   return new Promise((resolve, reject) => {
     const child: ChildProcessWithoutNullStreams = spawn(options.executable, options.args, {
       cwd: options.cwd,
       env: process.env,
+      detached: process.platform !== "win32",
       stdio: "pipe",
     });
     let stdout = "";
     let stderr = "";
     let settled = false;
     let exitFallback: NodeJS.Timeout | null = null;
+    let forceTermination: NodeJS.Timeout | null = null;
+    const terminate = (signal: NodeJS.Signals) => {
+      if (child.exitCode !== null || child.signalCode !== null) return;
+      try {
+        if (process.platform !== "win32" && child.pid) process.kill(-child.pid, signal);
+        else child.kill(signal);
+      } catch {
+        child.kill(signal);
+      }
+    };
     const finish = (code: number | null, childSignal: NodeJS.Signals | null) => {
       if (settled) return;
       settled = true;
       if (exitFallback) clearTimeout(exitFallback);
+      if (forceTermination) clearTimeout(forceTermination);
       options.signal.removeEventListener("abort", abort);
       if (options.signal.aborted) {
-        reject(new Error("Planning run was cancelled."));
+        reject(new Error("Provider process was cancelled."));
       } else if (code === 0) {
         resolve({ stdout, stderr });
       } else {
@@ -445,25 +458,30 @@ function runChildProcess(options: ProviderProcessOptions): Promise<{ stdout: str
       }
     };
     const abort = () => {
-      child.kill("SIGTERM");
-      finish(child.exitCode, child.signalCode);
+      terminate("SIGTERM");
+      forceTermination = setTimeout(() => terminate("SIGKILL"), options.terminationGraceMs ?? 2_000);
+      forceTermination.unref();
     };
     options.signal.addEventListener("abort", abort, { once: true });
+    if (options.signal.aborted) abort();
     child.stdout.setEncoding("utf8");
     child.stderr.setEncoding("utf8");
     child.stdout.on("data", (chunk: string) => {
+      if (options.signal.aborted || settled) return;
       stdout += chunk;
       options.onStdout(chunk);
     });
     child.stderr.on("data", (chunk: string) => {
+      if (options.signal.aborted || settled) return;
       stderr += chunk;
       options.onStderr?.(chunk);
     });
     child.once("error", (error) => {
       if (settled) return;
       settled = true;
+      if (forceTermination) clearTimeout(forceTermination);
       options.signal.removeEventListener("abort", abort);
-      reject(error);
+      reject(options.signal.aborted ? new Error("Provider process was cancelled.") : error);
     });
     child.once("close", finish);
     child.once("exit", (code, childSignal) => {
@@ -568,6 +586,7 @@ class CodexExecutionAdapter implements ProviderExecutionAdapter {
   async execute(context: {
     spec: AgentRunSpec;
     workingDirectory: string;
+    modelId?: string;
     signal: AbortSignal;
     emit(event: AgentEventWithoutSequence): void;
   }): Promise<AgentRunResult> {
@@ -594,6 +613,7 @@ class CodexExecutionAdapter implements ProviderExecutionAdapter {
     context: {
       spec: AgentRunSpec;
       workingDirectory: string;
+      modelId?: string;
       signal: AbortSignal;
       emit(event: AgentEventWithoutSequence): void;
     },
@@ -612,8 +632,9 @@ class CodexExecutionAdapter implements ProviderExecutionAdapter {
       "--output-schema", schemaPath,
       "--output-last-message", outputPath,
       "--cd", context.workingDirectory,
-      "-",
     ];
+    if (context.modelId) args.push("--model", context.modelId);
+    args.push("-");
     let lineBuffer = "";
     let providerFailure = "";
     let lastSummary = "";
@@ -723,6 +744,7 @@ class ClaudeExecutionAdapter implements ProviderExecutionAdapter {
   async execute(context: {
     spec: AgentRunSpec;
     workingDirectory: string;
+    modelId?: string;
     signal: AbortSignal;
     emit(event: AgentEventWithoutSequence): void;
   }): Promise<AgentRunResult> {
@@ -736,8 +758,9 @@ class ClaudeExecutionAdapter implements ProviderExecutionAdapter {
         "--permission-mode", context.spec.sandbox === "read-only" ? "plan" : "acceptEdits",
         "--tools", context.spec.sandbox === "read-only" ? "Read,Glob,Grep" : "Read,Glob,Grep,Edit,Write,Bash",
         "--no-session-persistence",
-        "--", executionPrompt(context.spec),
       ];
+      if (context.modelId) args.push("--model", context.modelId);
+      args.push("--", executionPrompt(context.spec));
       let lineBuffer = "";
       let structuredOutput: unknown;
       let resultText = "";
