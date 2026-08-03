@@ -7,10 +7,13 @@ import type { DatabaseSync as DatabaseSyncType } from "node:sqlite";
 import { utilityProcess, type UtilityProcess } from "electron";
 import {
   type AgentResultReview,
+  type AgentRunActionAvailability,
+  type AgentRunActionQuery,
   type AgentRunCancellationResult,
   type AgentRunRecoveryInput,
   type AgentRunRecoveryResult,
   type AgentRunStartInput,
+  type AgentRunSummary,
   isWorkerEvent,
   isWorkerResponse,
   type PersistedRunEvent,
@@ -454,6 +457,16 @@ export class RepositoryProcessManager {
 
   async listRunEventPage(checkoutId: string, runId: string, afterSequence = 0, limit = 200): Promise<PersistedRunEventPage> {
     return (await this.ensureWorker(checkoutId)).call<PersistedRunEventPage>("run.events-page", { runId, afterSequence, limit });
+  }
+
+  async agentRunActions(checkoutId: string, input: AgentRunActionQuery): Promise<AgentRunActionAvailability[]> {
+    return (await this.ensureWorker(checkoutId)).call<AgentRunActionAvailability[]>("agent-run.actions", { input });
+  }
+
+  async listAgentRuns(checkoutId: string, taskKey?: string): Promise<AgentRunSummary[]> {
+    return (await this.ensureWorker(checkoutId)).call<AgentRunSummary[]>("agent-run.list", {
+      ...(taskKey ? { taskKey } : {}),
+    });
   }
 
   async startAgentRun(checkoutId: string, input: AgentRunStartInput): Promise<{ runId: string }> {

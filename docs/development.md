@@ -22,8 +22,9 @@ pnpm build     # production builds for every workspace
 ```
 
 The Svelte renderer uses Vite hot reload. Changes under contracts, core, repository worker, or
-Electron main/preload trigger a sequential runtime rebuild followed by an Electron restart. Open
-repositories are process-local and must be selected again after that restart.
+Electron main/preload trigger a sequential runtime rebuild followed by an Electron restart. The
+checkout catalog and operational run history are application-support data, so repositories and runs
+are reconstructed after that restart rather than relying on renderer memory.
 
 ## Adding an IPC operation
 
@@ -36,9 +37,29 @@ repositories are process-local and must be selected again after that restart.
 Never expose `ipcRenderer`, filesystem primitives, arbitrary commands, or raw process handles to the
 renderer.
 
+## Exercising task execution
+
+1. Open a configured repository and choose an installed provider plus a provider-discovered model in
+   Repository settings.
+2. Select a canonical task and open **Run task** or the repository-level **Runs** action.
+3. Inspect the worker-provided availability reasons. Read-only actions start directly; implementation
+   requires acknowledgement of the exact task revision, provider/model, isolated worktree, sandbox,
+   writable paths, and network policy.
+4. Keep the workbench open to observe persisted normalized events. Command lifecycle is grouped into
+   activity cards, while the event sequence remains visible through the durable timeline.
+5. Reload during a run. The renderer lists checkout-owned history, reconstructs the selected transcript
+   from persisted pages, then resumes after its highest contiguous sequence while deduplicating live
+   events and backfilling a detected gap.
+6. Cancel an active run to verify the UI waits for confirmed provider exit. Restart during a run to
+   exercise the explicit interrupted-attempt keep/retry choices.
+7. Edit the canonical task after a completed result and reopen the result review to verify it becomes
+   stale and non-promotable.
+
+The renderer stores only the selected run preference. Run specifications, events, results, retry links,
+freshness, and terminal state remain in checkout-owned operational storage behind the worker.
+
 ## Current limitations
 
-- Agent execution is represented in contracts but is not yet started by the worker.
-- Repository workers stop when a repository is closed; idle TTL and run-aware shutdown come next.
+- Result promotion and canonical task-state transitions remain separate reviewed workflows.
 - The packaged worker path has a placeholder layout and will be finalized with Electron packaging.
-- Workspace and task manifests are YAML; execution persistence is the next contract milestone.
+- Repository-level free chat is tracked separately from canonical task execution.
