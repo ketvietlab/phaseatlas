@@ -3,7 +3,7 @@ id: PHA-009
 title: Establish durable repository chat sessions
 kind: code
 phase: agent-chat-runtime
-state: in_review
+state: done
 priority: high
 objective: A user can start and resume a provider-neutral agent conversation scoped to an open
   repository without selecting a workspace or canonical task, while messages, normalized events,

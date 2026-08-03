@@ -22,10 +22,20 @@ import {
   type PlanningEvent,
   type PlanningPublishInput,
   type PlanningStartInput,
+  type PersistedRepositoryChatEvent,
   type PhaseAtlasDesktopEvent,
   type RepositoryFileDocument,
   type RepositoryFileEntry,
   type RepositoryLifecycleState,
+  type RepositoryChatCancellationResult,
+  type RepositoryChatCreateInput,
+  type RepositoryChatEventPage,
+  type RepositoryChatMessage,
+  type RepositoryChatRenameInput,
+  type RepositoryChatRetryInput,
+  type RepositoryChatSendInput,
+  type RepositoryChatSession,
+  type RepositoryChatTurn,
   type RepositorySummary,
   type RepositoryWorkerMethod,
   type RunnerDescriptor,
@@ -362,6 +372,7 @@ export class RepositoryProcessManager {
   private readonly viewDemand = new Map<string, Set<number>>();
   private readonly runDemand = new Map<string, Set<string>>();
   private readonly terminalDemand = new Map<string, Set<string>>();
+  private readonly chatDemand = new Map<string, Set<string>>();
   private readonly idleMs: number;
   private stopped = false;
 
@@ -519,6 +530,56 @@ export class RepositoryProcessManager {
     this.trackTerminal(checkoutId, sessionId, false);
   }
 
+  async createChatSession(checkoutId: string, input: RepositoryChatCreateInput): Promise<RepositoryChatSession> {
+    return (await this.ensureWorker(checkoutId)).call<RepositoryChatSession>("chat.session.create", { input });
+  }
+
+  async listChatSessions(checkoutId: string): Promise<RepositoryChatSession[]> {
+    return (await this.ensureWorker(checkoutId)).call<RepositoryChatSession[]>("chat.session.list");
+  }
+
+  async getChatSession(checkoutId: string, sessionId: string): Promise<RepositoryChatSession> {
+    return (await this.ensureWorker(checkoutId)).call<RepositoryChatSession>("chat.session.get", { sessionId });
+  }
+
+  async renameChatSession(checkoutId: string, input: RepositoryChatRenameInput): Promise<RepositoryChatSession> {
+    return (await this.ensureWorker(checkoutId)).call<RepositoryChatSession>("chat.session.rename", { input });
+  }
+
+  async closeChatSession(checkoutId: string, sessionId: string): Promise<RepositoryChatSession> {
+    return (await this.ensureWorker(checkoutId)).call<RepositoryChatSession>("chat.session.close", { sessionId });
+  }
+
+  async listChatMessages(checkoutId: string, sessionId: string): Promise<RepositoryChatMessage[]> {
+    return (await this.ensureWorker(checkoutId)).call<RepositoryChatMessage[]>("chat.message.list", { sessionId });
+  }
+
+  async listChatTurns(checkoutId: string, sessionId: string): Promise<RepositoryChatTurn[]> {
+    return (await this.ensureWorker(checkoutId)).call<RepositoryChatTurn[]>("chat.turn.list", { sessionId });
+  }
+
+  async sendChatTurn(checkoutId: string, input: RepositoryChatSendInput): Promise<{ turnId: string }> {
+    const result = await (await this.ensureWorker(checkoutId)).call<{ turnId: string }>("chat.turn.send", { input });
+    this.trackChatTurn(checkoutId, result.turnId, "running");
+    return result;
+  }
+
+  async listChatEvents(checkoutId: string, turnId: string, afterSequence = 0, limit = 200): Promise<RepositoryChatEventPage> {
+    return (await this.ensureWorker(checkoutId)).call<RepositoryChatEventPage>("chat.turn.events", { turnId, afterSequence, limit });
+  }
+
+  async cancelChatTurn(checkoutId: string, turnId: string): Promise<RepositoryChatCancellationResult> {
+    const result = await (await this.ensureWorker(checkoutId)).call<RepositoryChatCancellationResult>("chat.turn.cancel", { turnId });
+    this.trackChatTurn(checkoutId, turnId, result.status);
+    return result;
+  }
+
+  async retryChatTurn(checkoutId: string, input: RepositoryChatRetryInput): Promise<{ turnId: string }> {
+    const result = await (await this.ensureWorker(checkoutId)).call<{ turnId: string }>("chat.turn.retry", { input });
+    this.trackChatTurn(checkoutId, result.turnId, "running");
+    return result;
+  }
+
   close(checkoutId: string, viewId?: number): void {
     this.catalog.setVisible(checkoutId, false);
     this.terminalDemand.delete(checkoutId);
@@ -651,6 +712,17 @@ export class RepositoryProcessManager {
       const terminalEvent = event.payload.event as TerminalEvent;
       if (terminalEvent.type === "terminal.closed") this.trackTerminal(checkoutId, terminalEvent.sessionId, false);
       this.eventSink?.({ type: "terminal.event", checkoutId, event: terminalEvent });
+    } else if (event.type === "chat.turn.event" && typeof event.payload.turnId === "string" && event.payload.event) {
+      const chatEvent = event.payload.event as PersistedRepositoryChatEvent;
+      const status = chatEvent.type === "chat.turn.completed" ? "completed"
+        : chatEvent.type === "chat.turn.failed" ? "failed"
+          : chatEvent.type === "chat.turn.cancelled" ? "cancelled"
+            : chatEvent.type === "chat.turn.interrupted" ? "interrupted"
+              : chatEvent.type === "chat.turn.status" && typeof chatEvent.payload.status === "string"
+                ? chatEvent.payload.status
+                : undefined;
+      this.trackChatTurn(checkoutId, event.payload.turnId, status);
+      this.eventSink?.({ type: "chat.turn.event", checkoutId, turnId: event.payload.turnId, event: chatEvent });
     } else if (event.type === "repository.changed") {
       const paths = Array.isArray(event.payload.paths)
         ? event.payload.paths.filter((item): item is string => typeof item === "string")
@@ -685,11 +757,25 @@ export class RepositoryProcessManager {
     }
   }
 
+  private trackChatTurn(checkoutId: string, turnId: string, status?: string): void {
+    const turns = this.chatDemand.get(checkoutId) ?? new Set<string>();
+    if (status && ACTIVE_STATES.has(status)) turns.add(turnId);
+    if (status && TERMINAL_STATES.has(status)) turns.delete(turnId);
+    if (turns.size) {
+      this.chatDemand.set(checkoutId, turns);
+      this.cancelIdle(checkoutId);
+    } else {
+      this.chatDemand.delete(checkoutId);
+      this.scheduleIdle(checkoutId);
+    }
+  }
+
   private onWorkerExit(checkoutId: string, worker: RepositoryWorkerHandle, error: Error, expected: boolean): void {
     if (this.workers.get(checkoutId) !== worker) return;
     this.workers.delete(checkoutId);
     this.runDemand.delete(checkoutId);
     this.terminalDemand.delete(checkoutId);
+    this.chatDemand.delete(checkoutId);
     if (this.stopped) return;
     if (expected) this.catalog.setRuntime(checkoutId, "closed");
     else this.catalog.setRuntime(checkoutId, "recovery_required", error.message);
@@ -697,12 +783,12 @@ export class RepositoryProcessManager {
 
   private scheduleIdle(checkoutId: string): void {
     const worker = this.workers.get(checkoutId);
-    if (!worker || this.viewDemand.get(checkoutId)?.size || this.runDemand.get(checkoutId)?.size || this.terminalDemand.get(checkoutId)?.size) return;
+    if (!worker || this.viewDemand.get(checkoutId)?.size || this.runDemand.get(checkoutId)?.size || this.terminalDemand.get(checkoutId)?.size || this.chatDemand.get(checkoutId)?.size) return;
     this.cancelIdle(checkoutId);
     this.catalog.setRuntime(checkoutId, "cooling");
     const timer = setTimeout(() => {
       this.idleTimers.delete(checkoutId);
-      if (this.viewDemand.get(checkoutId)?.size || this.runDemand.get(checkoutId)?.size || this.terminalDemand.get(checkoutId)?.size) return;
+      if (this.viewDemand.get(checkoutId)?.size || this.runDemand.get(checkoutId)?.size || this.terminalDemand.get(checkoutId)?.size || this.chatDemand.get(checkoutId)?.size) return;
       if (this.workers.get(checkoutId) !== worker) return;
       this.workers.delete(checkoutId);
       this.catalog.setRuntime(checkoutId, "closed");

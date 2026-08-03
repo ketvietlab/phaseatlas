@@ -58,8 +58,27 @@ renderer.
 The renderer stores only the selected run preference. Run specifications, events, results, retry links,
 freshness, and terminal state remain in checkout-owned operational storage behind the worker.
 
+## Exercising repository chat
+
+1. Choose an installed CLI and one of its discovered models in **Provider settings**, then open
+   **Agent chat** from the active repository toolbar. Chat does not require a workspace or task.
+2. Create multiple conversations and send turns in more than one session. The session rail shows
+   independent active state while normalized reasoning, tools, command output, and provider silence
+   remain visible in the selected transcript.
+3. Attach only repository-relative path references. Chat remains read-only; it does not expose a file
+   picker, command input, executable path, provider permissions, or task authority.
+4. Reload during a turn. Session metadata is hydrated for every conversation, while selected transcript
+   messages and bounded event pages are reconstructed from checkout storage and deduplicated by sequence.
+5. Cancel an active turn or restart the worker to exercise terminal cancellation and explicit retry of
+   interrupted attempts.
+
+Assistant content is rendered by `@humanspeak/svelte-markdown`, following the Conversation, Message,
+Tool, Reasoning, and Prompt Input composition used by Svelte AI Elements. URL and image output is
+disabled at the chat boundary, Mermaid rendering is isolated, and PhaseAtlas remains the authority for
+session state and durable events.
+
 ## Current limitations
 
 - Result promotion and canonical task-state transitions remain separate reviewed workflows.
 - The packaged worker path has a placeholder layout and will be finalized with Electron packaging.
-- Repository-level free chat is tracked separately from canonical task execution.
+- Repository chat is read-only. User-authorized worktree editing is a separate milestone.

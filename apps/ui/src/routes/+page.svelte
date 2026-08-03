@@ -1,6 +1,7 @@
 <script lang="ts">
   import { onMount, tick } from "svelte";
   import RepositoryWorkbench from "$lib/RepositoryWorkbench.svelte";
+  import RepositoryChatWorkspace from "$lib/RepositoryChatWorkspace.svelte";
   import TerminalPanel from "$lib/TerminalPanel.svelte";
   import TaskContentPanel from "$lib/TaskContentPanel.svelte";
   import TaskMap from "$lib/TaskMap.svelte";
@@ -111,6 +112,7 @@
   let terminalMaximized = false;
   let terminalHeight = 300;
   let terminalPanel: { focus(): void } | undefined;
+  let chatOpen = false;
 
   $: selectedRepository = repositories.find(
     (repository) => repository.checkoutId === selectedCheckoutId,
@@ -252,6 +254,7 @@
     contentFailures = {};
     openEditorAfterTask = {};
     executionOpen = false;
+    chatOpen = false;
     executionActions = [];
     executionError = "";
     executionNotice = "";
@@ -1102,6 +1105,7 @@
       taskSnapshot = null;
       selectedWorkspaceSlug = "";
       selectedTaskKey = "";
+      chatOpen = false;
       executionOpen = false;
       agentRuns = [];
       agentEvents = {};
@@ -1138,13 +1142,14 @@
     const terminalShortcut = modifier && !event.shiftKey && !event.altKey && (
       event.code === "Backquote" || event.key.toLowerCase() === "j"
     );
-    if (terminalShortcut && !event.repeat && !executionOpen && !plannerOpen && !providerSettingsOpen && !editorOpen && !contentPanelTask) {
+    if (terminalShortcut && !event.repeat && !chatOpen && !executionOpen && !plannerOpen && !providerSettingsOpen && !editorOpen && !contentPanelTask) {
       event.preventDefault();
       void toggleTerminal();
       return;
     }
     if (event.key !== "Escape") return;
-    if (executionConfirmAction) {
+    if (chatOpen) chatOpen = false;
+    else if (executionConfirmAction) {
       executionConfirmAction = null;
       executionScopeConfirmed = false;
       executionPanelElement?.focus();
@@ -1231,6 +1236,18 @@
         <span>PhaseAtlas</span><span>/</span><strong>{selectedRepository?.name || "Repositories"}</strong>
       </div>
       <div class="command-actions">
+        <button
+          class:active={chatOpen}
+          class="terminal-toggle"
+          type="button"
+          aria-label={`${chatOpen ? "Close" : "Open"} repository agent chat`}
+          aria-pressed={chatOpen}
+          onclick={() => chatOpen = !chatOpen}
+          disabled={!selectedCheckoutId}
+        >
+          <svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M5 5h14v10H9l-4 4z"/><path d="M9 9h6M9 12h4"/></svg>
+          <span>Chat</span>
+        </button>
         <button
           class:active={terminalOpen}
           class="terminal-toggle"
@@ -1966,6 +1983,23 @@
       {/if}
     </div>
   </div>
+{/if}
+
+{#if chatOpen && selectedCheckoutId && selectedRepository}
+  {#key selectedCheckoutId}
+    <RepositoryChatWorkspace
+      checkoutId={selectedCheckoutId}
+      repositoryName={selectedRepository.name}
+      {runners}
+      runnerId={plannerRunnerId}
+      modelId={plannerModel}
+      onClose={() => chatOpen = false}
+      onOpenProviderSettings={() => {
+        chatOpen = false;
+        providerSettingsOpen = true;
+      }}
+    />
+  {/key}
 {/if}
 
 {#if contentPanelTask}

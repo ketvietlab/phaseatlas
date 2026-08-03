@@ -797,12 +797,20 @@ export interface TerminalDesktopEvent {
   event: TerminalEvent;
 }
 
+export interface RepositoryChatDesktopEvent {
+  type: "chat.turn.event";
+  checkoutId: string;
+  turnId: string;
+  event: PersistedRepositoryChatEvent;
+}
+
 export type PhaseAtlasDesktopEvent =
   | RepositoryChangedEvent
   | PlanningDesktopEvent
   | TaskContentDesktopEvent
   | AgentRunDesktopEvent
-  | TerminalDesktopEvent;
+  | TerminalDesktopEvent
+  | RepositoryChatDesktopEvent;
 
 export interface PhaseAtlasDesktopApi {
   repositories: {
@@ -849,6 +857,19 @@ export interface PhaseAtlasDesktopApi {
     write(checkoutId: string, sessionId: string, data: string): Promise<void>;
     resize(checkoutId: string, sessionId: string, cols: number, rows: number): Promise<void>;
     close(checkoutId: string, sessionId: string): Promise<void>;
+  };
+  chat: {
+    createSession(checkoutId: string, input: RepositoryChatCreateInput): Promise<RepositoryChatSession>;
+    listSessions(checkoutId: string): Promise<RepositoryChatSession[]>;
+    getSession(checkoutId: string, sessionId: string): Promise<RepositoryChatSession>;
+    renameSession(checkoutId: string, input: RepositoryChatRenameInput): Promise<RepositoryChatSession>;
+    closeSession(checkoutId: string, sessionId: string): Promise<RepositoryChatSession>;
+    listMessages(checkoutId: string, sessionId: string): Promise<RepositoryChatMessage[]>;
+    listTurns(checkoutId: string, sessionId: string): Promise<RepositoryChatTurn[]>;
+    send(checkoutId: string, input: RepositoryChatSendInput): Promise<{ turnId: string }>;
+    events(checkoutId: string, turnId: string, afterSequence?: number, limit?: number): Promise<RepositoryChatEventPage>;
+    cancel(checkoutId: string, turnId: string): Promise<RepositoryChatCancellationResult>;
+    retry(checkoutId: string, input: RepositoryChatRetryInput): Promise<{ turnId: string }>;
   };
   events: {
     subscribe(listener: (event: PhaseAtlasDesktopEvent) => void): () => void;

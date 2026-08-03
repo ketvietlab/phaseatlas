@@ -3,7 +3,7 @@ id: PHA-010
 title: Deliver the desktop agent chat workspace
 kind: code
 phase: agent-chat-desktop
-state: planned
+state: in_review
 priority: high
 objective: The desktop application provides a professional multi-session repository chat workspace
   with streaming messages, tool activity, provider/model visibility, attachments, and durable reload
@@ -20,11 +20,13 @@ scope:
     - apps/desktop/src/preload.ts
     - apps/desktop/src/repository-process-manager.ts
     - apps/ui/src
+    - apps/ui/package.json
+    - pnpm-lock.yaml
     - docs/development.md
     - .phaseatlas/workspaces/repository-agent-chat
   forbiddenPaths: []
   writable: true
-  allowDependencyChanges: false
+  allowDependencyChanges: true
   allowDatabaseMigrations: false
   allowExternalNetwork: false
 acceptanceCriteria:

@@ -73,6 +73,21 @@ const api: PhaseAtlasDesktopApi = {
     ),
     close: (checkoutId, sessionId) => ipcRenderer.invoke("phaseatlas:terminals:close", checkoutId, sessionId),
   },
+  chat: {
+    createSession: (checkoutId, input) => ipcRenderer.invoke("phaseatlas:chat:sessions:create", checkoutId, input),
+    listSessions: (checkoutId) => ipcRenderer.invoke("phaseatlas:chat:sessions:list", checkoutId),
+    getSession: (checkoutId, sessionId) => ipcRenderer.invoke("phaseatlas:chat:sessions:get", checkoutId, sessionId),
+    renameSession: (checkoutId, input) => ipcRenderer.invoke("phaseatlas:chat:sessions:rename", checkoutId, input),
+    closeSession: (checkoutId, sessionId) => ipcRenderer.invoke("phaseatlas:chat:sessions:close", checkoutId, sessionId),
+    listMessages: (checkoutId, sessionId) => ipcRenderer.invoke("phaseatlas:chat:messages:list", checkoutId, sessionId),
+    listTurns: (checkoutId, sessionId) => ipcRenderer.invoke("phaseatlas:chat:turns:list", checkoutId, sessionId),
+    send: (checkoutId, input) => ipcRenderer.invoke("phaseatlas:chat:turns:send", checkoutId, input),
+    events: (checkoutId, turnId, afterSequence = 0, limit = 200) => ipcRenderer.invoke(
+      "phaseatlas:chat:turns:events", checkoutId, turnId, afterSequence, limit,
+    ),
+    cancel: (checkoutId, turnId) => ipcRenderer.invoke("phaseatlas:chat:turns:cancel", checkoutId, turnId),
+    retry: (checkoutId, input) => ipcRenderer.invoke("phaseatlas:chat:turns:retry", checkoutId, input),
+  },
   events: {
     subscribe: (listener) => {
       const handler = (_event: Electron.IpcRendererEvent, payload: PhaseAtlasDesktopEvent) => listener(payload);
