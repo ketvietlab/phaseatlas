@@ -1,8 +1,9 @@
 # Release guide
 
-PhaseAtlas releases are immutable, signed macOS artifacts published from Git tags by GitHub Actions.
-This document defines the version, changelog, branch, credential, build, and recovery contract for a
-production release.
+PhaseAtlas releases are immutable macOS artifacts published from Git tags by GitHub Actions. The
+current public channel is temporarily ad-hoc signed and not notarized; users must explicitly remove
+quarantine when Gatekeeper blocks a verified download. This document defines the version, changelog,
+branch, build, and recovery contract for a production release.
 
 ## Version policy
 
@@ -57,7 +58,7 @@ git push origin v0.1.0
 ```
 
 Pushing the tag is the production deployment trigger. The workflow verifies that the tagged commit is
-contained by `origin/main` before any signing credential is exposed.
+contained by `origin/main` before building any release artifacts.
 
 ## Preparing a release
 
@@ -85,7 +86,28 @@ contained by `origin/main` before any signing credential is exposed.
 ## GitHub production environment
 
 Create a GitHub Actions environment named `production`. Require maintainer approval and restrict it to
-protected version tags before adding secrets.
+protected version tags. The temporary unsigned workflow does not require environment secrets.
+
+## Temporary unsigned distribution
+
+The workflow sets `PHASEATLAS_RELEASE_UNSIGNED=1`. This is an explicit exception: packaging still
+uses an ad-hoc code signature for bundle consistency, but does not use a Developer ID certificate,
+submit to Apple notarization, staple a ticket, or enable signed update metadata. GitHub publishes
+SHA-256 checksums so users can verify the ZIP before removing quarantine.
+
+After comparing the downloaded ZIP with `SHA256SUMS.txt`, users can try **Control-click → Open**. If
+Gatekeeper still blocks the verified application, remove quarantine explicitly:
+
+```bash
+xattr -dr com.apple.quarantine /Applications/PhaseAtlas.app
+```
+
+Never remove quarantine from an artifact whose origin and checksum have not been verified.
+
+## Future signed distribution
+
+When Developer ID distribution is enabled, remove `PHASEATLAS_RELEASE_UNSIGNED=1` from the workflow
+and configure these `production` environment secrets:
 
 | Secret | Purpose |
 | --- | --- |
@@ -98,7 +120,7 @@ protected version tags before adding secrets.
 | `UPDATE_SIGNING_PRIVATE_KEY_BASE64` | Base64-encoded private key used to sign update metadata |
 
 Do not store any of these values in repository variables, workflow files, release assets, build logs,
-or `.env` files. The workflow derives and publishes only the update public key.
+or `.env` files. A future signed workflow derives and publishes only the update public key.
 
 Create a dedicated RSA update-signing key outside the repository and back it up in the maintainer
 credential store:
@@ -123,18 +145,15 @@ installed applications.
    - validate SemVer, tag, and changelog;
    - run `pnpm check` and `pnpm test`.
 2. **Build** on separate Apple Silicon and Intel macOS runners:
-   - import the Developer ID certificate into an ephemeral keychain;
-   - create a bounded signed update descriptor;
    - build the static renderer, Electron runtime, repository worker, and native terminal runtime;
-   - sign, notarize, staple, and verify `PhaseAtlas.app`;
+   - ad-hoc sign and verify `PhaseAtlas.app`;
    - run the packaged repository smoke test; and
    - upload each architecture ZIP as an intermediate Actions artifact.
 3. **Publish** after both builds succeed:
-   - download both notarized ZIP files;
-   - generate a final update manifest containing size and SHA-256 for every architecture;
-   - sign the manifest and produce `SHA256SUMS.txt`;
+   - download both unsigned ZIP files;
+   - produce `SHA256SUMS.txt` for both architectures;
    - create or update the GitHub Release with notes extracted from `CHANGELOG.md`; and
-   - attach the ZIPs, manifest, signature, public key, and checksums.
+   - attach the ZIPs and checksums.
 
 GitHub-provided actions are pinned to immutable commit SHAs. The workflow uses the job-scoped
 `GITHUB_TOKEN` with `contents: write` only in the final publish job.
@@ -146,9 +165,6 @@ Every GitHub Release contains:
 ```text
 PhaseAtlas-<version>-darwin-arm64.zip
 PhaseAtlas-<version>-darwin-x64.zip
-update-manifest.json
-update-manifest.sig
-update-public-key.pem
 SHA256SUMS.txt
 ```
 
@@ -163,7 +179,8 @@ The Actions run also retains each architecture artifact for 14 days and the asse
 - If a release is invalid after publication, do not move its tag or replace it with a different build.
   Mark the release as affected, revert the defect, increment the patch version, and publish a new tag.
 - Keep the previous verified ZIP and checksums available for manual rollback.
-- Revoke and rotate signing credentials immediately if a production secret is suspected to be exposed.
+- When signed distribution is enabled, revoke and rotate signing credentials immediately if a
+  production secret is suspected to be exposed.
 
 The lower-level bundle inputs, verification evidence, installation, manual update, and rollback checks
 are documented in the [development guide](development.md#desktop-distribution).

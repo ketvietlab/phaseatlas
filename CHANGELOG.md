@@ -25,8 +25,9 @@ may contain a documented breaking change.
   handling.
 - Repository-scoped chat with durable conversations, read-only inspection, file references, and a
   separately confirmed isolated edit-and-review workflow.
-- Verified macOS packaging with static renderer and worker bundles, code signing, notarization policy,
-  bundle manifests, smoke verification, and explicit manual update metadata.
+- Verified macOS packaging with static renderer and worker bundles, ad-hoc signing, bundle manifests,
+  smoke verification, dual-architecture GitHub artifacts, and published SHA-256 checksums. Developer
+  ID signing and notarization remain a documented future hardening path.
 - Public release engineering, Semantic Versioning, Keep a Changelog release notes, and contributor
   documentation.
 - MIT licensing for unrestricted use, modification, distribution, sublicensing, and commercial use

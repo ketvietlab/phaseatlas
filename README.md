@@ -293,9 +293,10 @@ artifacts/desktop/darwin-<architecture>/
 └── PhaseAtlas-<version>-darwin-<architecture>.zip
 ```
 
-Development artifacts are ad-hoc signed and have updates disabled. Release-mode packaging is
-fail-closed and requires explicit external signing, notarization, update metadata, and signature
-inputs. Private keys and provider credentials are never copied into the application bundle.
+Development artifacts are ad-hoc signed and have updates disabled. GitHub releases temporarily use
+the same ad-hoc signature while Developer ID distribution is deferred. Users must explicitly allow
+the downloaded application or remove its quarantine attribute before first launch. Private keys and
+provider credentials are never copied into the application bundle.
 
 See [Desktop distribution](docs/development.md#desktop-distribution) for release inputs, evidence,
 installation, update, and rollback procedures.
@@ -303,12 +304,13 @@ installation, update, and rollback procedures.
 Production releases use Semantic Versioning and Keep a Changelog. The root `package.json` is the
 application version authority, the Git tag must be exactly `v<version>`, and the matching changelog
 section becomes the GitHub Release notes. A tag on `main` starts `.github/workflows/release.yml`, which
-validates the repository, builds and notarizes both Apple Silicon and Intel artifacts, signs the update
-manifest, generates SHA-256 checksums, and uploads the complete set to GitHub Releases.
+validates the repository, builds ad-hoc-signed Apple Silicon and Intel artifacts, generates SHA-256
+checksums, and uploads the complete set to GitHub Releases.
 
-Maintainers must configure the protected `production` environment and Apple/update-signing secrets
-before creating a release tag. The complete version policy, secret inventory, tag procedure, pipeline,
-and recovery process are in the [production release guide](docs/releasing.md).
+Maintainers must configure the `production` environment before creating a release tag. Apple signing,
+notarization, and signed update metadata remain available as a future fail-closed release mode. The
+complete version policy, quarantine instructions, tag procedure, pipeline, and recovery process are in
+the [production release guide](docs/releasing.md).
 
 ## Project status and roadmap
 

@@ -17,6 +17,10 @@ const execFileAsync = promisify(execFile);
 if (process.platform !== "darwin") throw new Error("PhaseAtlas desktop packaging currently supports macOS hosts only.");
 const channel = process.env.PHASEATLAS_RELEASE_CHANNEL || "development";
 if (!["development", "release"].includes(channel)) throw new Error("PHASEATLAS_RELEASE_CHANNEL must be development or release.");
+const unsignedRelease = channel === "release" && process.env.PHASEATLAS_RELEASE_UNSIGNED === "1";
+if (process.env.PHASEATLAS_RELEASE_UNSIGNED && process.env.PHASEATLAS_RELEASE_UNSIGNED !== "1") {
+  throw new Error("PHASEATLAS_RELEASE_UNSIGNED must be omitted or set to 1.");
+}
 const rootPackage = JSON.parse(await readFile(path.join(repositoryRoot, "package.json"), "utf8"));
 const applicationVersion = rootPackage.version;
 const buildNumber = process.env.PHASEATLAS_BUILD_NUMBER || "1";
@@ -25,7 +29,7 @@ if (typeof applicationVersion !== "string" || !/^\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.
 }
 if (!/^\d+$/.test(buildNumber)) throw new Error("PHASEATLAS_BUILD_NUMBER must contain decimal digits only.");
 
-const releaseInputs = channel === "release" ? {
+const releaseInputs = channel === "release" && !unsignedRelease ? {
   signingIdentity: process.env.PHASEATLAS_SIGN_IDENTITY,
   notarizationProfile: process.env.PHASEATLAS_NOTARIZATION_PROFILE,
   notarizationKeychain: process.env.PHASEATLAS_NOTARIZATION_KEYCHAIN,
@@ -148,8 +152,9 @@ const policy = {
   applicationVersion,
   buildNumber,
   channel,
-  updateMode: channel === "release" ? "manual" : "disabled",
-  signedMetadata: channel === "release",
+  signingMode: releaseInputs ? "developer-id" : "ad-hoc",
+  updateMode: releaseInputs ? "manual" : "disabled",
+  signedMetadata: Boolean(releaseInputs),
   ...(releaseInputs ? {
     update: {
       feedUrl: releaseInputs.updateFeedUrl,
@@ -186,7 +191,7 @@ await writeFile(path.join(resourcesPath, "bundle-manifest.json"), JSON.stringify
   files: manifestFiles,
 }, null, 2));
 
-const signArguments = channel === "release"
+const signArguments = releaseInputs
   ? ["--force", "--deep", "--options", "runtime", "--timestamp", "--sign", releaseInputs.signingIdentity, applicationPath]
   : ["--force", "--deep", "--sign", "-", applicationPath];
 await execFileAsync("codesign", signArguments, { maxBuffer: 4 * 1024 * 1024 });
@@ -211,4 +216,10 @@ if (releaseInputs) {
   await execFileAsync("ditto", ["-c", "-k", "--sequesterRsrc", "--keepParent", applicationPath, archivePath]);
 }
 
-process.stdout.write(`${JSON.stringify({ applicationPath, archivePath, channel, files: Object.keys(manifestFiles).length }, null, 2)}\n`);
+process.stdout.write(`${JSON.stringify({
+  applicationPath,
+  archivePath,
+  channel,
+  signingMode: releaseInputs ? "developer-id" : "ad-hoc",
+  files: Object.keys(manifestFiles).length,
+}, null, 2)}\n`);

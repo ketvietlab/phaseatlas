@@ -60,14 +60,29 @@ export async function verifyBundleLayout(candidate = applicationPath) {
   if (typeof policy.applicationVersion !== "string" || !policy.applicationVersion) throw new Error("Packaged release policy is missing the application version.");
   if (typeof policy.buildNumber !== "string" || !/^\d+$/.test(policy.buildNumber)) throw new Error("Packaged release policy has an invalid build number.");
   if (applicationPackage.version !== policy.applicationVersion) throw new Error("Packaged application and release policy versions do not match.");
-  if (policy.channel === "development" && (policy.updateMode !== "disabled" || policy.signedMetadata !== false)) {
+  if (!["ad-hoc", "developer-id"].includes(policy.signingMode)) throw new Error("Packaged release policy has an invalid signing mode.");
+  if (policy.channel === "development" && (
+    policy.signingMode !== "ad-hoc" ||
+    policy.updateMode !== "disabled" ||
+    policy.signedMetadata !== false
+  )) {
     throw new Error("Development artifacts must disable updates and signed release metadata.");
   }
   if (policy.channel === "development" && policy.update !== undefined) throw new Error("Development artifacts must not contain update configuration.");
-  if (policy.channel === "release" && (policy.updateMode !== "manual" || policy.signedMetadata !== true)) {
+  if (policy.channel === "release" && policy.signingMode === "ad-hoc" && (
+    policy.updateMode !== "disabled" ||
+    policy.signedMetadata !== false ||
+    policy.update !== undefined
+  )) {
+    throw new Error("Ad-hoc release artifacts must disable updates and signed release metadata.");
+  }
+  if (policy.channel === "release" && policy.signingMode === "developer-id" && (
+    policy.updateMode !== "manual" ||
+    policy.signedMetadata !== true
+  )) {
     throw new Error("Release artifacts must require manually initiated signed updates.");
   }
-  if (policy.channel === "release" && (
+  if (policy.channel === "release" && policy.signingMode === "developer-id" && (
     !policy.update ||
     typeof policy.update.feedUrl !== "string" ||
     !policy.update.feedUrl.startsWith("https://") ||
