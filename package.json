@@ -10,6 +10,8 @@
   "scripts": {
     "build": "pnpm --filter @phaseatlas/contracts build && pnpm --filter @phaseatlas/core build && pnpm --filter @phaseatlas/repository-worker build && pnpm --filter @phaseatlas/ui build && pnpm --filter @phaseatlas/desktop build",
     "build:runtime": "pnpm --filter @phaseatlas/contracts build && pnpm --filter @phaseatlas/core build && pnpm --filter @phaseatlas/repository-worker build && pnpm --filter @phaseatlas/desktop build",
+    "package:desktop": "pnpm build && node scripts/package-desktop.mjs",
+    "verify:desktop": "node scripts/verify-desktop-bundle.mjs",
     "check": "pnpm --filter @phaseatlas/contracts build && pnpm --filter @phaseatlas/core build && pnpm --filter @phaseatlas/contracts check && pnpm --filter @phaseatlas/core check && pnpm --filter @phaseatlas/repository-worker check && pnpm --filter @phaseatlas/ui check && pnpm --filter @phaseatlas/desktop check",
     "dev": "node scripts/dev.mjs",
     "postinstall": "node scripts/fix-node-pty-permissions.mjs",

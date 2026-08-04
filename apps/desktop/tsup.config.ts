@@ -7,6 +7,7 @@ export default defineConfig([
     platform: "node",
     target: "node24",
     external: ["electron", "node:sqlite"],
+    noExternal: ["@phaseatlas/contracts"],
     esbuildOptions(options) {
       options.supported = { ...options.supported, "node-colon-prefix-import": true };
     },
@@ -18,6 +19,7 @@ export default defineConfig([
     platform: "node",
     target: "node24",
     external: ["electron"],
+    noExternal: ["@phaseatlas/contracts"],
     clean: false,
     outExtension: () => ({ js: ".cjs" }),
   },

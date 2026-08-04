@@ -1,10 +1,93 @@
 import { fileURLToPath } from "node:url";
+import { readFileSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { app, BrowserWindow, dialog, ipcMain, shell } from "electron";
 import { RepositoryProcessManager } from "./repository-process-manager.js";
 
+function writeReleaseSmokeResult(result: Record<string, unknown>): void {
+  if (process.env.PHASEATLAS_RELEASE_SMOKE !== "1") return;
+  const resultPath = process.env.PHASEATLAS_RELEASE_SMOKE_RESULT;
+  if (!resultPath) return;
+  try {
+    writeFileSync(resultPath, `${JSON.stringify(result)}\n`, { encoding: "utf8", mode: 0o600 });
+  } catch (error) {
+    process.stderr?.write?.(`PHASEATLAS_RELEASE_SMOKE_REPORT_FAILED ${error instanceof Error ? error.message : String(error)}\n`);
+  }
+}
+
+writeReleaseSmokeResult({ ok: false, stage: "main-loaded" });
 app.setName("PhaseAtlas");
-app.setPath("userData", path.join(app.getPath("appData"), app.name));
+app.setPath("userData", process.env.PHASEATLAS_USER_DATA_PATH || path.join(app.getPath("appData"), app.name));
+
+interface ReleasePolicy {
+  schemaVersion: "phaseatlas.release/v1";
+  applicationVersion: string;
+  buildNumber: string;
+  channel: "development" | "release";
+  updateMode: "disabled" | "manual";
+  signedMetadata: boolean;
+  update?: {
+    feedUrl: string;
+    publicKey: "update/public-key.pem";
+    manifest: "update/manifest.json";
+    signature: "update/manifest.sig";
+  };
+}
+
+function releasePolicy(): ReleasePolicy {
+  if (!app.isPackaged) {
+    return {
+      schemaVersion: "phaseatlas.release/v1",
+      applicationVersion: app.getVersion(),
+      buildNumber: "development",
+      channel: "development",
+      updateMode: "disabled",
+      signedMetadata: false,
+    };
+  }
+  const policyPath = path.join(process.resourcesPath, "release-policy.json");
+  let policy: unknown;
+  try {
+    policy = JSON.parse(readFileSync(policyPath, "utf8")) as unknown;
+  } catch {
+    throw new Error("Packaged PhaseAtlas requires a valid release policy.");
+  }
+  if (!policy || typeof policy !== "object") throw new Error("Packaged release policy is invalid.");
+  const candidate = policy as Record<string, unknown>;
+  if (
+    candidate.schemaVersion !== "phaseatlas.release/v1" ||
+    typeof candidate.applicationVersion !== "string" ||
+    !candidate.applicationVersion ||
+    typeof candidate.buildNumber !== "string" ||
+    !candidate.buildNumber ||
+    !["development", "release"].includes(String(candidate.channel)) ||
+    !["disabled", "manual"].includes(String(candidate.updateMode)) ||
+    typeof candidate.signedMetadata !== "boolean"
+  ) throw new Error("Packaged release policy is invalid.");
+  if (candidate.channel === "development" && (candidate.updateMode !== "disabled" || candidate.signedMetadata)) {
+    throw new Error("Development artifacts must disable update activity.");
+  }
+  if (candidate.channel === "development" && candidate.update !== undefined) {
+    throw new Error("Development artifacts must not contain update configuration.");
+  }
+  if (candidate.channel === "release") {
+    const update = candidate.update as Record<string, unknown> | undefined;
+    if (
+      candidate.updateMode !== "manual" ||
+      !candidate.signedMetadata ||
+      !update ||
+      typeof update.feedUrl !== "string" ||
+      !update.feedUrl.startsWith("https://") ||
+      update.publicKey !== "update/public-key.pem" ||
+      update.manifest !== "update/manifest.json" ||
+      update.signature !== "update/manifest.sig"
+    ) throw new Error("Release artifacts require manually initiated signed HTTPS updates.");
+  }
+  return candidate as unknown as ReleasePolicy;
+}
+
+const packagedReleasePolicy = releasePolicy();
+writeReleaseSmokeResult({ ok: false, stage: "release-policy-loaded" });
 
 const currentDirectory = path.dirname(fileURLToPath(import.meta.url));
 const workerEntry = process.env.PHASEATLAS_WORKER_ENTRY ||
@@ -17,8 +100,9 @@ const repositories = new RepositoryProcessManager(workerEntry, applicationSuppor
     if (!window.isDestroyed()) window.webContents.send("phaseatlas:event", event);
   }
 });
+writeReleaseSmokeResult({ ok: false, stage: "repository-manager-created" });
 
-function createWindow(): BrowserWindow {
+async function createWindow(): Promise<BrowserWindow> {
   const developmentUrl = process.env.PHASEATLAS_UI_DEV_URL;
   const window = new BrowserWindow({
     width: 1360,
@@ -66,8 +150,8 @@ function createWindow(): BrowserWindow {
   const webContentsId = window.webContents.id;
   window.webContents.once("destroyed", () => repositories.releaseViewsForWebContents(webContentsId));
 
-  if (developmentUrl) void window.loadURL(developmentUrl);
-  else void window.loadFile(path.resolve(currentDirectory, "../../ui/build/index.html"));
+  if (developmentUrl) await window.loadURL(developmentUrl);
+  else await window.loadFile(path.resolve(currentDirectory, "../../ui/build/index.html"));
 
   return window;
 }
@@ -194,13 +278,47 @@ function registerIpc(): void {
   ipcMain.handle("phaseatlas:chat:edits:recover", (_event, checkoutId: string, input) => repositories.recoverChatEdit(checkoutId, input));
 }
 
-app.whenReady().then(() => {
+app.whenReady().then(async () => {
+  writeReleaseSmokeResult({ ok: false, stage: "application-ready" });
   registerIpc();
-  createWindow();
+  const window = await createWindow();
+  writeReleaseSmokeResult({ ok: false, stage: "renderer-loaded" });
+
+  const smokeRepository = process.env.PHASEATLAS_RELEASE_SMOKE_REPOSITORY;
+  if (process.env.PHASEATLAS_RELEASE_SMOKE === "1" && smokeRepository && !process.env.PHASEATLAS_UI_DEV_URL) {
+    try {
+      const repository = await repositories.open(smokeRepository, window.webContents.id);
+      const [workspaces, snapshot] = await Promise.all([
+        repositories.listWorkspaces(repository.checkoutId),
+        repositories.taskSnapshot(repository.checkoutId),
+      ]);
+      const result = {
+        channel: packagedReleasePolicy.channel,
+        repository: repository.name,
+        workspaces: workspaces.length,
+        tasks: snapshot.tasks.length,
+      };
+      writeReleaseSmokeResult({ ok: true, ...result });
+      process.stdout?.write?.(`PHASEATLAS_RELEASE_SMOKE_OK ${JSON.stringify(result)}\n`);
+      app.exit(0);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      writeReleaseSmokeResult({ ok: false, stage: "repository-inspection", error: message });
+      process.stderr?.write?.(`PHASEATLAS_RELEASE_SMOKE_FAILED ${message}\n`);
+      app.exit(1);
+    }
+  }
 
   app.on("activate", () => {
-    if (BrowserWindow.getAllWindows().length === 0) createWindow();
+    if (BrowserWindow.getAllWindows().length === 0) {
+      void createWindow().catch((error) => process.stderr?.write?.(`PHASEATLAS_RENDERER_LOAD_FAILED ${error instanceof Error ? error.message : String(error)}\n`));
+    }
   });
+}).catch((error) => {
+  const message = error instanceof Error ? error.message : String(error);
+  writeReleaseSmokeResult({ ok: false, stage: "application-start", error: message });
+  process.stderr?.write?.(`PHASEATLAS_APPLICATION_START_FAILED ${message}\n`);
+  if (process.env.PHASEATLAS_RELEASE_SMOKE === "1") app.exit(1);
 });
 
 app.on("before-quit", () => repositories.stopAll());
