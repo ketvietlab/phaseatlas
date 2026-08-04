@@ -123,7 +123,8 @@ class CodexChatAdapter implements RepositoryChatAdapter {
     let closeInput: () => void = () => undefined;
     const agentMessages = new Map<string, string>();
     const agentMessageOrder: string[] = [];
-    const commandOutput = new Map<string, string>();
+    const reasoningSummaries = new Map<string, string>();
+    const commandOutputBytes = new Map<string, number>();
 
     const rememberAgentMessage = (itemId: string, text: string) => {
       if (!agentMessages.has(itemId)) agentMessageOrder.push(itemId);
@@ -141,6 +142,19 @@ class CodexChatAdapter implements RepositoryChatAdapter {
       if (!streamed) appendAgentDelta(itemId, finalText);
       else if (finalText.startsWith(streamed)) appendAgentDelta(itemId, finalText.slice(streamed.length));
       rememberAgentMessage(itemId, finalText || streamed);
+    };
+    const appendReasoningDelta = (itemId: string, value: string) => {
+      const summary = sanitizeText(value, privateValues, false);
+      if (!summary) return;
+      reasoningSummaries.set(itemId, `${reasoningSummaries.get(itemId) ?? ""}${summary}`);
+      context.emit({ type: "chat.reasoning", itemId, summary, status: "running" });
+    };
+    const completeReasoning = (itemId: string, value: string) => {
+      const finalSummary = sanitizeText(value, privateValues, false);
+      const streamed = reasoningSummaries.get(itemId) ?? "";
+      const remaining = finalSummary.startsWith(streamed) ? finalSummary.slice(streamed.length) : streamed ? "" : finalSummary;
+      reasoningSummaries.set(itemId, finalSummary || streamed);
+      context.emit({ type: "chat.reasoning", itemId, summary: remaining, status: "completed" });
     };
     const finishInput = () => {
       if (inputClosed) return;
@@ -192,10 +206,6 @@ class CodexChatAdapter implements RepositoryChatAdapter {
             approvalPolicy: "never",
             sandbox: "read-only",
             ephemeral: true,
-            historyMode: "legacy",
-            environments: [],
-            dynamicTools: [],
-            selectedCapabilityRoots: [],
             developerInstructions: "Operate as a read-only repository assistant. Never modify files, use network access, call MCP tools, or request broader permissions.",
           },
         });
@@ -218,9 +228,9 @@ class CodexChatAdapter implements RepositoryChatAdapter {
               { type: "text", text: chatPrompt(context.messages), text_elements: [] },
               ...chatImages(context.messages).map((image) => ({ type: "image", detail: "auto", url: imageDataUrl(image) })),
             ],
-            environments: [],
             approvalPolicy: "never",
             model: context.model,
+            summary: "concise",
           },
         });
         return;
@@ -238,17 +248,12 @@ class CodexChatAdapter implements RepositoryChatAdapter {
         return;
       }
       if (method === "item/reasoning/summaryTextDelta" && typeof params?.delta === "string") {
-        const summary = sanitizeText(params.delta, privateValues);
-        if (summary) context.emit({ type: "chat.reasoning", summary });
+        appendReasoningDelta(typeof params.itemId === "string" ? params.itemId : "reasoning", params.delta);
         return;
       }
       if (method === "item/commandExecution/outputDelta" && typeof params?.delta === "string") {
         const itemId = typeof params.itemId === "string" ? params.itemId : "command";
-        const text = sanitizeText(params.delta, privateValues, false);
-        if (text) {
-          commandOutput.set(itemId, `${commandOutput.get(itemId) ?? ""}${text}`);
-          context.emit({ type: "chat.tool.output", toolCallId: itemId, text });
-        }
+        commandOutputBytes.set(itemId, (commandOutputBytes.get(itemId) ?? 0) + Buffer.byteLength(params.delta, "utf8"));
         return;
       }
       if (method === "item/started" || method === "item/completed") {
@@ -261,24 +266,27 @@ class CodexChatAdapter implements RepositoryChatAdapter {
         }
         if (item.type === "reasoning" && method === "item/completed") {
           const summaries = Array.isArray(item.summary) ? item.summary.filter((value): value is string => typeof value === "string") : [];
-          const summary = sanitizeText(summaries.join("\n"), privateValues);
-          if (summary) context.emit({ type: "chat.reasoning", summary });
+          completeReasoning(itemId, summaries.join("\n"));
           return;
         }
         if (item.type === "commandExecution") {
           if (method === "item/started") {
             const command = sanitizeText(typeof item.command === "string" ? item.command : "read-only repository command", privateValues);
-            context.emit({ type: "chat.tool.started", toolCallId: itemId, tool: "command", summary: command });
+            context.emit({
+              type: "chat.tool.started",
+              toolCallId: itemId,
+              tool: "command",
+              summary: command.length > 240 ? `${command.slice(0, 239)}…` : command,
+            });
           } else {
-            const finalOutput = sanitizeText(typeof item.aggregatedOutput === "string" ? item.aggregatedOutput : "", privateValues, false);
-            const streamedOutput = commandOutput.get(itemId) ?? "";
-            if (finalOutput.startsWith(streamedOutput) && finalOutput.length > streamedOutput.length) {
-              context.emit({ type: "chat.tool.output", toolCallId: itemId, text: finalOutput.slice(streamedOutput.length) });
-            }
+            const streamedBytes = commandOutputBytes.get(itemId) ?? 0;
+            const aggregatedBytes = typeof item.aggregatedOutput === "string" ? Buffer.byteLength(item.aggregatedOutput, "utf8") : 0;
+            const outputBytes = Math.max(streamedBytes, aggregatedBytes);
             context.emit({
               type: "chat.tool.completed",
               toolCallId: itemId,
               status: item.status === "failed" || item.status === "declined" ? "failed" : "completed",
+              ...(outputBytes > 0 ? { outputBytes, outputHidden: true as const } : {}),
             });
           }
           return;
@@ -447,9 +455,13 @@ class ClaudeChatAdapter implements RepositoryChatAdapter {
           const block = record(value);
           if (block?.type !== "tool_result" || typeof block.tool_use_id !== "string") continue;
           const id = normalizedToolId(block.tool_use_id);
-          const output = sanitizeText(typeof block.content === "string" ? block.content : "", privateValues);
-          if (output) context.emit({ type: "chat.tool.output", toolCallId: id, text: output });
-          context.emit({ type: "chat.tool.completed", toolCallId: id, status: block.is_error === true ? "failed" : "completed" });
+          const outputBytes = typeof block.content === "string" ? Buffer.byteLength(block.content, "utf8") : 0;
+          context.emit({
+            type: "chat.tool.completed",
+            toolCallId: id,
+            status: block.is_error === true ? "failed" : "completed",
+            ...(outputBytes > 0 ? { outputBytes, outputHidden: true as const } : {}),
+          });
         }
         return;
       }

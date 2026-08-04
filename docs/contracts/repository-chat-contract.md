@@ -66,7 +66,6 @@ chat.turn.status
 chat.assistant.delta
 chat.reasoning
 chat.tool.started
-chat.tool.output
 chat.tool.completed
 chat.file.reference
 chat.usage
@@ -76,6 +75,12 @@ chat.turn.completed | chat.turn.failed | chat.turn.cancelled | chat.turn.interru
 The checkout operational store assigns the authoritative monotonically increasing sequence and
 persists each event before live publication. Raw provider sequence values and arrival timestamps are
 not cursor authority. Terminal events are unique, and output after terminalization is rejected.
+
+Raw command and repository-tool output is adapter-private and must never be published to the
+renderer or persisted in chat events. `chat.tool.completed` may carry only bounded metadata such as
+status, output byte count, and an `outputHidden` marker. The renderer has no API for retrieving this
+content. Schema version 3 scrubs legacy `chat.tool.output` payloads while retaining the event position
+for replay compatibility.
 
 ## Replay, cancellation, and recovery
 

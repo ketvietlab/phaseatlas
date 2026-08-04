@@ -39,6 +39,7 @@ function runCodexAppServerFixture(
     deltas: string[];
     command?: boolean;
     mcpTool?: string;
+    onThreadStart?: (request: Record<string, unknown>) => void;
     onTurnStart?: (request: Record<string, unknown>) => void;
   },
 ) {
@@ -49,7 +50,10 @@ function runCodexAppServerFixture(
       for (const line of data.split("\n").filter(Boolean)) {
         const request = JSON.parse(line) as { id?: number; method?: string };
         if (request.id === 1) emit({ id: 1, result: { userAgent: "fixture" } });
-        if (request.id === 2) emit({ id: 2, result: { thread: { id: "thread-fixture" } } });
+        if (request.id === 2) {
+          fixture.onThreadStart?.(request as Record<string, unknown>);
+          emit({ id: 2, result: { thread: { id: "thread-fixture" } } });
+        }
         if (request.id !== 3) continue;
         fixture.onTurnStart?.(request as Record<string, unknown>);
         emit({ id: 3, result: { turn: { id: "turn-fixture", status: "inProgress", items: [] } } });
@@ -231,12 +235,18 @@ test("reconciles active chat turns as one durable interruption", async () => {
 
 test("normalizes Codex and Claude chat fixtures behind the same read-only boundary", async () => {
   const observedArgs = new Map<string, string[]>();
+  let codexThreadStart: Record<string, unknown> | undefined;
   let codexTurnStart: Record<string, unknown> | undefined;
   let claudeStdin = "";
   const processRunner: ProviderProcessRunner = async (options) => {
     observedArgs.set(options.executable, options.args);
     if (options.executable === "fixture-codex") {
-      runCodexAppServerFixture(options, { deltas: ["An", "swer"], command: true, onTurnStart: (request) => codexTurnStart = request });
+      runCodexAppServerFixture(options, {
+        deltas: ["An", "swer"],
+        command: true,
+        onThreadStart: (request) => codexThreadStart = request,
+        onTurnStart: (request) => codexTurnStart = request,
+      });
     } else {
       claudeStdin = options.stdin ?? "";
       options.onStdout([
@@ -268,14 +278,24 @@ test("normalizes Codex and Claude chat fixtures behind the same read-only bounda
   }];
   const run = async (runnerId: "codex-cli" | "claude-code") => {
     const events: string[] = [];
+    let outputPolicy: { status: string; outputBytes?: number; outputHidden?: true } | undefined;
     const answer = await registry.get(runnerId).execute({
       repositoryRoot: "/private/repository",
       model: "fixture-model",
       messages,
       signal: new AbortController().signal,
-      emit: (event) => events.push(event.type),
+      emit: (event) => {
+        events.push(event.type);
+        if (event.type === "chat.tool.completed") {
+          outputPolicy = {
+            status: event.status,
+            outputBytes: event.outputBytes,
+            outputHidden: event.outputHidden,
+          };
+        }
+      },
     });
-    return { answer, events };
+    return { answer, events, outputPolicy };
   };
   const codex = await run("codex-cli");
   const claude = await run("claude-code");
@@ -284,10 +304,14 @@ test("normalizes Codex and Claude chat fixtures behind the same read-only bounda
     "chat.assistant.delta",
     "chat.assistant.delta",
     "chat.tool.started",
-    "chat.tool.output",
     "chat.tool.completed",
     "chat.usage",
   ]);
+  assert.deepEqual(codex.outputPolicy, {
+    status: "completed",
+    outputBytes: 5,
+    outputHidden: true,
+  });
   assert.deepEqual(observedArgs.get("fixture-codex")?.slice(0, 2), ["app-server", "--stdio"]);
   assert.equal(observedArgs.get("fixture-codex")?.includes("mcp_servers={}"), true);
   assert.equal(observedArgs.get("fixture-codex")?.includes("features.apps=false"), true);
@@ -296,6 +320,16 @@ test("normalizes Codex and Claude chat fixtures behind the same read-only bounda
   assert.equal(observedArgs.get("claude")?.includes("--input-format"), true);
   assert.equal(observedArgs.get("claude")?.includes("Read,Glob,Grep"), true);
   assert.equal(observedArgs.get("claude")?.some((argument) => /Edit|Write|Bash/.test(argument)), false);
+  const codexThreadParams = (codexThreadStart?.params as Record<string, unknown> | undefined) ?? {};
+  assert.equal("historyMode" in codexThreadParams, false);
+  assert.equal("environments" in codexThreadParams, false);
+  assert.equal("dynamicTools" in codexThreadParams, false);
+  assert.equal("selectedCapabilityRoots" in codexThreadParams, false);
+  assert.equal(codexThreadParams.sandbox, "read-only");
+  assert.equal(codexThreadParams.approvalPolicy, "never");
+  const codexTurnParams = (codexTurnStart?.params as Record<string, unknown> | undefined) ?? {};
+  assert.equal("environments" in codexTurnParams, false);
+  assert.equal(codexTurnParams.summary, "concise");
   const codexInput = (codexTurnStart?.params as { input?: Array<Record<string, unknown>> } | undefined)?.input ?? [];
   assert.equal(String(codexInput[0]?.text).includes(ONE_PIXEL_PNG), false);
   assert.equal(codexInput[1]?.type, "image");
@@ -341,6 +375,8 @@ test("emits Codex assistant deltas before the provider turn completes", async ()
             if (request.id === 2) emit({ id: 2, result: { thread: { id: "thread-fixture" } } });
             if (request.id === 3) {
               emit({ id: 3, result: { turn: { id: "turn-fixture", status: "inProgress", items: [] } } });
+              emit({ method: "item/reasoning/summaryTextDelta", params: { itemId: "reasoning", delta: "Checking " } });
+              emit({ method: "item/reasoning/summaryTextDelta", params: { itemId: "reasoning", delta: "context" } });
               emit({ method: "item/agentMessage/delta", params: { itemId: "answer", delta: "Visible now" } });
             }
           }
@@ -349,6 +385,7 @@ test("emits Codex assistant deltas before the provider turn completes", async ()
       });
       await providerFinished;
       const answer = { id: "answer", type: "agentMessage", text: "Visible now" };
+      emit({ method: "item/completed", params: { item: { id: "reasoning", type: "reasoning", summary: ["Checking context"] } } });
       emit({ method: "item/completed", params: { item: answer } });
       emit({ method: "turn/completed", params: { turn: { id: "turn-fixture", status: "completed", items: [answer], error: null } } });
       return { stdout: "", stderr: "" };
@@ -364,7 +401,8 @@ test("emits Codex assistant deltas before the provider turn completes", async ()
   });
 
   await waitFor(() => events.includes("chat.assistant.delta"));
-  assert.deepEqual(events, ["chat.assistant.delta"]);
+  assert.deepEqual(events, ["chat.reasoning", "chat.reasoning", "chat.assistant.delta"]);
   finishProvider?.();
   assert.equal(await execution, "Visible now");
+  assert.deepEqual(events, ["chat.reasoning", "chat.reasoning", "chat.assistant.delta", "chat.reasoning"]);
 });

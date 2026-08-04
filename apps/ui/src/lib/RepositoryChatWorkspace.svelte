@@ -22,9 +22,14 @@
   export let runners: RunnerDescriptor[] = [];
   export let runnerId = "";
   export let modelId = "";
+  export let active = true;
+  export let terminalOpen = false;
+  export let terminalHeight = 300;
+  export let terminalShortcutLabel = "⌘`";
   export let onClose: () => void = () => undefined;
   export let onOpenProviderSettings: () => void = () => undefined;
   export let onOpenExplorer: () => void = () => undefined;
+  export let onToggleTerminal: () => void = () => undefined;
   export let onCreateTaskProposal: (request: string) => void = () => undefined;
 
   type Activity = {
@@ -35,6 +40,20 @@
     output: string;
     status: "running" | "completed" | "failed";
     sequence: number;
+  };
+
+  type AssistantSegment = {
+    id: string;
+    kind: "assistant";
+    text: string;
+    sequence: number;
+  };
+
+  type TimelineItem = AssistantSegment | Activity;
+
+  type TranscriptScrollPosition = {
+    top: number;
+    atTail: boolean;
   };
 
   type MentionResult = RepositoryFileEntry & { score: number };
@@ -77,13 +96,17 @@
   let imageInput: HTMLInputElement;
   let chatShellElement: HTMLElement;
   let clock = Date.now();
-  let lastActivityAt: Record<string, number> = {};
   let loadGeneration = 0;
   let chatMode: "ask" | "edit" = "ask";
   let scopeDraft = "";
   let preparedEdit: ChatEditConfirmation | null = null;
   let edits: ChatEditResult[] = [];
   let editBusy = false;
+  let tailFrame = 0;
+  let scrollPersistTimer = 0;
+  let scrollRestoreGeneration = 0;
+  let restoringScrollForSession = "";
+  const scrollBySession = new Map<string, TranscriptScrollPosition>();
 
   $: selectedSession = sessions.find((session) => session.sessionId === selectedSessionId) ?? null;
   $: selectedMessages = selectedSessionId ? messagesBySession[selectedSessionId] ?? [] : [];
@@ -120,7 +143,10 @@
     });
     void loadSessions();
     return () => {
+      rememberTranscriptScroll();
       repositoryIndexGeneration += 1;
+      window.cancelAnimationFrame(tailFrame);
+      window.clearTimeout(scrollPersistTimer);
       window.clearInterval(timer);
       unsubscribe?.();
     };
@@ -128,6 +154,10 @@
 
   function selectionKey() {
     return `phaseatlas.chat.selected-session.v1.${checkoutId}`;
+  }
+
+  function scrollPositionKey(sessionId: string) {
+    return `phaseatlas.chat.scroll-position.v1.${checkoutId}.${sessionId}`;
   }
 
   async function loadSessions(preferred = "") {
@@ -149,8 +179,8 @@
       const next = loaded.find((session) => session.sessionId === remembered)
         ?? loaded.find((session) => session.state === "open")
         ?? loaded[0];
-      selectedSessionId = next?.sessionId ?? "";
       if (next) await loadSession(next.sessionId, generation);
+      else selectedSessionId = "";
       await refreshEdits();
     } catch (error) {
       showError(error);
@@ -161,18 +191,24 @@
 
   async function loadSession(sessionId: string, generation = loadGeneration) {
     if (!window.phaseatlas) return;
+    if (selectedSessionId && selectedSessionId !== sessionId) rememberTranscriptScroll();
+    const scrollGeneration = ++scrollRestoreGeneration;
+    restoringScrollForSession = sessionId;
     selectedSessionId = sessionId;
     window.localStorage.setItem(selectionKey(), sessionId);
     const [messages, turns] = await Promise.all([
       window.phaseatlas.chat.listMessages(checkoutId, sessionId),
       window.phaseatlas.chat.listTurns(checkoutId, sessionId),
     ]);
-    if (generation !== loadGeneration || selectedSessionId !== sessionId) return;
+    if (generation !== loadGeneration || selectedSessionId !== sessionId) {
+      if (scrollGeneration === scrollRestoreGeneration) restoringScrollForSession = "";
+      return;
+    }
     messagesBySession = { ...messagesBySession, [sessionId]: messages };
     turnsBySession = { ...turnsBySession, [sessionId]: turns };
     await Promise.all(turns.map((turn) => replayTurn(turn.turnId)));
     await refreshEdits();
-    await scrollToTail(false);
+    await restoreTranscriptScroll(sessionId, scrollGeneration);
   }
 
   async function replayTurn(turnId: string) {
@@ -194,10 +230,10 @@
     const ordered = [...merged.values()].sort((left, right) => left.sequence - right.sequence);
     eventsByTurn = { ...eventsByTurn, [turnId]: ordered };
     cursorByTurn = { ...cursorByTurn, [turnId]: ordered.at(-1)?.sequence ?? 0 };
-    lastActivityAt = { ...lastActivityAt, [turnId]: Date.now() };
   }
 
   async function receiveEvent(turnId: string, event: PersistedRepositoryChatEvent) {
+    const shouldFollowTail = isNearTranscriptTail();
     const cursor = cursorByTurn[turnId] ?? 0;
     if (event.sequence > cursor + 1) await replayTurn(turnId);
     mergeEvents(turnId, [event]);
@@ -206,7 +242,7 @@
       await refreshSession(turn.sessionId);
       sessions = await window.phaseatlas!.chat.listSessions(checkoutId);
     }
-    if (turn?.sessionId === selectedSessionId) await scrollToTail(true);
+    if (turn?.sessionId === selectedSessionId && shouldFollowTail) scheduleTailFollow();
   }
 
   async function refreshSession(sessionId: string) {
@@ -243,7 +279,7 @@
   }
 
   async function selectSession(sessionId: string) {
-    selectedSessionId = sessionId;
+    if (sessionId === selectedSessionId) return;
     await loadSession(sessionId);
   }
 
@@ -679,48 +715,105 @@
     return selectedMessages.find((message) => message.messageId === turn.assistantMessageId);
   }
 
-  function streamedAnswer(turnId: string) {
-    return (eventsByTurn[turnId] ?? [])
-      .filter((event) => event.type === "chat.assistant.delta")
-      .map((event) => typeof event.payload.text === "string" ? event.payload.text : "")
-      .join("");
+  function formatByteCount(value: number) {
+    if (value < 1_024) return `${value} B`;
+    if (value < 1_048_576) return `${(value / 1_024).toFixed(value < 10_240 ? 1 : 0)} KB`;
+    return `${(value / 1_048_576).toFixed(value < 10_485_760 ? 1 : 0)} MB`;
   }
 
-  function activities(turnId: string): Activity[] {
-    const events = eventsByTurn[turnId] ?? [];
-    const items = new Map<string, Activity>();
-    for (const event of events) {
+  function turnTimeline(events: PersistedRepositoryChatEvent[], fallbackAnswer = ""): TimelineItem[] {
+    const timeline: TimelineItem[] = [];
+    const activityById = new Map<string, Activity>();
+    const ordered = [...events].sort((left, right) => left.sequence - right.sequence);
+    for (const event of ordered) {
+      if (event.type === "chat.assistant.delta") {
+        const text = typeof event.payload.text === "string" ? event.payload.text : "";
+        if (!text) continue;
+        const previous = timeline.at(-1);
+        if (previous?.kind === "assistant") previous.text += text;
+        else timeline.push({ id: `assistant-${event.sequence}`, kind: "assistant", text, sequence: event.sequence });
+        continue;
+      }
       if (event.type === "chat.reasoning") {
-        items.set(`reasoning-${event.sequence}`, {
-          id: `reasoning-${event.sequence}`, kind: "reasoning", label: "Reasoning",
-          summary: String(event.payload.summary ?? "Agent reasoning"), output: "", status: "completed", sequence: event.sequence,
-        });
+        const providerItemId = typeof event.payload.itemId === "string" ? event.payload.itemId : `${event.sequence}`;
+        const id = `reasoning-${providerItemId}`;
+        const delta = typeof event.payload.summary === "string" ? event.payload.summary : "";
+        const status = event.payload.status === "running" ? "running" : "completed";
+        const existing = activityById.get(id);
+        if (existing) {
+          existing.output += delta;
+          existing.summary = existing.output.trim().slice(0, 140) || "Reasoning summary";
+          existing.status = status;
+        } else {
+          const activity: Activity = {
+            id, kind: "reasoning", label: "Reasoning",
+            summary: delta.trim().slice(0, 140) || "Reasoning summary",
+            output: delta,
+            status,
+            sequence: event.sequence,
+          };
+          activityById.set(id, activity);
+          timeline.push(activity);
+        }
+        continue;
       }
       if (event.type === "chat.file.reference") {
-        items.set(`file-${event.sequence}`, {
+        const activity: Activity = {
           id: `file-${event.sequence}`, kind: "file", label: "Repository file",
           summary: String(event.payload.path ?? "File reference"), output: "", status: "completed", sequence: event.sequence,
-        });
+        };
+        activityById.set(activity.id, activity);
+        timeline.push(activity);
+        continue;
       }
       if (event.type === "chat.tool.started") {
         const id = String(event.payload.toolCallId ?? `tool-${event.sequence}`);
-        items.set(id, {
+        const activity: Activity = {
           id, kind: "tool", label: String(event.payload.tool ?? "Tool"),
           summary: String(event.payload.summary ?? "Inspecting repository"), output: "", status: "running", sequence: event.sequence,
-        });
-      }
-      if (event.type === "chat.tool.output") {
-        const id = String(event.payload.toolCallId ?? `tool-${event.sequence}`);
-        const item = items.get(id);
-        if (item) item.output += String(event.payload.text ?? "");
+        };
+        activityById.set(id, activity);
+        timeline.push(activity);
+        continue;
       }
       if (event.type === "chat.tool.completed") {
         const id = String(event.payload.toolCallId ?? `tool-${event.sequence}`);
-        const item = items.get(id);
-        if (item) item.status = event.payload.status === "failed" ? "failed" : "completed";
+        let item = activityById.get(id);
+        if (!item) {
+          item = {
+            id, kind: "tool", label: "Tool", summary: "Repository command",
+            output: "", status: "running", sequence: event.sequence,
+          };
+          activityById.set(id, item);
+          timeline.push(item);
+        }
+        item.status = event.payload.status === "failed" ? "failed" : "completed";
+        const outputBytes = Number(event.payload.outputBytes);
+        if (event.payload.outputHidden === true && Number.isFinite(outputBytes) && outputBytes > 0) {
+          item.summary = `${item.summary} · ${formatByteCount(outputBytes)} output hidden`;
+        }
       }
     }
-    return [...items.values()].sort((left, right) => left.sequence - right.sequence);
+    if (!timeline.some((item) => item.kind === "assistant") && fallbackAnswer) {
+      timeline.push({
+        id: "assistant-fallback",
+        kind: "assistant",
+        text: fallbackAnswer,
+        sequence: (ordered.at(-1)?.sequence ?? 0) + 1,
+      });
+    }
+    return timeline;
+  }
+
+  function timelineAnswer(items: TimelineItem[]) {
+    return items
+      .filter((item): item is AssistantSegment => item.kind === "assistant")
+      .map((item) => item.text)
+      .join("");
+  }
+
+  function isLastAssistant(items: TimelineItem[], index: number) {
+    return !items.slice(index + 1).some((item) => item.kind === "assistant");
   }
 
   function terminalMessage(turn: RepositoryChatTurn) {
@@ -736,11 +829,6 @@
     const minutes = Math.floor(seconds / 60);
     if (minutes < 60) return `${minutes}m`;
     return new Date(timestamp).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
-  }
-
-  function silenceLabel(turnId: string) {
-    const seconds = Math.max(Math.floor((clock - (lastActivityAt[turnId] ?? clock)) / 1_000), 0);
-    return seconds < 4 ? "Streaming activity" : `Agent active · waiting ${seconds}s for the next event`;
   }
 
   function handleComposerKeydown(event: KeyboardEvent) {
@@ -775,6 +863,8 @@
   }
 
   function handleWindowKeydown(event: KeyboardEvent) {
+    if (!active) return;
+    if (chatShellElement && !chatShellElement.contains(document.activeElement)) return;
     if (event.defaultPrevented) return;
     if (event.key === "Escape" && mentionOpen) {
       event.preventDefault();
@@ -806,6 +896,82 @@
     transcript?.scrollTo({ top: transcript.scrollHeight, behavior: smooth ? "smooth" : "auto" });
   }
 
+  function storedTranscriptScroll(sessionId: string) {
+    const remembered = scrollBySession.get(sessionId);
+    if (remembered) return remembered;
+    try {
+      const stored = window.localStorage.getItem(scrollPositionKey(sessionId));
+      if (!stored) return null;
+      const parsed = JSON.parse(stored) as Partial<TranscriptScrollPosition>;
+      if (typeof parsed.top !== "number" || !Number.isFinite(parsed.top) || typeof parsed.atTail !== "boolean") return null;
+      return { top: Math.max(0, parsed.top), atTail: parsed.atTail };
+    } catch {
+      return null;
+    }
+  }
+
+  function rememberTranscriptScroll() {
+    const snapshot = captureTranscriptScroll();
+    if (!snapshot) return;
+    persistTranscriptScroll(snapshot.sessionId, snapshot.position);
+  }
+
+  function captureTranscriptScroll() {
+    if (!transcript || !selectedSessionId || restoringScrollForSession === selectedSessionId) return null;
+    const maxTop = Math.max(0, transcript.scrollHeight - transcript.clientHeight);
+    const position = {
+      top: Math.min(Math.max(0, transcript.scrollTop), maxTop),
+      atTail: maxTop - transcript.scrollTop < 120,
+    };
+    scrollBySession.set(selectedSessionId, position);
+    return { sessionId: selectedSessionId, position };
+  }
+
+  function persistTranscriptScroll(sessionId: string, position: TranscriptScrollPosition) {
+    try {
+      window.localStorage.setItem(scrollPositionKey(sessionId), JSON.stringify(position));
+    } catch {
+      // Scroll persistence is a convenience; private storage modes may reject it.
+    }
+  }
+
+  function handleTranscriptScroll() {
+    const snapshot = captureTranscriptScroll();
+    if (!snapshot) return;
+    window.clearTimeout(scrollPersistTimer);
+    scrollPersistTimer = window.setTimeout(() => {
+      scrollPersistTimer = 0;
+      persistTranscriptScroll(snapshot.sessionId, scrollBySession.get(snapshot.sessionId) ?? snapshot.position);
+    }, 160);
+  }
+
+  async function restoreTranscriptScroll(sessionId: string, generation: number) {
+    await tick();
+    if (!transcript || selectedSessionId !== sessionId || generation !== scrollRestoreGeneration) return;
+    const position = storedTranscriptScroll(sessionId);
+    const top = !position || position.atTail
+      ? transcript.scrollHeight
+      : Math.min(position.top, Math.max(0, transcript.scrollHeight - transcript.clientHeight));
+    transcript.scrollTo({ top, behavior: "auto" });
+    await new Promise<void>((resolve) => window.requestAnimationFrame(() => resolve()));
+    if (selectedSessionId !== sessionId || generation !== scrollRestoreGeneration) return;
+    restoringScrollForSession = "";
+    rememberTranscriptScroll();
+  }
+
+  function isNearTranscriptTail() {
+    if (!transcript) return true;
+    return transcript.scrollHeight - transcript.scrollTop - transcript.clientHeight < 120;
+  }
+
+  function scheduleTailFollow() {
+    if (tailFrame) return;
+    tailFrame = window.requestAnimationFrame(() => {
+      tailFrame = 0;
+      void scrollToTail(false);
+    });
+  }
+
   async function copyText(value: string) {
     try {
       await navigator.clipboard.writeText(value);
@@ -821,7 +987,15 @@
 
 <svelte:window onkeydown={handleWindowKeydown} />
 
-<div class="chat-layer" role="dialog" aria-modal="true" aria-labelledby="repository-chat-title">
+<div
+  class="chat-layer"
+  class:inactive={!active}
+  role="dialog"
+  aria-modal={active}
+  aria-hidden={!active}
+  aria-labelledby="repository-chat-title"
+  style={`--chat-terminal-inset: ${terminalOpen ? terminalHeight : 0}px`}
+>
   <section class="chat-shell" bind:this={chatShellElement} onpaste={handleComposerPaste}>
     <header class="chat-header">
       <div class="chat-mark" aria-hidden="true"><span></span><span></span><span></span></div>
@@ -836,6 +1010,10 @@
       <button class="explorer-chip" type="button" title="Open repository file explorer" onclick={onOpenExplorer}>
         <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 5h16v14H4zM8 5v14M11 9h6M11 13h4"/></svg>
         Explorer
+      </button>
+      <button class:active={terminalOpen} class="explorer-chip" type="button" title={`Toggle terminal (${terminalShortcutLabel})`} onclick={onToggleTerminal}>
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m5 7 4.5 5L5 17M12 17h7"/></svg>
+        Terminal
       </button>
       <span class="read-only-chip"><svg viewBox="0 0 24 24" aria-hidden="true"><rect x="5" y="10" width="14" height="10" rx="2"/><path d="M8 10V7a4 4 0 0 1 8 0v3"/></svg>Read only</span>
       <button class="close-chat" type="button" aria-label="Close agent chat" title="Close (Esc)" onclick={onClose}>×</button>
@@ -888,14 +1066,15 @@
             </div>
           </header>
 
-          <div class="transcript" bind:this={transcript} aria-live="polite" aria-label="Conversation transcript">
+          <div class="transcript" bind:this={transcript} onscroll={handleTranscriptScroll} aria-live="polite" aria-label="Conversation transcript">
             {#if selectedTurns.length}
               <div class="transcript-column">
                 {#each selectedTurns as turn (turn.turnId)}
                   {@const prompt = userMessage(turn)}
                   {@const answer = assistantMessage(turn)}
-                  {@const streamed = streamedAnswer(turn.turnId)}
-                  {@const turnActivities = activities(turn.turnId)}
+                  {@const turnEvents = eventsByTurn[turn.turnId] ?? []}
+                  {@const timeline = turnTimeline(turnEvents, answer?.content ?? "")}
+                  {@const responseText = answer?.content ?? timelineAnswer(timeline)}
                   <section class="turn" data-status={turn.status}>
                     {#if prompt}
                       <article class="message user-message">
@@ -916,27 +1095,33 @@
                       </article>
                     {/if}
 
-                    {#if turnActivities.length || ACTIVE.has(turn.status)}
-                      <div class="agent-activity">
-                        <header><span class:active={ACTIVE.has(turn.status)}></span><strong>{ACTIVE.has(turn.status) ? silenceLabel(turn.turnId) : `${turnActivities.length} agent ${turnActivities.length === 1 ? "activity" : "activities"}`}</strong><small>#{turn.turnId.slice(0, 6)}</small></header>
-                        {#each turnActivities as activity}
-                          <details class="activity-card" open={activity.status === "running"}>
-                            <summary><span class="activity-icon" data-kind={activity.kind}>{activity.kind === "reasoning" ? "◇" : activity.kind === "file" ? "▤" : ">_"}</span><span><strong>{activity.label}</strong><small>{activity.summary}</small></span><i data-status={activity.status}></i></summary>
-                            {#if activity.output}<pre>{activity.output}</pre>{/if}
-                          </details>
-                        {/each}
-                        {#if ACTIVE.has(turn.status) && !turnActivities.length}<div class="quiet-pulse"><span></span><p><strong>Agent process is running</strong><small>Waiting for the provider's first structured event…</small></p></div>{/if}
-                      </div>
-                    {/if}
-
-                    {#if answer || streamed}
+                    {#if timeline.length || ACTIVE.has(turn.status)}
                       <article class="message assistant-message">
-                        <header><span><i></i>PhaseAtlas agent</span><div><time datetime={answer?.createdAt ?? turn.updatedAt}>{relativeTime(answer?.createdAt ?? turn.updatedAt)}</time><button type="button" aria-label="Copy assistant response" title="Copy response" onclick={() => copyText(answer?.content ?? streamed)}>Copy</button></div></header>
-                        <div class="markdown-message" class:streaming={!answer && ACTIVE.has(turn.status)}>
-                          <SvelteMarkdown source={answer?.content ?? streamed} extensions={markdownExtensions} renderers={markdownRenderers} sanitizeUrl={() => ""}>
-                            {#snippet link({ children })}<span class="rendered-link">{@render children?.()}</span>{/snippet}
-                            {#snippet image({ text })}<span class="rendered-image">[Image omitted: {text}]</span>{/snippet}
-                          </SvelteMarkdown>
+                        <header><span><i></i>PhaseAtlas agent</span><div><time datetime={answer?.createdAt ?? turn.updatedAt}>{relativeTime(answer?.createdAt ?? turn.updatedAt)}</time>{#if responseText}<button type="button" aria-label="Copy assistant response" title="Copy response" onclick={() => copyText(responseText)}>Copy</button>{/if}</div></header>
+                        <div class="turn-timeline">
+                          {#each timeline as item, timelineIndex (item.id)}
+                            {#if item.kind === "assistant"}
+                              <div class="markdown-message assistant-segment" class:streaming={!answer && ACTIVE.has(turn.status) && isLastAssistant(timeline, timelineIndex)}>
+                                <SvelteMarkdown source={item.text} extensions={markdownExtensions} renderers={markdownRenderers} sanitizeUrl={() => ""}>
+                                  {#snippet link({ children })}<span class="rendered-link">{@render children?.()}</span>{/snippet}
+                                  {#snippet image({ text })}<span class="rendered-image">[Image omitted: {text}]</span>{/snippet}
+                                </SvelteMarkdown>
+                              </div>
+                            {:else}
+                              <div class="timeline-activity" data-kind={item.kind} data-status={item.status}>
+                                <span class="timeline-activity-icon" aria-hidden="true">
+                                  <svg viewBox="0 0 20 20">
+                                    {#if item.kind === "tool"}<path d="m3.5 5.5 4 4-4 4M9.5 13.5h7" />
+                                    {:else if item.kind === "file"}<path d="M5 2.8h6l4 4v10.4H5zM11 2.8v4h4M7.8 10h4.8M7.8 13h4.8" />
+                                    {:else}<circle cx="9" cy="9" r="5.5" /><path d="m13 13 3.5 3.5M7 9h4M9 7v4" />{/if}
+                                  </svg>
+                                </span>
+                                <span class="timeline-activity-copy"><strong>{item.summary}</strong><small>{item.label}</small></span>
+                                <i aria-label={item.status}></i>
+                              </div>
+                            {/if}
+                          {/each}
+                          {#if ACTIVE.has(turn.status) && !timeline.length}<div class="quiet-pulse inline"><span></span><p><strong>Agent process is running</strong><small>Waiting for the first event…</small></p></div>{/if}
                         </div>
                       </article>
                     {/if}
@@ -1068,20 +1253,21 @@
 </div>
 
 <style>
-  .chat-layer { position: fixed; z-index: 96; inset: 0 0 0 var(--sidebar-width); padding: 10px; background: color-mix(in srgb,var(--canvas) 82%,transparent); backdrop-filter: blur(12px); animation: chat-in .2s cubic-bezier(.2,.76,.2,1); }
+  .chat-layer { position: fixed; z-index: 96; inset: 0 0 var(--chat-terminal-inset,0px) var(--sidebar-width); padding: 10px; background: color-mix(in srgb,var(--canvas) 82%,transparent); backdrop-filter: blur(12px); animation: chat-in .2s cubic-bezier(.2,.76,.2,1); }
+  .chat-layer.inactive { display: none; }
   .chat-shell { display: grid; width: 100%; height: 100%; grid-template-rows: 64px minmax(0,1fr); overflow: hidden; border: 1px solid var(--border); border-radius: var(--radius-lg); background: var(--surface); color: var(--text); box-shadow: 0 24px 80px rgba(16,22,19,.18); }
-  .chat-header { display: grid; min-width: 0; grid-template-columns: 40px minmax(220px,1fr) minmax(180px,auto) auto auto 36px; align-items: center; gap: 10px; border-bottom: 1px solid var(--border); padding: 0 12px 0 16px; background: color-mix(in srgb,var(--surface) 96%,var(--brand-50)); -webkit-app-region: drag; }
+  .chat-header { display: grid; min-width: 0; grid-template-columns: 40px minmax(180px,1fr) minmax(160px,auto) auto auto auto 36px; align-items: center; gap: 8px; border-bottom: 1px solid var(--border); padding: 0 12px 0 16px; background: color-mix(in srgb,var(--surface) 96%,var(--brand-50)); -webkit-app-region: drag; }
   .chat-header button,.chat-header .provider-chip,.chat-header .read-only-chip { -webkit-app-region: no-drag; }.chat-mark { position: relative; width: 32px; height: 32px; border: 1px solid var(--brand-200); border-radius: 10px; background: var(--active-surface); }.chat-mark span { position: absolute; width: 7px; height: 7px; border: 1px solid var(--brand-500); background: var(--surface); transform: rotate(45deg); }.chat-mark span:nth-child(1) { top: 5px; left: 12px; }.chat-mark span:nth-child(2) { bottom: 5px; left: 5px; }.chat-mark span:nth-child(3) { right: 5px; bottom: 5px; background: var(--brand-500); }
   .chat-title { min-width: 0; }.chat-title p,.conversation-header p { margin: 0 0 2px; color: var(--active-text); font-size: 11px; font-weight: 800; letter-spacing: .09em; text-transform: uppercase; }.chat-title h2 { overflow: hidden; margin: 0; font-size: 16px; letter-spacing: -.015em; text-overflow: ellipsis; white-space: nowrap; }.chat-title h2 span { color: var(--text-subtle); font-weight: 560; }
   .provider-chip { display: flex; min-width: 0; align-items: center; gap: 8px; border: 1px solid var(--border); border-radius: var(--radius); padding: 6px 9px; background: var(--surface); color: var(--text); text-align: left; }.provider-chip:hover { border-color: var(--brand-300); background: var(--active-surface); }.provider-chip > span { width: 7px; height: 7px; flex: 0 0 7px; border-radius: 50%; background: var(--success-500); box-shadow: 0 0 0 3px color-mix(in srgb,var(--success-500) 14%,transparent); }.provider-chip.unavailable > span { background: var(--warning-500); }.provider-chip div { min-width: 0; }.provider-chip small,.provider-chip strong { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }.provider-chip small { color: var(--text-subtle); font-size: 10px; text-transform: uppercase; }.provider-chip strong { margin-top: 1px; font-size: 12px; }
-  .explorer-chip { display: inline-flex; align-items: center; gap: 6px; border: 1px solid var(--border); border-radius: var(--radius); padding: 8px 10px; background: var(--surface); color: var(--text-muted); font-size: 12px; font-weight: 750; }.explorer-chip:hover { border-color: var(--brand-300); background: var(--active-surface); color: var(--active-text); }.explorer-chip svg { width: 15px; height: 15px; fill: none; stroke: currentColor; stroke-width: 1.7; }
+  .explorer-chip { display: inline-flex; align-items: center; gap: 6px; border: 1px solid var(--border); border-radius: var(--radius); padding: 8px 10px; background: var(--surface); color: var(--text-muted); font-size: 12px; font-weight: 750; }.explorer-chip:hover,.explorer-chip.active { border-color: var(--brand-300); background: var(--active-surface); color: var(--active-text); }.explorer-chip svg { width: 15px; height: 15px; fill: none; stroke: currentColor; stroke-width: 1.7; }
   .read-only-chip { display: flex; align-items: center; gap: 5px; border: 1px solid var(--border); border-radius: var(--radius-full); padding: 5px 8px; color: var(--text-muted); font-size: 11px; font-weight: 750; text-transform: uppercase; }.read-only-chip svg { width: 12px; height: 12px; fill: none; stroke: currentColor; stroke-width: 1.8; }.close-chat { display: grid; width: 34px; height: 34px; place-items: center; border: 0; border-radius: var(--radius); background: transparent; color: var(--text-muted); font-size: 24px; }.close-chat:hover { background: var(--surface-soft); color: var(--text); }
   .chat-grid { display: grid; min-height: 0; grid-template-columns: 252px minmax(0,1fr); }.session-rail { display: grid; min-height: 0; grid-template-rows: 52px minmax(0,1fr) 44px; border-right: 1px solid var(--border); background: var(--surface-soft); }.session-rail-header { display: flex; align-items: center; justify-content: space-between; border-bottom: 1px solid var(--border); padding: 0 10px 0 13px; }.session-rail-header > div { display: flex; align-items: center; gap: 7px; }.session-rail-header span { color: var(--text-muted); font-size: 12px; font-weight: 800; letter-spacing: .06em; text-transform: uppercase; }.session-rail-header strong { display: grid; min-width: 20px; height: 18px; place-items: center; border-radius: var(--radius-full); background: var(--surface); color: var(--text-subtle); font-size: 11px; }.session-rail-header > button { display: grid; width: 29px; height: 29px; place-items: center; border: 1px solid var(--border); border-radius: var(--radius-sm); background: var(--surface); color: var(--active-text); font-size: 18px; }.session-rail-header > button:hover { border-color: var(--brand-300); background: var(--active-surface); }.session-rail-header > button:disabled { opacity: .45; }
   .session-list { min-height: 0; overflow: auto; padding: 7px; }.session-item { position: relative; min-height: 60px; overflow: hidden; border: 1px solid transparent; border-radius: var(--radius); }.session-item + .session-item { margin-top: 3px; }.session-item:hover { background: var(--surface); }.session-item.active { border-color: var(--brand-200); background: var(--surface); box-shadow: 0 2px 8px rgba(25,31,28,.05); }.session-item.closed { opacity: .68; }.session-select { display: grid; width: 100%; min-height: 60px; grid-template-columns: 9px minmax(0,1fr); align-items: center; gap: 7px; border: 0; padding: 8px 45px 8px 8px; background: transparent; color: var(--text); text-align: left; }.session-select > span:last-child { min-width: 0; }.session-select strong,.session-select small { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }.session-select strong { font-size: 13px; }.session-select small { margin-top: 4px; color: var(--text-subtle); font: 10px/1.3 "SFMono-Regular",Consolas,monospace; }.session-state { width: 7px; height: 7px; border-radius: 50%; background: var(--ink-300); }.session-state[data-state="open"] { background: var(--success-500); }.session-state[data-state="running"] { background: var(--brand-500); animation: signal 1.2s ease infinite; }.session-actions { position: absolute; top: 50%; right: 6px; display: flex; opacity: 0; transform: translateY(-50%); }.session-item:hover .session-actions,.session-item.active .session-actions { opacity: 1; }.session-actions button { display: grid; width: 23px; height: 25px; place-items: center; border: 0; border-radius: var(--radius-xs); background: transparent; color: var(--text-subtle); font-size: 13px; }.session-actions button:hover { background: var(--surface-soft); color: var(--text); }.rename-form { display: grid; min-height: 60px; grid-template-columns: minmax(0,1fr) auto; align-items: center; gap: 5px; padding: 7px; }.rename-form input { min-width: 0; border: 1px solid var(--brand-400); border-radius: var(--radius-sm); padding: 7px; background: var(--surface); color: var(--text); font-size: 12px; }.rename-form button { border: 0; border-radius: var(--radius-sm); padding: 7px; background: var(--brand-600); color: white; font-size: 11px; }.session-empty { padding: 28px 16px; text-align: center; }.session-empty strong { font-size: 13px; }.session-empty p { margin: 5px 0; color: var(--text-subtle); font-size: 12px; line-height: 1.5; }.session-skeleton { display: grid; grid-template-columns: 8px 1fr; gap: 8px; margin: 8px; }.session-skeleton span { width: 7px; height: 7px; margin-top: 3px; border-radius: 50%; background: var(--border); }.session-skeleton i { height: 34px; border-radius: var(--radius-sm); background: linear-gradient(90deg,var(--surface),var(--border-soft),var(--surface)); background-size: 200% 100%; animation: shimmer 1.3s linear infinite; }.session-rail-footer { display: flex; align-items: center; gap: 8px; border-top: 1px solid var(--border); padding: 0 13px; }.session-rail-footer > span { width: 7px; height: 7px; border-radius: 2px; background: var(--brand-500); transform: rotate(45deg); }.session-rail-footer p { margin: 0; }.session-rail-footer strong,.session-rail-footer small { display: block; }.session-rail-footer strong { font-size: 11px; }.session-rail-footer small { margin-top: 1px; color: var(--text-subtle); font-size: 10px; }
   .conversation { display: grid; min-width: 0; min-height: 0; grid-template-rows: 52px minmax(0,1fr) auto; background: color-mix(in srgb,var(--surface) 97%,var(--canvas)); }.conversation-header { display: flex; min-width: 0; align-items: center; justify-content: space-between; gap: 18px; border-bottom: 1px solid var(--border); padding: 0 18px; background: var(--surface); }.conversation-header > div:first-child { min-width: 0; }.conversation-header h3 { overflow: hidden; margin: 0; font-size: 12px; text-overflow: ellipsis; white-space: nowrap; }.conversation-meta { display: flex; gap: 6px; }.conversation-meta span { border: 1px solid var(--border); border-radius: var(--radius-full); padding: 4px 7px; color: var(--text-subtle); font-size: 11px; }
   .conversation-controls { display: flex; min-width: 0; align-items: center; gap: 7px; }.mode-switch { display: flex; border: 1px solid var(--border); border-radius: var(--radius); padding: 2px; background: var(--surface-soft); }.mode-switch button { border: 0; border-radius: var(--radius-sm); padding: 4px 8px; background: transparent; color: var(--text-subtle); font-size: 11px; font-weight: 750; }.mode-switch button.active { background: var(--surface); color: var(--active-text); box-shadow: 0 1px 4px rgba(20,28,23,.1); }.task-handoff { border: 1px solid var(--border); border-radius: var(--radius); padding: 6px 8px; background: var(--surface); color: var(--text-muted); font-size: 11px; font-weight: 750; }.task-handoff:hover { border-color: var(--brand-300); color: var(--active-text); }.task-handoff:disabled { opacity: .45; }
-  .transcript { min-height: 0; overflow: auto; overscroll-behavior: contain; scroll-behavior: smooth; }.transcript-column { width: min(820px,calc(100% - 40px)); margin: 0 auto; padding: 30px 0 42px; }.turn + .turn { margin-top: 30px; border-top: 1px solid var(--border-soft); padding-top: 30px; }.message { position: relative; }.message header { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 8px; }.message header span { font-size: 12px; font-weight: 800; letter-spacing: .035em; }.message time { color: var(--text-subtle); font-size: 11px; }.user-message { max-width: 76%; margin-left: auto; border: 1px solid var(--brand-200); border-radius: 14px 14px 4px 14px; padding: 12px 14px; background: var(--active-surface); }.user-message header span { color: var(--active-text); }.user-message p { margin: 0; color: var(--text); font-size: 13px; line-height: 1.58; white-space: pre-wrap; word-break: break-word; }.message-attachments { display: flex; flex-wrap: wrap; gap: 7px; margin-top: 10px; }.message-attachments code { border: 1px solid var(--brand-200); border-radius: var(--radius-full); padding: 4px 7px; background: var(--surface); color: var(--active-text); font-size: 11px; }.message-image { width: min(240px,100%); overflow: hidden; margin: 0; border: 1px solid var(--brand-200); border-radius: var(--radius); background: var(--surface); }.message-image img { display: block; width: 100%; max-height: 220px; object-fit: contain; background: var(--surface-soft); }.message-image figcaption { display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 6px 8px; }.message-image figcaption span { overflow: hidden; font-size: 10px; font-weight: 700; text-overflow: ellipsis; white-space: nowrap; }.message-image figcaption small { flex: 0 0 auto; color: var(--text-subtle); font-size: 9px; }.retry-note { display: block; margin-top: 7px; color: var(--text-subtle); font-size: 11px; }.assistant-message { margin-top: 18px; }.assistant-message > header { border-bottom: 1px solid var(--border-soft); padding-bottom: 8px; }.assistant-message > header span { display: flex; align-items: center; gap: 7px; }.assistant-message > header span i { width: 8px; height: 8px; border-radius: 2px; background: var(--brand-500); transform: rotate(45deg); }.assistant-message > header div { display: flex; align-items: center; gap: 8px; }.assistant-message > header button { border: 1px solid var(--border); border-radius: var(--radius-sm); padding: 3px 6px; background: var(--surface); color: var(--text-subtle); font-size: 10px; }.markdown-message { color: var(--text-muted); font-size: 13px; line-height: 1.72; }.markdown-message.streaming::after { display: inline-block; width: 6px; height: 13px; margin-left: 3px; background: var(--brand-500); content: ""; vertical-align: -2px; animation: blink .8s steps(2,end) infinite; }.markdown-message :global(p) { margin: 0 0 11px; }.markdown-message :global(h1),.markdown-message :global(h2),.markdown-message :global(h3) { margin: 18px 0 8px; color: var(--text); line-height: 1.35; }.markdown-message :global(h1) { font-size: 20px; }.markdown-message :global(h2) { font-size: 17px; }.markdown-message :global(h3) { font-size: 14px; }.markdown-message :global(ul),.markdown-message :global(ol) { padding-left: 21px; }.markdown-message :global(code) { border: 1px solid var(--border); border-radius: var(--radius-xs); padding: 1px 4px; background: var(--surface-soft); color: var(--text); font: 13px/1.55 "SFMono-Regular",Consolas,monospace; }.markdown-message :global(pre) { overflow: auto; border: 1px solid #303a35; border-radius: var(--radius); padding: 12px; background: #131a17; color: #c8d5cd; }.markdown-message :global(pre code) { border: 0; padding: 0; background: transparent; color: inherit; }.markdown-message :global(a) { color: var(--active-text); pointer-events: none; text-decoration: underline; }.markdown-message :global(img) { display: none; }.markdown-message :global(table) { width: 100%; border-collapse: collapse; }.markdown-message :global(th),.markdown-message :global(td) { border: 1px solid var(--border); padding: 6px 8px; text-align: left; }.markdown-message :global(.mermaid) { overflow: auto; }
-  .agent-activity { overflow: hidden; margin: 14px 0 0 8%; border: 1px solid var(--border); border-radius: var(--radius); background: var(--surface); }.agent-activity > header { display: flex; align-items: center; gap: 8px; min-height: 34px; border-bottom: 1px solid var(--border-soft); padding: 0 10px; background: var(--surface-soft); }.agent-activity > header > span { width: 7px; height: 7px; border-radius: 50%; background: var(--success-500); }.agent-activity > header > span.active { animation: signal 1.2s ease infinite; }.agent-activity > header strong { flex: 1; color: var(--text-muted); font-size: 11px; }.agent-activity > header small { color: var(--text-subtle); font: 10px/1 "SFMono-Regular",Consolas,monospace; }.activity-card + .activity-card { border-top: 1px solid var(--border-soft); }.activity-card summary { display: grid; min-height: 42px; grid-template-columns: 27px minmax(0,1fr) 8px; align-items: center; gap: 8px; padding: 5px 10px; cursor: pointer; list-style: none; }.activity-card summary::-webkit-details-marker { display: none; }.activity-icon { display: grid; width: 25px; height: 25px; place-items: center; border-radius: var(--radius-xs); background: var(--active-surface); color: var(--active-text); font: 10px/1 "SFMono-Regular",Consolas,monospace; }.activity-icon[data-kind="reasoning"] { background: var(--warning-surface); color: var(--warning-text); }.activity-card summary > span:nth-child(2) { min-width: 0; }.activity-card strong,.activity-card small { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }.activity-card strong { font-size: 11px; text-transform: capitalize; }.activity-card small { margin-top: 2px; color: var(--text-subtle); font-size: 10px; }.activity-card summary i { width: 7px; height: 7px; border-radius: 50%; background: var(--success-500); }.activity-card summary i[data-status="running"] { background: var(--brand-500); animation: signal 1.2s ease infinite; }.activity-card summary i[data-status="failed"] { background: #c44242; }.activity-card pre { max-height: 180px; overflow: auto; margin: 0; border-top: 1px solid #2b3731; padding: 10px; background: #121916; color: #aebbb3; font: 12px/1.55 "SFMono-Regular",Consolas,monospace; white-space: pre-wrap; word-break: break-word; }.quiet-pulse { display: flex; align-items: center; gap: 10px; padding: 12px; }.quiet-pulse > span { width: 22px; height: 22px; border: 2px solid var(--border); border-top-color: var(--brand-500); border-radius: 50%; animation: spin .9s linear infinite; }.quiet-pulse p { margin: 0; }.quiet-pulse strong,.quiet-pulse small { display: block; }.quiet-pulse strong { font-size: 11px; }.quiet-pulse small { margin-top: 2px; color: var(--text-subtle); font-size: 10px; }
+  .transcript { min-height: 0; overflow: auto; overscroll-behavior: contain; }.transcript-column { width: min(820px,calc(100% - 40px)); margin: 0 auto; padding: 30px 0 42px; }.turn + .turn { margin-top: 30px; border-top: 1px solid var(--border-soft); padding-top: 30px; }.message { position: relative; }.message header { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 8px; }.message header span { font-size: 12px; font-weight: 800; letter-spacing: .035em; }.message time { color: var(--text-subtle); font-size: 11px; }.user-message { max-width: 76%; margin-left: auto; border: 1px solid var(--brand-200); border-radius: 14px 14px 4px 14px; padding: 12px 14px; background: var(--active-surface); }.user-message header span { color: var(--active-text); }.user-message p { margin: 0; color: var(--text); font-size: 13px; line-height: 1.58; white-space: pre-wrap; word-break: break-word; }.message-attachments { display: flex; flex-wrap: wrap; gap: 7px; margin-top: 10px; }.message-attachments code { border: 1px solid var(--brand-200); border-radius: var(--radius-full); padding: 4px 7px; background: var(--surface); color: var(--active-text); font-size: 11px; }.message-image { width: min(240px,100%); overflow: hidden; margin: 0; border: 1px solid var(--brand-200); border-radius: var(--radius); background: var(--surface); }.message-image img { display: block; width: 100%; max-height: 220px; object-fit: contain; background: var(--surface-soft); }.message-image figcaption { display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 6px 8px; }.message-image figcaption span { overflow: hidden; font-size: 10px; font-weight: 700; text-overflow: ellipsis; white-space: nowrap; }.message-image figcaption small { flex: 0 0 auto; color: var(--text-subtle); font-size: 9px; }.retry-note { display: block; margin-top: 7px; color: var(--text-subtle); font-size: 11px; }.assistant-message { margin-top: 18px; }.assistant-message > header { border-bottom: 1px solid var(--border-soft); padding-bottom: 8px; }.assistant-message > header span { display: flex; align-items: center; gap: 7px; }.assistant-message > header span i { width: 8px; height: 8px; border-radius: 2px; background: var(--brand-500); transform: rotate(45deg); }.assistant-message > header div { display: flex; align-items: center; gap: 8px; }.assistant-message > header button { border: 1px solid var(--border); border-radius: var(--radius-sm); padding: 3px 6px; background: var(--surface); color: var(--text-subtle); font-size: 10px; }.turn-timeline { display: grid; gap: 14px; }.assistant-segment { min-width: 0; }.markdown-message { color: var(--text-muted); font-size: 13px; line-height: 1.72; }.markdown-message.streaming::after { display: inline-block; width: 6px; height: 13px; margin-left: 3px; background: var(--brand-500); content: ""; vertical-align: -2px; animation: blink .8s steps(2,end) infinite; }.markdown-message :global(p) { margin: 0 0 11px; }.assistant-segment :global(*:last-child) { margin-bottom: 0; }.markdown-message :global(h1),.markdown-message :global(h2),.markdown-message :global(h3) { margin: 18px 0 8px; color: var(--text); line-height: 1.35; }.markdown-message :global(h1) { font-size: 20px; }.markdown-message :global(h2) { font-size: 17px; }.markdown-message :global(h3) { font-size: 14px; }.markdown-message :global(ul),.markdown-message :global(ol) { padding-left: 21px; }.markdown-message :global(code) { border: 1px solid var(--border); border-radius: var(--radius-xs); padding: 1px 4px; background: var(--surface-soft); color: var(--text); font: 13px/1.55 "SFMono-Regular",Consolas,monospace; }.markdown-message :global(pre) { overflow: auto; border: 1px solid #303a35; border-radius: var(--radius); padding: 12px; background: #131a17; color: #c8d5cd; }.markdown-message :global(pre code) { border: 0; padding: 0; background: transparent; color: inherit; }.markdown-message :global(a) { color: var(--active-text); pointer-events: none; text-decoration: underline; }.markdown-message :global(img) { display: none; }.markdown-message :global(table) { width: 100%; border-collapse: collapse; }.markdown-message :global(th),.markdown-message :global(td) { border: 1px solid var(--border); padding: 6px 8px; text-align: left; }.markdown-message :global(.mermaid) { overflow: auto; }
+  .timeline-activity { display: grid; min-width: 0; min-height: 34px; grid-template-columns: 22px minmax(0,1fr) 7px; align-items: center; gap: 9px; padding: 1px 4px; color: var(--text-subtle); }.timeline-activity-icon { display: grid; width: 22px; height: 22px; place-items: center; color: var(--text-subtle); }.timeline-activity-icon svg { width: 18px; height: 18px; fill: none; stroke: currentColor; stroke-linecap: round; stroke-linejoin: round; stroke-width: 1.45; }.timeline-activity[data-kind="reasoning"] .timeline-activity-icon { color: var(--warning-text); }.timeline-activity-copy { display: flex; min-width: 0; align-items: baseline; gap: 8px; }.timeline-activity-copy strong { overflow: hidden; color: var(--text-muted); font-size: 12px; font-weight: 560; line-height: 1.4; text-overflow: ellipsis; white-space: nowrap; }.timeline-activity-copy small { flex: 0 0 auto; color: var(--text-subtle); font: 9px/1.2 "SFMono-Regular",Consolas,monospace; letter-spacing: .04em; text-transform: uppercase; }.timeline-activity > i { width: 6px; height: 6px; border-radius: 50%; background: var(--success-500); }.timeline-activity[data-status="running"] > i { background: var(--brand-500); animation: signal 1.2s ease infinite; }.timeline-activity[data-status="failed"] > i { background: #c44242; }.quiet-pulse.inline { display: grid; min-height: 34px; grid-template-columns: 22px minmax(0,1fr); align-items: center; gap: 9px; padding: 1px 4px; }.quiet-pulse.inline > span { width: 17px; height: 17px; border: 1.5px solid var(--border); border-top-color: var(--brand-500); border-radius: 50%; animation: spin .9s linear infinite; }.quiet-pulse.inline p { margin: 0; }.quiet-pulse.inline strong,.quiet-pulse.inline small { display: inline; font-size: 11px; }.quiet-pulse.inline strong { color: var(--text-muted); }.quiet-pulse.inline small { margin-left: 6px; color: var(--text-subtle); }
   .turn-terminal { display: grid; grid-template-columns: 28px minmax(0,1fr) auto; align-items: center; gap: 9px; margin-top: 13px; border: 1px solid color-mix(in srgb,#c44242 35%,var(--border)); border-radius: var(--radius); padding: 9px; background: color-mix(in srgb,#c44242 7%,var(--surface)); }.turn-terminal[data-status="interrupted"] { border-color: color-mix(in srgb,var(--warning-500) 45%,var(--border)); background: var(--warning-surface); }.turn-terminal > span { display: grid; width: 26px; height: 26px; place-items: center; border-radius: var(--radius-sm); background: #c44242; color: white; font-weight: 850; }.turn-terminal[data-status="interrupted"] > span { background: var(--warning-500); }.turn-terminal p { margin: 0; }.turn-terminal strong,.turn-terminal small { display: block; }.turn-terminal strong { font-size: 12px; }.turn-terminal small { margin-top: 2px; color: var(--text-muted); font-size: 11px; }.turn-terminal button { border: 1px solid var(--border); border-radius: var(--radius-sm); padding: 6px 8px; background: var(--surface); color: var(--text); font-size: 11px; font-weight: 750; }
   .conversation-empty,.no-session { display: grid; justify-items: center; align-content: center; text-align: center; }.conversation-empty { min-height: 100%; padding: 28px; }.conversation-empty > p:first-of-type,.no-session > p:first-of-type { margin: 16px 0 3px; color: var(--active-text); font-size: 11px; font-weight: 800; letter-spacing: .09em; text-transform: uppercase; }.conversation-empty h3,.no-session h3 { margin: 0; font-size: 21px; letter-spacing: -.02em; }.conversation-empty > p:nth-of-type(2),.no-session > p:nth-of-type(2) { max-width: 490px; margin: 8px 0 18px; color: var(--text-muted); font-size: 13px; line-height: 1.6; }.atlas-orbit { position: relative; width: 54px; height: 54px; border: 1px solid var(--brand-200); border-radius: 50%; background: var(--active-surface); }.atlas-orbit::before,.atlas-orbit::after { position: absolute; inset: 13px; border: 1px solid var(--brand-300); border-radius: 50%; content: ""; }.atlas-orbit::after { inset: 25px; border: 0; background: var(--brand-600); }.atlas-orbit span { position: absolute; width: 6px; height: 6px; border-radius: 2px; background: var(--brand-500); transform: rotate(45deg); }.atlas-orbit span:nth-child(1) { top: 5px; left: 24px; }.atlas-orbit span:nth-child(2) { top: 24px; right: 5px; }.atlas-orbit span:nth-child(3) { bottom: 5px; left: 24px; }.atlas-orbit span:nth-child(4) { top: 24px; left: 5px; }.suggestions { display: grid; width: min(520px,100%); gap: 6px; }.suggestions button { display: flex; min-height: 38px; align-items: center; justify-content: space-between; border: 1px solid var(--border); border-radius: var(--radius); padding: 0 11px; background: var(--surface); color: var(--text-muted); font-size: 12px; text-align: left; }.suggestions button:hover { border-color: var(--brand-200); color: var(--active-text); transform: translateX(2px); }.suggestions span { color: var(--brand-500); }
   .composer-zone { position: relative; border-top: 1px solid var(--border); padding: 10px 18px 8px; background: color-mix(in srgb,var(--surface) 94%,transparent); backdrop-filter: blur(12px); }
@@ -1141,7 +1327,7 @@
   @keyframes chat-in { from { opacity: .4; transform: translateY(7px) scale(.997); } } @keyframes mention-in { from { opacity: 0; transform: translateY(6px) scale(.99); } } @keyframes signal { 50% { opacity: .3; box-shadow: 0 0 0 5px color-mix(in srgb,var(--brand-500) 12%,transparent); } } @keyframes spin { to { transform: rotate(360deg); } } @keyframes blink { 50% { opacity: .15; } } @keyframes shimmer { to { background-position: -200% 0; } }
   @media (max-width: 1080px) { .read-only-chip { display: none; }.chat-header { grid-template-columns: 40px minmax(170px,1fr) minmax(150px,auto) auto 36px; } }
   @media (max-width: 980px) { .chat-grid { grid-template-columns: 210px minmax(0,1fr); }.transcript-column { width: calc(100% - 28px); }.provider-chip { max-width: 190px; } }
-  @media (max-width: 767.98px) { .chat-layer { inset: 0; padding: 0; }.chat-shell { border: 0; border-radius: 0; }.chat-grid { grid-template-columns: 160px minmax(0,1fr); }.session-select { padding-right: 8px; }.session-actions { display: none; }.provider-chip { display: none; }.chat-header { grid-template-columns: 40px minmax(0,1fr) auto 36px; }.explorer-chip { padding-inline: 8px; font-size: 0; }.explorer-chip svg { width: 16px; height: 16px; }.conversation-meta { display: none; }.user-message { max-width: 90%; }.composer-zone { padding-inline: 10px; } }
-  @media (max-width: 560px) { .chat-grid { display: block; }.session-rail { display: none; }.conversation { height: 100%; }.chat-title h2 span { display: none; }.transcript-column { width: calc(100% - 20px); padding-top: 18px; }.composer-hint span:last-child,.composer-actions > span,.attachment-entry > svg,.attachment-entry input { display: none; }.attachment-entry .mention-trigger span,.attachment-entry .image-trigger span { display: none; }.agent-activity { margin-left: 0; }.mention-options { max-height: 260px; }.mention-kind { display: none; } }
-  @media (prefers-reduced-motion: reduce) { .chat-layer,.mention-menu,.session-state,.agent-activity > header > span,.quiet-pulse > span,.markdown-message.streaming::after { animation: none; } }
+  @media (max-width: 767.98px) { .chat-layer { inset: 0 0 var(--chat-terminal-inset,0px); padding: 0; }.chat-shell { border: 0; border-radius: 0; }.chat-grid { grid-template-columns: 160px minmax(0,1fr); }.session-select { padding-right: 8px; }.session-actions { display: none; }.provider-chip,.read-only-chip { display: none; }.chat-header { grid-template-columns: 40px minmax(0,1fr) 34px 34px 36px; }.explorer-chip { width: 34px; padding: 0; justify-content: center; font-size: 0; }.explorer-chip svg { width: 16px; height: 16px; }.conversation-meta { display: none; }.user-message { max-width: 90%; }.composer-zone { padding-inline: 10px; } }
+  @media (max-width: 560px) { .chat-grid { display: block; }.session-rail { display: none; }.conversation { height: 100%; }.chat-title h2 span { display: none; }.transcript-column { width: calc(100% - 20px); padding-top: 18px; }.composer-hint span:last-child,.composer-actions > span,.attachment-entry > svg,.attachment-entry input { display: none; }.attachment-entry .mention-trigger span,.attachment-entry .image-trigger span { display: none; }.timeline-activity-copy small { display: none; }.mention-options { max-height: 260px; }.mention-kind { display: none; } }
+  @media (prefers-reduced-motion: reduce) { .chat-layer,.mention-menu,.session-state,.timeline-activity > i,.quiet-pulse > span,.markdown-message.streaming::after { animation: none; } }
 </style>

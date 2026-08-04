@@ -227,6 +227,71 @@ test("migrates version one command output into lazy storage", async (context) =>
   migrated.close();
 });
 
+test("scrubs legacy chat command output and rejects new output content", async (context) => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "phaseatlas-chat-output-migration-"));
+  context.after(() => rm(root, { recursive: true, force: true }));
+  const databasePath = path.join(root, "operations.sqlite");
+  const timestamp = "2026-08-04T00:00:00.000Z";
+  const store = new CheckoutOperationalStore(databasePath, CHECKOUT_A);
+  store.createChatSession({
+    sessionId: "session-legacy-output",
+    checkoutId: CHECKOUT_A,
+    runnerId: "codex-cli",
+    model: "gpt-fixture",
+    title: "Legacy output",
+    state: "open",
+    createdAt: timestamp,
+    updatedAt: timestamp,
+  });
+  store.createChatTurn({
+    turn: {
+      turnId: "turn-legacy-output",
+      sessionId: "session-legacy-output",
+      status: "starting",
+      runnerId: "codex-cli",
+      model: "gpt-fixture",
+      userMessageId: "message-legacy-output",
+      createdAt: timestamp,
+      updatedAt: timestamp,
+    },
+    userMessage: {
+      messageId: "message-legacy-output",
+      sessionId: "session-legacy-output",
+      turnId: "turn-legacy-output",
+      role: "user",
+      content: "Inspect output.",
+      attachments: [],
+      sequence: 1,
+      createdAt: timestamp,
+    },
+  });
+  store.close();
+
+  const legacy = new DatabaseSync(databasePath);
+  legacy.prepare(`
+    INSERT INTO chat_turn_events (turn_id, sequence, event_type, timestamp, payload_json)
+    VALUES (?, 1, 'chat.tool.output', ?, ?)
+  `).run("turn-legacy-output", timestamp, JSON.stringify({ toolCallId: "command-1", text: "legacy output" }));
+  legacy.prepare("UPDATE store_meta SET value = '2' WHERE key = 'schema_version'").run();
+  legacy.close();
+
+  const migrated = new CheckoutOperationalStore(databasePath, CHECKOUT_A);
+  assert.deepEqual(migrated.listChatEventPage("turn-legacy-output").events[0]?.payload, { hidden: true });
+  assert.throws(() => migrated.appendChatEvent({
+    turnId: "turn-legacy-output",
+    type: "chat.tool.output",
+    payload: { toolCallId: "command-1", text: "new output" },
+  }), /not accepted/);
+  migrated.close();
+
+  const verified = new DatabaseSync(databasePath);
+  const row = verified.prepare("SELECT payload_json FROM chat_turn_events WHERE turn_id = ? AND sequence = 1")
+    .get("turn-legacy-output") as { payload_json: string };
+  assert.deepEqual(JSON.parse(row.payload_json), { hidden: true, outputBytes: 13 });
+  assert.equal(row.payload_json.includes("legacy output"), false);
+  verified.close();
+});
+
 test("persists agent specs, results, revalidation, and retry linkage", async (context) => {
   const root = await mkdtemp(path.join(os.tmpdir(), "phaseatlas-agent-result-"));
   context.after(() => rm(root, { recursive: true, force: true }));

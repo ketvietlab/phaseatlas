@@ -188,6 +188,7 @@
   $: explorerShortcutLabel = platform === "darwin" ? "⌘⇧E" : "Ctrl+Shift+E";
   $: terminalShortcutLabel = platform === "darwin" ? "⌘`" : "Ctrl+`";
   $: chatShortcutLabel = platform === "darwin" ? "⌥L" : "Alt+L";
+  $: chatActive = chatOpen && !editorOpen;
   $: if (workbenchStateReady && selectedCheckoutId) {
     persistWorkbenchState(selectedCheckoutId, {
       chatOpen,
@@ -1412,7 +1413,7 @@
     }
     const chatShortcut = event.altKey && !event.metaKey && !event.ctrlKey && !event.shiftKey && event.key.toLowerCase() === "l";
     if (chatShortcut && !event.repeat && selectedCheckoutId) {
-      if (chatOpen || (!executionOpen && !plannerOpen && !providerSettingsOpen && !editorOpen && !contentPanelTask)) {
+      if (!editorOpen && (chatOpen || (!executionOpen && !plannerOpen && !providerSettingsOpen && !contentPanelTask))) {
         event.preventDefault();
         chatOpen = !chatOpen;
       }
@@ -1432,7 +1433,7 @@
       if (
         !event.repeat &&
         selectedCheckoutId &&
-        !chatOpen &&
+        !chatActive &&
         !executionOpen &&
         !plannerOpen &&
         !providerSettingsOpen &&
@@ -1443,12 +1444,14 @@
     const terminalShortcut = modifier && !event.shiftKey && !event.altKey && (
       event.code === "Backquote" || event.key.toLowerCase() === "j"
     );
-    if (terminalShortcut && !event.repeat && !chatOpen && !executionOpen && !plannerOpen && !providerSettingsOpen && !contentPanelTask) {
+    if (terminalShortcut && !event.repeat && selectedCheckoutId) {
       event.preventDefault();
       void toggleTerminal();
       return;
     }
     if (event.key !== "Escape") return;
+    if (terminalOpen && terminalPanel?.hasFocus()) return;
+    if (editorOpen) return;
     if (chatOpen) chatOpen = false;
     else if (executionConfirmAction) {
       executionConfirmAction = null;
@@ -1537,11 +1540,11 @@
       </div>
       <div class="command-actions">
         <button
-          class:active={chatOpen}
+          class:active={chatActive}
           class="terminal-toggle"
           type="button"
-          aria-label={`${chatOpen ? "Close" : "Open"} repository agent chat`}
-          aria-pressed={chatOpen}
+          aria-label={`${chatActive ? "Close" : "Open"} repository agent chat`}
+          aria-pressed={chatActive}
           title={`Toggle agent chat (${chatShortcutLabel})`}
           onclick={() => chatOpen = !chatOpen}
           disabled={!selectedCheckoutId}
@@ -1899,7 +1902,16 @@
 
 {#if executionOpen}
   <button class="execution-backdrop" type="button" aria-label="Close execution workbench" onclick={closeExecutionWorkbench}></button>
-  <div class="execution-panel" role="dialog" aria-modal="true" aria-labelledby="execution-title" tabindex="-1" bind:this={executionPanelElement}>
+  <div
+    class:terminal-docked={terminalOpen && !terminalMaximized}
+    class="execution-panel"
+    role="dialog"
+    aria-modal="true"
+    aria-labelledby="execution-title"
+    tabindex="-1"
+    bind:this={executionPanelElement}
+    style={`--persistent-terminal-height: ${terminalHeight}px`}
+  >
     <header class="execution-header">
       <div class="execution-header-mark" aria-hidden="true"><svg class="icon" viewBox="0 0 24 24"><path d="M5 4h14v16H5zM8 8h8M8 12h5M8 16h7"/><path d="m15 11 4 2.5-4 2.5z"/></svg></div>
       <div>
@@ -2350,11 +2362,15 @@
       {runners}
       runnerId={plannerRunnerId}
       modelId={plannerModel}
+      active={!editorOpen}
+      {terminalOpen}
+      {terminalHeight}
+      {terminalShortcutLabel}
       onClose={() => chatOpen = false}
       onOpenExplorer={() => {
-        chatOpen = false;
         openRepositoryEditor();
       }}
+      onToggleTerminal={() => void toggleTerminal()}
       onCreateTaskProposal={(request) => {
         chatOpen = false;
         plannerRequest = request;
@@ -2386,23 +2402,6 @@
   />
 {/if}
 
-{#if terminalOpen && !editorOpen && selectedCheckoutId && selectedRepository}
-  {#key selectedCheckoutId}
-    <TerminalPanel
-      bind:this={terminalPanel}
-      checkoutId={selectedCheckoutId}
-      repositoryName={selectedRepository.name}
-      theme={theme === "dark" ? "dark" : "light"}
-      height={terminalHeight}
-      maximized={terminalMaximized}
-      shortcutLabel={terminalShortcutLabel}
-      onClose={() => void closeTerminal(false)}
-      onHeightChange={updateTerminalHeight}
-      onToggleMaximized={() => terminalMaximized = !terminalMaximized}
-    />
-  {/key}
-{/if}
-
 {#if editorOpen && selectedCheckoutId}
   <RepositoryWorkbench
     bind:this={repositoryWorkbench}
@@ -2416,23 +2415,23 @@
     onClose={() => editorOpen = false}
     onSaved={handleEditorSaved}
     onToggleTerminal={() => void toggleTerminal()}
-  >
-    {#if terminalOpen && selectedRepository}
-      {#key selectedCheckoutId}
-        <TerminalPanel
-          bind:this={terminalPanel}
-          checkoutId={selectedCheckoutId}
-          repositoryName={selectedRepository.name}
-          theme={theme === "dark" ? "dark" : "light"}
-          height={terminalHeight}
-          maximized={terminalMaximized}
-          docked={true}
-          shortcutLabel={terminalShortcutLabel}
-          onClose={() => void closeTerminal()}
-          onHeightChange={updateTerminalHeight}
-          onToggleMaximized={() => terminalMaximized = !terminalMaximized}
-        />
-      {/key}
-    {/if}
-  </RepositoryWorkbench>
+  ></RepositoryWorkbench>
+{/if}
+
+{#if terminalOpen && selectedCheckoutId && selectedRepository}
+  {#key selectedCheckoutId}
+    <TerminalPanel
+      bind:this={terminalPanel}
+      checkoutId={selectedCheckoutId}
+      repositoryName={selectedRepository.name}
+      theme={theme === "dark" ? "dark" : "light"}
+      height={terminalHeight}
+      maximized={terminalMaximized}
+      repositoryWorkbench={editorOpen}
+      shortcutLabel={terminalShortcutLabel}
+      onClose={() => void closeTerminal(editorOpen)}
+      onHeightChange={updateTerminalHeight}
+      onToggleMaximized={() => terminalMaximized = !terminalMaximized}
+    />
+  {/key}
 {/if}

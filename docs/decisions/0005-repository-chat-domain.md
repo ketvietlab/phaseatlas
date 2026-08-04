@@ -25,10 +25,16 @@ Provider continuation state is private adapter state. This first implementation 
 provider invocations with a bounded PhaseAtlas transcript, so restart and provider switching behavior
 do not depend on an opaque provider session identifier.
 
+Provider command and repository-tool output is also private adapter state. Adapters count output
+bytes for lightweight activity metadata but do not accumulate, publish, or persist the content.
+Existing persisted chat tool output is scrubbed during operational-store migration, and no renderer
+API can retrieve it. Assistant text and bounded reasoning summaries remain incrementally replayable.
+
 ## Consequences
 
 - Multiple conversations can survive application restart independently of workspace and task state.
 - Renderer code can consume one event vocabulary for supported providers.
+- Large command output cannot grow renderer memory, IPC traffic, or chat replay payloads.
 - Provider adapters validate and translate image attachments without exposing a generic local-file
   or arbitrary provider-payload channel to the renderer.
 - Task execution remains strict: a chat response cannot be mistaken for a validated `AgentRunResult`.

@@ -774,14 +774,20 @@ export interface ChatEditRecoveryInput {
 export type RepositoryChatAdapterEvent =
   | { type: "chat.turn.status"; status: "running" }
   | { type: "chat.assistant.delta"; text: string }
-  | { type: "chat.reasoning"; summary: string }
+  | { type: "chat.reasoning"; itemId?: string; summary: string; status?: "running" | "completed" }
   | { type: "chat.tool.started"; toolCallId: string; tool: string; summary: string }
-  | { type: "chat.tool.output"; toolCallId: string; text: string }
-  | { type: "chat.tool.completed"; toolCallId: string; status: "completed" | "failed" }
+  | {
+      type: "chat.tool.completed";
+      toolCallId: string;
+      status: "completed" | "failed";
+      outputBytes?: number;
+      outputHidden?: true;
+    }
   | { type: "chat.file.reference"; path: string }
   | { type: "chat.usage"; inputTokens?: number; outputTokens?: number };
 
 export type RepositoryChatEventType = RepositoryChatAdapterEvent["type"]
+  | "chat.tool.output"
   | "chat.turn.completed"
   | "chat.turn.failed"
   | "chat.turn.cancelled"

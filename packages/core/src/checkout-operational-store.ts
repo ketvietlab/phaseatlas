@@ -23,7 +23,7 @@ import type {
   ValidatedAgentRunResult,
 } from "@phaseatlas/contracts";
 
-const SCHEMA_VERSION = "2";
+const SCHEMA_VERSION = "3";
 const RUN_KINDS = new Set<PersistedRunKind>(["planning", "task_content", "agent"]);
 const RUN_STATUSES = new Set<PersistedRunStatus>(["starting", "running", "completed", "failed", "cancelled", "interrupted"]);
 const TERMINAL_RUN_STATUSES = new Set<PersistedRunStatus>(["completed", "failed", "cancelled", "interrupted"]);
@@ -649,6 +649,9 @@ export class CheckoutOperationalStore {
     if (!CHAT_EVENT_TYPES.has(input.type) || input.type.startsWith("chat.turn.") && input.type !== "chat.turn.status") {
       throw new Error("Chat adapter event type is invalid.");
     }
+    if (input.type === "chat.tool.output") {
+      throw new Error("Chat command output content is not accepted by the operational store.");
+    }
     const timestamp = input.timestamp ?? new Date().toISOString();
     this.database.exec("BEGIN IMMEDIATE");
     try {
@@ -678,7 +681,9 @@ export class CheckoutOperationalStore {
     if (!Number.isInteger(limit) || limit < 1 || limit > 500) throw new Error("limit must be between 1 and 500.");
     this.getChatTurn(turnId);
     const rows = this.database.prepare(`
-      SELECT * FROM chat_turn_events WHERE turn_id = ? AND sequence > ? ORDER BY sequence LIMIT ?
+      SELECT turn_id, sequence, event_type, timestamp,
+        CASE WHEN event_type = 'chat.tool.output' THEN '{"hidden":true}' ELSE payload_json END AS payload_json
+      FROM chat_turn_events WHERE turn_id = ? AND sequence > ? ORDER BY sequence LIMIT ?
     `).all(turnId, afterSequence, limit + 1) as Array<Record<string, unknown>>;
     const hasMore = rows.length > limit;
     const events = rows.slice(0, limit).map((row) => this.chatEventFromRow(row));
@@ -1033,7 +1038,10 @@ export class CheckoutOperationalStore {
     `);
     const schema = this.database.prepare("SELECT value FROM store_meta WHERE key = 'schema_version'").get() as { value?: string } | undefined;
     if (existingDatabase && !schema?.value) this.failInitialization("Checkout store schema metadata is missing.");
-    if (schema?.value === "1") this.migrateVersionOne();
+    if (schema?.value === "1") {
+      this.migrateVersionOne();
+      this.migrateVersionTwo();
+    } else if (schema?.value === "2") this.migrateVersionTwo();
     else if (schema?.value && schema.value !== SCHEMA_VERSION) {
       this.failInitialization(`Unsupported checkout store schema version ${schema.value}.`);
     }
@@ -1080,6 +1088,30 @@ export class CheckoutOperationalStore {
           AND json_extract(payload_json, '$.status') = 'cancelled';
 
         UPDATE store_meta SET value = '2' WHERE key = 'schema_version';
+      `);
+      this.database.exec("COMMIT");
+    } catch (error) {
+      this.database.exec("ROLLBACK");
+      throw error;
+    }
+  }
+
+  private migrateVersionTwo(): void {
+    this.database.exec("BEGIN IMMEDIATE");
+    try {
+      this.database.exec(`
+        UPDATE chat_turn_events
+        SET payload_json = json_object(
+          'hidden', json('true'),
+          'outputBytes', CASE
+            WHEN json_type(payload_json, '$.text') = 'text'
+            THEN length(CAST(json_extract(payload_json, '$.text') AS BLOB))
+            ELSE 0
+          END
+        )
+        WHERE event_type = 'chat.tool.output';
+
+        UPDATE store_meta SET value = '3' WHERE key = 'schema_version';
       `);
       this.database.exec("COMMIT");
     } catch (error) {
