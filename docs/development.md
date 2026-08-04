@@ -92,7 +92,8 @@ session state and durable events.
 Edit mode uses an application-wide access preference shared by every repository. `Ask for approval`
 shows a prepared request before the agent starts; `Full Access` starts it immediately. Both modes accept
 repository paths and image attachments, run in an isolated worktree, block network access, and require
-review before changes reach the canonical checkout.
+review before changes reach the canonical checkout. Edit preparation snapshots the recent session
+transcript, so follow-up instructions such as “implement that” retain the preceding Ask-mode context.
 
 The review must list Git-derived files and a patch while the canonical checkout remains unchanged. Test
 Accept only with a clean, unchanged checkout; test Discard and Retain separately. After Retain, restart the

@@ -7,9 +7,11 @@ authority.
 ## Lifecycle
 
 1. `chat.edit.prepare` validates the open chat session, provider-discovered model, application-level
-   access mode, attachments, current checkout identity, and base revision. It returns a confirmation
-   digest and does not allocate a worktree or start a provider. `ask_for_approval` displays the prepared
-   request before start; `full_access` lets the renderer start it immediately.
+   access mode, attachments, current checkout identity, and base revision. It snapshots a bounded window
+   of the session transcript so follow-up requests retain their Ask-mode context across reload. Recent
+   safe attachments are inherited within the existing attachment limits. It returns a confirmation digest
+   and does not allocate a worktree or start a provider. `ask_for_approval` displays the prepared request
+   before start; `full_access` lets the renderer start it immediately.
 2. `chat.edit.start` accepts only the prepared edit ID and exact digest. It revalidates the base and
    provider catalog, then allocates a PhaseAtlas-owned worktree and invokes the provider there.
 3. PhaseAtlas persists normalized activity and derives changed files and the bounded patch from Git.
@@ -33,6 +35,8 @@ either action.
   by the edit API.
 - Repository path references and user-supplied images are available in Edit mode under the same bounded
   attachment policy as Ask mode.
+- The current edit request has final authority over the captured chronological conversation. Assistant
+  messages and attachment contents are context, not higher-priority instructions.
 - The renderer receives bounded patches and public normalized events, never provider credentials or raw
   private runtime paths.
 - Chat cannot publish YAML, change task state, promote evidence, or auto-accept a diff.
