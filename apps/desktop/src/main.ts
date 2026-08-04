@@ -84,6 +84,22 @@ function createWindow(): BrowserWindow {
       : navigationUrl.startsWith("file://");
     if (!internalNavigation) event.preventDefault();
   });
+  window.webContents.on("before-input-event", (event, input) => {
+    const closeModifier = process.platform === "darwin"
+      ? input.meta && !input.control
+      : input.control && !input.meta;
+    if (
+      input.key.toLowerCase() !== "w" ||
+      !closeModifier ||
+      input.alt ||
+      input.shift
+    ) return;
+
+    event.preventDefault();
+    if (input.type === "keyDown" && !input.isAutoRepeat) {
+      window.webContents.send("phaseatlas:shortcut:close-surface");
+    }
+  });
   window.once("ready-to-show", () => window.show());
   const webContentsId = window.webContents.id;
   window.webContents.once("destroyed", () => repositories.releaseViewsForWebContents(webContentsId));
@@ -166,6 +182,9 @@ function registerIpc(): void {
   });
   ipcMain.handle("phaseatlas:agent-runs:events", (_event, checkoutId: string, runId: string, afterSequence = 0, limit = 200) => {
     return repositories.listRunEventPage(checkoutId, runId, afterSequence, limit);
+  });
+  ipcMain.handle("phaseatlas:agent-runs:command-output", (_event, checkoutId: string, runId: string, commandId: string, offset = 0, limit = 20_000) => {
+    return repositories.agentRunCommandOutput(checkoutId, runId, commandId, offset, limit);
   });
   ipcMain.handle("phaseatlas:agent-runs:result", (_event, checkoutId: string, runId: string) => {
     return repositories.agentRunResult(checkoutId, runId);

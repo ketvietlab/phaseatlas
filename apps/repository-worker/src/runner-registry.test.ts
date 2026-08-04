@@ -231,3 +231,18 @@ test("cancellation waits for provider exit and force-terminates an unresponsive 
   assert.ok(Date.now() - startedAt >= 60, "cancellation must wait for confirmed force termination");
   assert.equal(outputAfterAbort, "");
 });
+
+test("bounds retained provider diagnostics while streaming complete output", async () => {
+  const streamed: string[] = [];
+  const marker = "provider-tail-marker";
+  const result = await runChildProcess({
+    executable: process.execPath,
+    args: ["-e", `process.stdout.write("x".repeat(100000) + "${marker}")`],
+    cwd: process.cwd(),
+    signal: new AbortController().signal,
+    onStdout: (chunk) => streamed.push(chunk),
+  });
+  assert.ok(streamed.join("").length > 100_000);
+  assert.ok(result.stdout.length <= 64 * 1024);
+  assert.ok(result.stdout.endsWith(marker));
+});

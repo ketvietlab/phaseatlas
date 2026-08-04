@@ -52,6 +52,14 @@ const api: PhaseAtlasDesktopApi = {
       afterSequence,
       limit,
     ),
+    commandOutput: (checkoutId, runId, commandId, offset = 0, limit = 20_000) => ipcRenderer.invoke(
+      "phaseatlas:agent-runs:command-output",
+      checkoutId,
+      runId,
+      commandId,
+      offset,
+      limit,
+    ),
     result: (checkoutId, runId) => ipcRenderer.invoke("phaseatlas:agent-runs:result", checkoutId, runId),
     recover: (checkoutId, input) => ipcRenderer.invoke("phaseatlas:agent-runs:recover", checkoutId, input),
   },
@@ -107,6 +115,11 @@ const api: PhaseAtlasDesktopApi = {
   },
   runtime: {
     platform: () => ipcRenderer.invoke("phaseatlas:runtime:platform"),
+    onCloseSurface: (listener) => {
+      const handler = () => listener();
+      ipcRenderer.on("phaseatlas:shortcut:close-surface", handler);
+      return () => ipcRenderer.removeListener("phaseatlas:shortcut:close-surface", handler);
+    },
   },
 };
 

@@ -94,6 +94,12 @@
     monacoApi.editor.setTheme(editorThemeName(activeTheme));
   }
 
+  function applyEditorLanguage(activeLanguage: string) {
+    const model = editor?.getModel();
+    if (!monacoApi || !model || model.getLanguageId() === activeLanguage) return;
+    monacoApi.editor.setModelLanguage(model, activeLanguage);
+  }
+
   onMount(() => {
     let disposed = false;
     (window as typeof window & { MonacoEnvironment?: unknown }).MonacoEnvironment = {
@@ -145,6 +151,7 @@
     editor.setValue(value);
     applyingExternalValue = false;
   }
+  $: if (monacoApi && editor) applyEditorLanguage(language);
   $: if (monacoApi) applyEditorTheme(theme);
 </script>
 

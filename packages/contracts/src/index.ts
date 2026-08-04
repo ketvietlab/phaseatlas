@@ -568,6 +568,16 @@ export interface PersistedRunEventPage {
   hasMore: boolean;
 }
 
+export interface AgentRunCommandOutputPage {
+  runId: string;
+  commandId: string;
+  offset: number;
+  nextOffset: number;
+  totalCharacters: number;
+  hasMore: boolean;
+  text: string;
+}
+
 export type AgentEvent =
   | { sequence: number; type: "run.status"; status: AgentRunStatus }
   | { sequence: number; type: "agent.delta"; text: string }
@@ -799,6 +809,7 @@ export type RepositoryWorkerMethod =
   | "agent-run.prepare"
   | "agent-run.actions"
   | "agent-run.list"
+  | "agent-run.command-output"
   | "agent-run.start"
   | "agent-run.cancel"
   | "agent-run.result"
@@ -941,6 +952,7 @@ export interface PhaseAtlasDesktopApi {
     start(checkoutId: string, input: AgentRunStartInput): Promise<{ runId: string }>;
     cancel(checkoutId: string, runId: string): Promise<AgentRunCancellationResult>;
     events(checkoutId: string, runId: string, afterSequence?: number, limit?: number): Promise<PersistedRunEventPage>;
+    commandOutput(checkoutId: string, runId: string, commandId: string, offset?: number, limit?: number): Promise<AgentRunCommandOutputPage>;
     result(checkoutId: string, runId: string): Promise<AgentResultReview>;
     recover(checkoutId: string, input: AgentRunRecoveryInput): Promise<AgentRunRecoveryResult>;
   };
@@ -979,6 +991,7 @@ export interface PhaseAtlasDesktopApi {
   };
   runtime: {
     platform(): Promise<string>;
+    onCloseSurface(listener: () => void): () => void;
   };
 }
 

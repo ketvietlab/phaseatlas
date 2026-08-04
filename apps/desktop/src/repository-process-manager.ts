@@ -10,6 +10,7 @@ import {
   type AgentRunActionAvailability,
   type AgentRunActionQuery,
   type AgentRunCancellationResult,
+  type AgentRunCommandOutputPage,
   type AgentRunRecoveryInput,
   type AgentRunRecoveryResult,
   type AgentRunStartInput,
@@ -479,6 +480,21 @@ export class RepositoryProcessManager {
 
   async listRunEventPage(checkoutId: string, runId: string, afterSequence = 0, limit = 200): Promise<PersistedRunEventPage> {
     return (await this.ensureWorker(checkoutId)).call<PersistedRunEventPage>("run.events-page", { runId, afterSequence, limit });
+  }
+
+  async agentRunCommandOutput(
+    checkoutId: string,
+    runId: string,
+    commandId: string,
+    offset = 0,
+    limit = 20_000,
+  ): Promise<AgentRunCommandOutputPage> {
+    return (await this.ensureWorker(checkoutId)).call<AgentRunCommandOutputPage>("agent-run.command-output", {
+      runId,
+      commandId,
+      offset,
+      limit,
+    });
   }
 
   async agentRunActions(checkoutId: string, input: AgentRunActionQuery): Promise<AgentRunActionAvailability[]> {

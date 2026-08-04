@@ -28,9 +28,11 @@ That store contains normalized run records and ordered events. A checkout ID is 
 database metadata and must match when reopened. Different checkout IDs never share a store, including
 when their checkouts share the same configured repository ID.
 
-Both databases use explicit schema version `1`, WAL journaling, and full synchronous commits. An
-unknown schema version or identity mismatch fails closed. This release initializes the known schema;
-it does not provide a general migration mechanism and does not silently replace incompatible data.
+Both databases use WAL journaling and full synchronous commits. The catalog remains schema version
+`1`; checkout operational stores use schema version `2`. Version `1` checkout stores are migrated in
+one transaction: existing `command.output` text moves into the lazy command-output table and replay
+rows retain only bounded metadata. An unknown schema version or identity mismatch still fails closed,
+and incompatible data is never silently replaced.
 
 ## Security and authority boundary
 

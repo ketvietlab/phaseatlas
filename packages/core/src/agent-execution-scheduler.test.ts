@@ -128,6 +128,38 @@ test("refuses an adapter that cannot honor read-only execution", async (context)
   runtime.store.close();
 });
 
+test("terminalizes a read-only run when Git baseline capture fails", async (context) => {
+  const runtime = await fixture(context);
+  const scheduler = new AgentExecutionScheduler(
+    runtime.inspector,
+    runtime.store,
+    runtime.leases,
+    async () => { throw new Error("baseline unavailable"); },
+  );
+  let executed = false;
+  const adapter: AgentExecutionAdapter = {
+    supportedSandboxes: ["read-only"],
+    async execute() {
+      executed = true;
+      return successfulResult;
+    },
+  };
+  await assert.rejects(
+    scheduler.execute({ taskKey: "core/PHA-001", action: "review" }, adapter, new AbortController().signal),
+    /baseline unavailable/,
+  );
+  const run = runtime.store.listRuns()[0];
+  assert.ok(run);
+  assert.equal(run.status, "failed");
+  assert.equal(executed, false);
+  assert.deepEqual(runtime.store.listEvents(run.runId).map((event) => event.type), [
+    "agent.prepared",
+    "run.status",
+    "run.failed",
+  ]);
+  runtime.store.close();
+});
+
 test("releases a write lease when execution fails", async (context) => {
   const runtime = await fixture(context);
   const adapter: AgentExecutionAdapter = {
@@ -139,6 +171,21 @@ test("releases a write lease when execution fails", async (context) => {
   await assert.rejects(runtime.scheduler.execute({ taskKey: "core/PHA-001", action: "implement" }, adapter, new AbortController().signal), /adapter failed/);
   assert.equal(runtime.leases.list()[0]?.status, "released");
   assert.equal(runtime.store.listRuns()[0]?.status, "failed");
+  runtime.store.close();
+});
+
+test("releases a write lease when preparation fails after acquisition", async (context) => {
+  const runtime = await fixture(context);
+  const recordAgentSpec = runtime.store.recordAgentSpec.bind(runtime.store);
+  runtime.store.recordAgentSpec = () => { throw new Error("spec persistence failed"); };
+
+  await assert.rejects(
+    runtime.scheduler.prepare({ taskKey: "core/PHA-001", action: "implement" }),
+    /spec persistence failed/,
+  );
+  assert.equal(runtime.leases.list()[0]?.status, "released");
+  assert.equal(runtime.store.listRuns()[0]?.status, "failed");
+  runtime.store.recordAgentSpec = recordAgentSpec;
   runtime.store.close();
 });
 
@@ -156,6 +203,28 @@ test("does not duplicate a normalized adapter failure", async (context) => {
   assert.ok(run);
   assert.equal(runtime.store.listEvents(run.runId).filter((event) => event.type === "run.failed").length, 1);
   assert.equal(run.status, "failed");
+  runtime.store.close();
+});
+
+test("does not validate a result after the adapter terminalizes the run", async (context) => {
+  const runtime = await fixture(context);
+  const adapter: AgentExecutionAdapter = {
+    supportedSandboxes: ["read-only"],
+    async execute({ emit }) {
+      emit({ type: "run.failed", message: "Normalized provider failure." });
+      return successfulResult;
+    },
+  };
+
+  await assert.rejects(
+    runtime.scheduler.execute({ taskKey: "core/PHA-001", action: "review" }, adapter, new AbortController().signal),
+    /terminalized the run as failed/,
+  );
+  const run = runtime.store.listRuns()[0];
+  assert.ok(run);
+  assert.equal(run.status, "failed");
+  assert.equal(runtime.store.getAgentResult(run.runId), null);
+  assert.equal(runtime.store.listEvents(run.runId).filter((event) => event.type === "run.failed").length, 1);
   runtime.store.close();
 });
 
@@ -194,6 +263,36 @@ test("records one cancelled terminal state when cancellation races execution", a
   ).length, 1);
   assert.equal(observedEvents.filter((type) => type === "run.cancelled").length, 1);
   assert.equal(runtime.leases.list()[0]?.status, "released");
+  runtime.store.close();
+});
+
+test("normalizes adapter cancellation into a live run.cancelled event", async (context) => {
+  const runtime = await fixture(context);
+  const observedEvents: string[] = [];
+  const adapter: AgentExecutionAdapter = {
+    supportedSandboxes: ["workspace-write"],
+    async execute({ emit }) {
+      emit({ type: "run.status", status: "cancelled" });
+      throw new Error("provider cancelled");
+    },
+  };
+  await assert.rejects(runtime.scheduler.execute(
+    { taskKey: "core/PHA-001", action: "implement" },
+    adapter,
+    new AbortController().signal,
+    (event) => observedEvents.push(event.type),
+  ), /provider cancelled/);
+  const run = runtime.store.listRuns()[0];
+  assert.ok(run);
+  assert.equal(run.status, "cancelled");
+  assert.deepEqual(runtime.store.listEvents(run.runId).map((event) => event.type).filter((type) =>
+    ["agent.prepared", "run.status", "run.cancelled"].includes(type)
+  ), [
+    "agent.prepared",
+    "run.status",
+    "run.cancelled",
+  ]);
+  assert.equal(observedEvents.at(-1), "run.cancelled");
   runtime.store.close();
 });
 

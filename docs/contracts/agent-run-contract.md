@@ -40,9 +40,10 @@ unique `phaseatlas/...` branch, and unique worktree beneath the checkout's appli
 directory. Allocation is recorded in the checkout operational stream before Git worktree creation and
 becomes `active` only after creation succeeds.
 
-Normal success, failure, cancellation, or adapter rejection releases the exact registered worktree in
-a guaranteed cleanup path. Before removal, the manager revalidates checkout identity, managed-root
-containment, lease/path identity, and Git worktree registration. It never accepts a caller path.
+Preparation failure after allocation, normal success, execution failure, cancellation, or adapter
+rejection releases the exact registered worktree in a guaranteed cleanup path. Before removal, the
+manager revalidates checkout identity, managed-root containment, lease/path identity, and Git worktree
+registration. It never accepts a caller path.
 
 On startup, an `allocating`, `active`, or `releasing` lease is changed to `abandoned` and reported through durable
 lease events plus `lease.recovery`. Abandoned worktrees are retained for explicit recovery and are
@@ -65,6 +66,12 @@ run.failed
 
 The checkout operational store assigns the durable monotonically increasing sequence. Provider
 sequence values are not trusted as persistence authority.
+
+`command.output` text is persisted in `agent_command_outputs`, separate from the replay payload.
+Timeline replay exposes only the command ID and character count. The renderer must explicitly request
+a command and receives at most 50,000 characters per page; the workbench uses 20,000-character pages
+and replaces the visible page during navigation. Collapsing a command removes its output from renderer
+state and the DOM. Live events therefore cannot push raw command output across IPC.
 
 ## Provider and model discovery
 
@@ -121,6 +128,11 @@ Completion, cancellation, adapter failure, and startup recovery all compete thro
 compare-and-set transition. The winner establishes the terminal state; later terminal attempts are
 idempotent and provider output after terminalization is rejected. Only recognized lease audit events
 and result-revalidation records may be appended after terminal state.
+
+Task references are resolved and normalized before scheduling. A checkout permits at most one
+starting or active agent run for a canonical task, while different tasks may still execute in
+parallel. Once an adapter emits a terminal failure or cancellation, the scheduler cannot validate or
+persist a later success result from that adapter.
 
 ## Cursor replay
 

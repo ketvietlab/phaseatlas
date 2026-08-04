@@ -3,7 +3,13 @@ import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
+import { createRequire } from "node:module";
+import type { DatabaseSync as DatabaseSyncType } from "node:sqlite";
 import { CheckoutOperationalStore } from "./checkout-operational-store.js";
+
+const { DatabaseSync } = createRequire(import.meta.url)("node:" + "sqlite") as {
+  DatabaseSync: typeof DatabaseSyncType;
+};
 
 const CHECKOUT_A = "a".repeat(20);
 const CHECKOUT_B = "b".repeat(20);
@@ -153,6 +159,72 @@ test("paginates replay cursors without gaps or duplicates", async (context) => {
   assert.equal(third.hasMore, false);
   assert.equal(third.nextSequence, 7);
   store.close();
+});
+
+test("keeps command output out of replay payloads and reads bounded SQLite pages", async (context) => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "phaseatlas-command-output-"));
+  context.after(() => rm(root, { recursive: true, force: true }));
+  const store = new CheckoutOperationalStore(path.join(root, "operations.sqlite"), CHECKOUT_A);
+  store.recordRun({ runId: "run-command", kind: "agent", status: "running" });
+  store.appendEvent({ runId: "run-command", type: "command.started", payload: { commandId: "command-1", command: "pnpm test" } });
+  store.appendEvent({ runId: "run-command", type: "command.output", payload: { commandId: "command-1", text: "abc" } });
+  store.appendEvent({ runId: "run-command", type: "command.output", payload: { commandId: "command-1", text: "def" } });
+  store.appendEvent({ runId: "run-command", type: "command.completed", payload: { commandId: "command-1", exitCode: 0 } });
+
+  const outputEvents = store.listEvents("run-command").filter((event) => event.type === "command.output");
+  assert.deepEqual(outputEvents.map((event) => event.payload), [
+    { commandId: "command-1", characterCount: 3 },
+    { commandId: "command-1", characterCount: 3 },
+  ]);
+  const first = store.readAgentCommandOutput("run-command", "command-1", 0, 4);
+  const second = store.readAgentCommandOutput("run-command", "command-1", first.nextOffset, 4);
+  assert.deepEqual(first, {
+    runId: "run-command",
+    commandId: "command-1",
+    offset: 0,
+    nextOffset: 4,
+    totalCharacters: 6,
+    hasMore: true,
+    text: "abcd",
+  });
+  assert.equal(second.text, "ef");
+  assert.equal(second.hasMore, false);
+  assert.deepEqual(store.readAgentCommandOutput("run-command", "command-1", 99, 4), {
+    runId: "run-command",
+    commandId: "command-1",
+    offset: 6,
+    nextOffset: 6,
+    totalCharacters: 6,
+    hasMore: false,
+    text: "",
+  });
+  store.close();
+});
+
+test("migrates version one command output into lazy storage", async (context) => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "phaseatlas-command-migration-"));
+  context.after(() => rm(root, { recursive: true, force: true }));
+  const databasePath = path.join(root, "operations.sqlite");
+  const store = new CheckoutOperationalStore(databasePath, CHECKOUT_A);
+  store.recordRun({ runId: "run-legacy-command", kind: "agent", status: "running" });
+  store.appendEvent({ runId: "run-legacy-command", type: "command.started", payload: { commandId: "command-1", command: "pnpm check" } });
+  const output = store.appendEvent({ runId: "run-legacy-command", type: "command.output", payload: { commandId: "command-1", text: "legacy output" } });
+  store.close();
+
+  const database = new DatabaseSync(databasePath);
+  database.prepare("DELETE FROM agent_command_outputs").run();
+  database.prepare("UPDATE run_events SET payload_json = ? WHERE run_id = ? AND sequence = ?")
+    .run(JSON.stringify({ commandId: "command-1", text: "legacy output" }), "run-legacy-command", output.sequence);
+  database.prepare("UPDATE store_meta SET value = '1' WHERE key = 'schema_version'").run();
+  database.close();
+
+  const migrated = new CheckoutOperationalStore(databasePath, CHECKOUT_A);
+  assert.equal(migrated.readAgentCommandOutput("run-legacy-command", "command-1").text, "legacy output");
+  assert.deepEqual(migrated.listEvents("run-legacy-command").at(-1)?.payload, {
+    commandId: "command-1",
+    characterCount: 13,
+  });
+  migrated.close();
 });
 
 test("persists agent specs, results, revalidation, and retry linkage", async (context) => {

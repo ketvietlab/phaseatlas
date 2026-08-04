@@ -36,9 +36,18 @@
   type CommandCard = {
     commandId: string;
     command: string;
-    output: string;
+    outputCharacters: number;
     exitCode?: number;
     sequence: number;
+  };
+  type CommandOutputState = {
+    text: string;
+    offset: number;
+    nextOffset: number;
+    totalCharacters: number;
+    hasMore: boolean;
+    loading: boolean;
+    error: string;
   };
 
   let repositories: RepositorySummary[] = [];
@@ -52,6 +61,8 @@
   let platform = "desktop";
   let theme = "light";
   let loading = true;
+  let repositoryLoading = false;
+  let repositoryLoadRequest = 0;
   let opening = false;
   let refreshing = false;
   let menuOpen = false;
@@ -100,6 +111,8 @@
   let agentEvents: Record<string, PersistedRunEvent[]> = {};
   let agentEventCursors: Record<string, number> = {};
   let agentResultReviews: Record<string, AgentResultReview> = {};
+  let expandedCommandKeys = new Set<string>();
+  let commandOutputs: Record<string, CommandOutputState> = {};
   let cancellingAgentRunId = "";
   let recoveringAgentRunId = "";
   const reconcilingAgentRuns = new Set<string>();
@@ -112,6 +125,7 @@
   let terminalMaximized = false;
   let terminalHeight = 300;
   let terminalPanel: { focus(): void } | undefined;
+  let repositoryWorkbench: { closeActiveSurface(): void } | undefined;
   let chatOpen = false;
 
   $: selectedRepository = repositories.find(
@@ -153,9 +167,11 @@
   $: selectedAgentEvents = selectedAgentRunId ? agentEvents[selectedAgentRunId] ?? [] : [];
   $: selectedAgentReview = selectedAgentRunId ? agentResultReviews[selectedAgentRunId] : undefined;
   $: selectedCommandCards = buildCommandCards(selectedAgentEvents);
-  $: selectedTimelineEvents = selectedAgentEvents.filter((event) =>
-    !["command.output", "command.completed"].includes(event.type)
-  );
+  $: selectedNarrativeEvents = buildNarrativeEvents(selectedAgentEvents);
+  $: selectedTaskRuns = selectedTask
+    ? agentRuns.filter((run) => run.taskKey === canonicalTaskKey(selectedTask))
+    : [];
+  $: explorerShortcutLabel = platform === "darwin" ? "⌘⇧E" : "Ctrl+Shift+E";
   $: terminalShortcutLabel = platform === "darwin" ? "⌘`" : "Ctrl+`";
   $: chatShortcutLabel = platform === "darwin" ? "⌥L" : "Alt+L";
   onMount(() => {
@@ -192,12 +208,14 @@
         refreshTimer = window.setTimeout(() => void refreshRepository(event.checkoutId), 180);
       }
     });
+    const unsubscribeCloseSurface = window.phaseatlas.runtime.onCloseSurface(closeCurrentSurface);
 
     void initialize();
     return () => {
       window.clearTimeout(refreshTimer);
       window.clearInterval(planningClockTimer);
       unsubscribe();
+      unsubscribeCloseSurface();
     };
   });
 
@@ -237,6 +255,8 @@
 
   async function selectRepository(checkoutId: string) {
     if (!window.phaseatlas) return;
+    const requestId = ++repositoryLoadRequest;
+    repositoryLoading = true;
     selectedCheckoutId = checkoutId;
     workspaces = [];
     runners = [];
@@ -261,10 +281,13 @@
     agentEvents = {};
     agentEventCursors = {};
     agentResultReviews = {};
+    expandedCommandKeys = new Set();
+    commandOutputs = {};
     errorMessage = "";
     menuOpen = false;
     try {
       const recoveredRepository = await window.phaseatlas.repositories.refresh(checkoutId);
+      if (requestId !== repositoryLoadRequest || checkoutId !== selectedCheckoutId) return;
       const [nextWorkspaces, nextTaskSnapshot, nextRunners, activeContentRuns, nextAgentRuns] = await Promise.all([
         window.phaseatlas.workspaces.list(checkoutId),
         window.phaseatlas.tasks.snapshot(checkoutId),
@@ -272,6 +295,7 @@
         window.phaseatlas.tasks.listContentRuns(checkoutId),
         window.phaseatlas.agentRuns.list(checkoutId),
       ]);
+      if (requestId !== repositoryLoadRequest || checkoutId !== selectedCheckoutId) return;
       workspaces = nextWorkspaces;
       repositories = repositories.map((repository) => repository.checkoutId === checkoutId ? recoveredRepository : repository);
       taskSnapshot = nextTaskSnapshot;
@@ -294,7 +318,10 @@
       applyRepositoryProviderSettings(checkoutId);
       selectWorkspace(workspaces[0]?.slug ?? "");
     } catch (error) {
+      if (requestId !== repositoryLoadRequest || checkoutId !== selectedCheckoutId) return;
       errorMessage = error instanceof Error ? error.message : "The repository workspaces could not be read.";
+    } finally {
+      if (requestId === repositoryLoadRequest && checkoutId === selectedCheckoutId) repositoryLoading = false;
     }
   }
 
@@ -658,6 +685,7 @@
       executionNotice = `${actionLabel(availability.action)} run started.`;
       await loadAgentRuns(started.runId);
       await selectAgentRun(started.runId);
+      if (selectedTask) await loadExecutionActions(selectedTask);
     } catch (error) {
       executionError = error instanceof Error ? error.message : "The agent run could not start.";
       executionNotice = "";
@@ -672,6 +700,8 @@
     selectedAgentRunId = runId;
     rememberSelectedAgentRun(runId);
     executionError = "";
+    expandedCommandKeys = new Set();
+    commandOutputs = {};
     await reconcileAgentEvents(runId);
     const run = agentRuns.find((candidate) => candidate.runId === runId);
     if (run && ["completed", "failed"].includes(run.status)) await loadAgentResult(runId);
@@ -746,12 +776,13 @@
         await loadAgentRuns(runId);
         if (["completed", "failed"].includes(status)) await loadAgentResult(runId);
       }
+      if (selectedTask) await loadExecutionActions(selectedTask);
     }
   }
 
   function agentEventStatus(event: PersistedRunEvent): AgentRunSummary["status"] | undefined {
-    if (event.type === "run.status" && ["starting", "running"].includes(String(event.payload.status))) {
-      return event.payload.status as "starting" | "running";
+    if (event.type === "run.status" && ["starting", "running", "cancelled"].includes(String(event.payload.status))) {
+      return event.payload.status as "starting" | "running" | "cancelled";
     }
     if (event.type === "agent.result" && ["completed", "failed"].includes(String(event.payload.status))) {
       return event.payload.status as "completed" | "failed";
@@ -819,10 +850,10 @@
     for (const event of events) {
       const commandId = typeof event.payload.commandId === "string" ? event.payload.commandId : "";
       if (!commandId) continue;
-      const current = commands.get(commandId) ?? { commandId, command: "Repository command", output: "", sequence: event.sequence };
+      const current = commands.get(commandId) ?? { commandId, command: "Repository command", outputCharacters: 0, sequence: event.sequence };
       if (event.type === "command.started" && typeof event.payload.command === "string") current.command = event.payload.command;
-      if (event.type === "command.output" && typeof event.payload.text === "string") {
-        current.output = `${current.output}${event.payload.text}`.slice(-30_000);
+      if (event.type === "command.output" && typeof event.payload.characterCount === "number") {
+        current.outputCharacters += event.payload.characterCount;
       }
       if (event.type === "command.completed" && typeof event.payload.exitCode === "number") current.exitCode = event.payload.exitCode;
       commands.set(commandId, current);
@@ -830,9 +861,98 @@
     return [...commands.values()].sort((left, right) => left.sequence - right.sequence);
   }
 
-  function commandForEvent(event: PersistedRunEvent) {
-    const commandId = typeof event.payload.commandId === "string" ? event.payload.commandId : "";
-    return selectedCommandCards.find((command) => command.commandId === commandId);
+  function buildNarrativeEvents(events: PersistedRunEvent[]): PersistedRunEvent[] {
+    const deltas = events.filter((event) => event.type === "agent.delta" && typeof event.payload.text === "string");
+    const narrative: PersistedRunEvent[] = [];
+    if (deltas.length) {
+      let text = "";
+      let previousChunkLength = 0;
+      for (const event of deltas) {
+        const chunk = event.payload.text as string;
+        const separator = text && previousChunkLength > 40 && chunk.length > 40 ? "\n\n" : "";
+        text += `${separator}${chunk}`;
+        previousChunkLength = chunk.length;
+      }
+      const first = deltas[0] as PersistedRunEvent;
+      narrative.push({ ...first, payload: { ...first.payload, text: text.trimEnd() } });
+    }
+    narrative.push(...events.filter((event) =>
+      ["run.failed", "run.cancelled", "run.interrupted"].includes(event.type) ||
+      (event.type === "turn.completed" && !deltas.length)
+    ));
+    return narrative.sort((left, right) => left.sequence - right.sequence);
+  }
+
+  function commandOutputKey(runId: string, commandId: string) {
+    return `${runId}:${commandId}`;
+  }
+
+  async function toggleCommandOutput(runId: string, commandId: string) {
+    const key = commandOutputKey(runId, commandId);
+    if (expandedCommandKeys.has(key)) {
+      expandedCommandKeys = new Set([...expandedCommandKeys].filter((candidate) => candidate !== key));
+      commandOutputs = Object.fromEntries(Object.entries(commandOutputs).filter(([candidate]) => candidate !== key));
+      return;
+    }
+    expandedCommandKeys = new Set([...expandedCommandKeys, key]);
+    await loadCommandOutput(runId, commandId, 0);
+  }
+
+  async function loadCommandOutput(runId: string, commandId: string, offset: number) {
+    if (!window.phaseatlas) return;
+    const key = commandOutputKey(runId, commandId);
+    const previous = commandOutputs[key];
+    commandOutputs = {
+      ...commandOutputs,
+      [key]: {
+        text: previous?.text ?? "",
+        offset: previous?.offset ?? offset,
+        nextOffset: offset,
+        totalCharacters: previous?.totalCharacters ?? 0,
+        hasMore: previous?.hasMore ?? false,
+        loading: true,
+        error: "",
+      },
+    };
+    try {
+      const page = await window.phaseatlas.agentRuns.commandOutput(selectedCheckoutId, runId, commandId, offset, 20_000);
+      if (!expandedCommandKeys.has(key) || page.runId !== runId || page.commandId !== commandId) return;
+      commandOutputs = {
+        ...commandOutputs,
+        [key]: {
+          text: page.text,
+          offset: page.offset,
+          nextOffset: page.nextOffset,
+          totalCharacters: page.totalCharacters,
+          hasMore: page.hasMore,
+          loading: false,
+          error: "",
+        },
+      };
+    } catch (error) {
+      if (!expandedCommandKeys.has(key)) return;
+      commandOutputs = {
+        ...commandOutputs,
+        [key]: {
+          text: previous?.text ?? "",
+          offset: previous?.offset ?? offset,
+          nextOffset: offset,
+          totalCharacters: previous?.totalCharacters ?? 0,
+          hasMore: previous?.hasMore ?? false,
+          loading: false,
+          error: error instanceof Error ? error.message : "Command output could not be loaded.",
+        },
+      };
+    }
+  }
+
+  function formatCharacterCount(value: number) {
+    if (value < 1_000) return `${value} chars`;
+    return `${(value / 1_000).toFixed(value < 10_000 ? 1 : 0)}k chars`;
+  }
+
+  function formatCharacterPosition(value: number) {
+    return value.toLocaleString("en-US");
   }
 
   function eventHeading(event: PersistedRunEvent) {
@@ -1097,6 +1217,8 @@
     await window.phaseatlas.repositories.close(checkoutId);
     repositories = repositories.filter((repository) => repository.checkoutId !== checkoutId);
     if (selectedCheckoutId === checkoutId) {
+      repositoryLoadRequest += 1;
+      repositoryLoading = false;
       selectedCheckoutId = "";
       workspaces = [];
       runners = [];
@@ -1118,6 +1240,31 @@
     theme = nextTheme;
     document.documentElement.dataset.theme = nextTheme;
     localStorage.setItem("phaseatlas-theme", nextTheme);
+  }
+
+  function closeCurrentSurface() {
+    if (editorOpen) {
+      repositoryWorkbench?.closeActiveSurface();
+    } else if (chatOpen) {
+      chatOpen = false;
+    } else if (providerSettingsOpen) {
+      providerSettingsOpen = false;
+    } else if (executionConfirmAction) {
+      executionConfirmAction = null;
+      executionScopeConfirmed = false;
+      executionPanelElement?.focus();
+    } else if (executionOpen) {
+      closeExecutionWorkbench();
+    } else if (contentPanelTask) {
+      contentPanelTaskKey = "";
+    } else if (plannerOpen) {
+      closePlanner();
+    } else if (terminalOpen) {
+      terminalOpen = false;
+      terminalMaximized = false;
+    } else {
+      menuOpen = false;
+    }
   }
 
   function handleWindowKeydown(event: KeyboardEvent) {
@@ -1145,6 +1292,27 @@
       return;
     }
     const modifier = event.metaKey || event.ctrlKey;
+    const closeShortcut = modifier && !event.shiftKey && !event.altKey && event.key.toLowerCase() === "w";
+    if (closeShortcut) {
+      event.preventDefault();
+      event.stopPropagation();
+      if (!event.repeat) closeCurrentSurface();
+      return;
+    }
+    const explorerShortcut = modifier && event.shiftKey && !event.altKey && event.code === "KeyE";
+    if (explorerShortcut) {
+      event.preventDefault();
+      if (
+        !event.repeat &&
+        selectedCheckoutId &&
+        !chatOpen &&
+        !executionOpen &&
+        !plannerOpen &&
+        !providerSettingsOpen &&
+        !contentPanelTask
+      ) openRepositoryEditor();
+      return;
+    }
     const terminalShortcut = modifier && !event.shiftKey && !event.altKey && (
       event.code === "Backquote" || event.key.toLowerCase() === "j"
     );
@@ -1183,7 +1351,7 @@
   <aside class:mobile-open={menuOpen} class="sidebar" aria-label="Repository navigation">
     <div class="brand-lockup">
       <img class="product-mark" src="./assets/phaseatlas-logo-mark.png" width="1254" height="1254" alt="" />
-      <span class="product-name"><strong>PhaseAtlas</strong><small>KétViệt workspace</small></span>
+      <span class="product-name"><strong>PhaseAtlas</strong><small>Unify AI Tool</small></span>
     </div>
 
     <div class="sidebar-section-heading">
@@ -1200,7 +1368,6 @@
       {#each repositories as repository}
         <div class:active={repository.checkoutId === selectedCheckoutId} class="repository-row">
           <button class="repository-select" type="button" onclick={() => selectRepository(repository.checkoutId)}>
-            <span class="repository-mark" aria-hidden="true">{repository.name.slice(0, 2).toUpperCase()}</span>
             <span class="repository-copy">
               <strong>{repository.name}</strong>
               <small>{repository.workspaceCount} {repository.workspaceCount === 1 ? "workspace" : "workspaces"}</small>
@@ -1223,7 +1390,7 @@
   <header class="mobile-topbar">
     <div class="mobile-brand">
       <img class="product-mark" src="./assets/phaseatlas-logo-mark.png" width="1254" height="1254" alt="" />
-      <span class="product-name"><strong>PhaseAtlas</strong><small>KétViệt workspace</small></span>
+      <span class="product-name"><strong>PhaseAtlas</strong><small>Unify AI Tool</small></span>
     </div>
     <button class="icon-button" type="button" aria-label={menuOpen ? "Close menu" : "Open menu"} aria-expanded={menuOpen} onclick={() => (menuOpen = !menuOpen)}>
       <svg class="icon" viewBox="0 0 24 24" aria-hidden="true">{#if menuOpen}<path d="m6 6 12 12M18 6 6 18"/>{:else}<path d="M4 7h16M4 12h16M4 17h16"/>{/if}</svg>
@@ -1255,6 +1422,20 @@
           <svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M5 5h14v10H9l-4 4z"/><path d="M9 9h6M9 12h4"/></svg>
           <span>Chat</span>
           <kbd>{chatShortcutLabel}</kbd>
+        </button>
+        <button
+          class:active={editorOpen}
+          class="terminal-toggle"
+          type="button"
+          aria-label="Open repository explorer"
+          aria-pressed={editorOpen}
+          title={`Open explorer (${explorerShortcutLabel})`}
+          onclick={() => openRepositoryEditor()}
+          disabled={!selectedCheckoutId}
+        >
+          <svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M4 5h16v14H4zM8 5v14M11 9h6M11 13h4"/></svg>
+          <span>Explorer</span>
+          <kbd>{explorerShortcutLabel}</kbd>
         </button>
         <button
           class:active={terminalOpen}
@@ -1300,10 +1481,6 @@
             </div>
           </div>
           <div class="repository-toolbar-actions">
-            <button class="secondary-button" type="button" onclick={() => openRepositoryEditor()}>
-              <svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M4 5h16v14H4zM8 5v14M11 9h6M11 13h4"/></svg>
-              Explorer
-            </button>
             <button class="secondary-button" type="button" onclick={() => openExecutionWorkbench()}>
               <svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M5 4h14v16H5zM8 8h8M8 12h5M8 16h7"/><path d="m15 11 4 2.5-4 2.5z"/></svg>
               Runs
@@ -1328,7 +1505,12 @@
         {/if}
 
         <section class="workspace-section">
-          {#if workspaces.length}
+          {#if repositoryLoading}
+            <div class="card loading-state repository-loading-state" aria-live="polite" aria-busy="true">
+              <span class="loading-mark" aria-hidden="true"></span>
+              <div><h2>Loading repository</h2><p>Reading workspaces and canonical tasks for {selectedRepository.name}…</p></div>
+            </div>
+          {:else if workspaces.length}
             {#if selectedWorkspace}
               <div class="card workspace-switcher">
                 <span class="workspace-switcher-icon" aria-hidden="true"><svg class="icon" viewBox="0 0 24 24"><rect x="3" y="4" width="7" height="7" rx="1"/><rect x="14" y="4" width="7" height="7" rx="1"/><rect x="3" y="15" width="7" height="6" rx="1"/><path d="M14 18h7M17.5 14.5v7"/></svg></span>
@@ -1499,7 +1681,7 @@
                 {/if}
               </section>
             {/if}
-          {:else}
+          {:else if !errorMessage}
             <div class="card empty-state">
               <img src="./assets/phaseatlas-logo-mark.png" width="1254" height="1254" alt="" aria-hidden="true" />
               <div><h2>This repository has no workspaces</h2><p>Let a read-only runner inspect the repository and propose its first workspace with starter tasks.</p><button class="primary-button empty-state-action" type="button" onclick={() => openPlanner("repository")}>Plan first workspace</button></div>
@@ -1709,29 +1891,73 @@
               <span><small>Freshness</small>{selectedAgentRun.freshness ?? "pending"}</span>
             </div>
 
-            <div class="execution-timeline" aria-live={isAgentRunActive(selectedAgentRun) ? "polite" : "off"}>
-              {#if selectedTimelineEvents.length}
-                {#each selectedTimelineEvents as event}
+            <div class="execution-journal">
+              <section class="execution-narrative" aria-live={isAgentRunActive(selectedAgentRun) ? "polite" : "off"}>
+                <header class="execution-section-heading">
+                  <div><span class="narrative-mark" aria-hidden="true"></span><div><strong>Agent response</strong><p>Reasoning summaries and final guidance from {selectedAgentRun.runnerId}.</p></div></div>
+                  <span>{selectedNarrativeEvents.length}</span>
+                </header>
+                <div class="execution-timeline">
+              {#if selectedNarrativeEvents.length}
+                {#each selectedNarrativeEvents as event}
                   <article class="execution-event" data-type={event.type}>
                     <span class="execution-event-sequence">{String(event.sequence).padStart(2, "0")}</span>
                     <div class="execution-event-content">
                       <header><strong>{eventHeading(event)}</strong><time>{formatRunTime(event.timestamp)}</time></header>
-                      {#if event.type === "command.started"}
-                        {@const command = commandForEvent(event)}
-                        {#if command}
-                          <div class="execution-command" data-exit={command.exitCode ?? "running"}>
-                            <div><code>{command.command}</code><span>{command.exitCode === undefined ? "running" : `exit ${command.exitCode}`}</span></div>
-                            {#if command.output}<pre>{command.output}</pre>{:else if command.exitCode === undefined}<p>Waiting for command output…</p>{/if}
-                          </div>
-                        {/if}
-                      {:else if eventBody(event)}
+                      {#if eventBody(event)}
                         <p>{eventBody(event)}</p>
                       {/if}
                     </div>
                   </article>
                 {/each}
               {:else}
-                <div class="execution-timeline-empty"><span class="run-waiting-signal" aria-hidden="true"><i></i><i></i><i></i></span><div><strong>{isAgentRunActive(selectedAgentRun) ? "Agent is active" : "No persisted events"}</strong><p>{isAgentRunActive(selectedAgentRun) ? "The next normalized event will appear here." : "Refresh history to retry durable replay."}</p></div></div>
+                <div class="execution-timeline-empty"><span class="run-waiting-signal" aria-hidden="true"><i></i><i></i><i></i></span><div><strong>{isAgentRunActive(selectedAgentRun) ? "Agent is working" : "No agent response"}</strong><p>{isAgentRunActive(selectedAgentRun) ? "Provider responses will appear here without terminal noise." : "This run did not persist a provider response."}</p></div></div>
+              {/if}
+                </div>
+              </section>
+
+              {#if selectedCommandCards.length}
+                <section class="execution-activity" aria-label="Command activity">
+                  <header class="execution-section-heading">
+                    <div><span class="activity-mark" aria-hidden="true"></span><div><strong>Command activity</strong><p>Output stays in SQLite until you request it.</p></div></div>
+                    <span>{selectedCommandCards.length}</span>
+                  </header>
+                  <div class="command-disclosures">
+                    {#each selectedCommandCards as command}
+                      {@const outputKey = commandOutputKey(selectedAgentRun.runId, command.commandId)}
+                      {@const expanded = expandedCommandKeys.has(outputKey)}
+                      {@const output = commandOutputs[outputKey]}
+                      <article class="command-disclosure" data-expanded={expanded} data-exit={command.exitCode ?? "running"}>
+                        <button type="button" aria-expanded={expanded} onclick={() => toggleCommandOutput(selectedAgentRun.runId, command.commandId)}>
+                          <span class="command-chevron" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="m9 6 6 6-6 6"/></svg></span>
+                          <span class="command-copy"><code>{command.command}</code><small>{command.exitCode === undefined ? "Running" : `Exit ${command.exitCode}`} · {formatCharacterCount(command.outputCharacters)}</small></span>
+                          <span class="command-fetch-label">{expanded ? "Close output" : "Fetch output"}</span>
+                        </button>
+                        {#if expanded}
+                          <div class="command-output-panel">
+                            {#if output?.loading && !output.text}
+                              <div class="command-output-loading"><span></span>Reading a bounded page from SQLite…</div>
+                            {:else if output?.error}
+                              <div class="command-output-error"><span>{output.error}</span><button type="button" onclick={() => loadCommandOutput(selectedAgentRun.runId, command.commandId, output.offset)}>Retry</button></div>
+                            {:else if output?.text}
+                              <pre>{output.text}</pre>
+                              <footer>
+                                <span>Showing {formatCharacterPosition(output.offset + 1)}–{formatCharacterPosition(output.nextOffset)} of {formatCharacterPosition(output.totalCharacters)} characters</span>
+                                <div class="command-page-actions">
+                                  {#if output.offset > 0}<button type="button" disabled={output.loading} onclick={() => loadCommandOutput(selectedAgentRun.runId, command.commandId, Math.max(0, output.offset - 20_000))}>Previous</button>{/if}
+                                  {#if output.hasMore}<button type="button" disabled={output.loading} onclick={() => loadCommandOutput(selectedAgentRun.runId, command.commandId, output.nextOffset)}>{output.loading ? "Loading…" : "Next 20k"}</button>{/if}
+                                  {#if command.exitCode === undefined}<button type="button" disabled={output.loading} onclick={() => loadCommandOutput(selectedAgentRun.runId, command.commandId, output.offset)}>Refresh</button>{/if}
+                                </div>
+                              </footer>
+                            {:else}
+                              <div class="command-output-empty"><span>No output has been persisted for this command.</span>{#if command.exitCode === undefined}<button type="button" onclick={() => loadCommandOutput(selectedAgentRun.runId, command.commandId, 0)}>Check again</button>{/if}</div>
+                            {/if}
+                          </div>
+                        {/if}
+                      </article>
+                    {/each}
+                  </div>
+                </section>
               {/if}
             </div>
 
@@ -2053,6 +2279,7 @@
 
 {#if editorOpen && selectedCheckoutId}
   <RepositoryWorkbench
+    bind:this={repositoryWorkbench}
     checkoutId={selectedCheckoutId}
     initialPath={editorInitialPath}
     theme={theme === "dark" ? "dark" : "light"}

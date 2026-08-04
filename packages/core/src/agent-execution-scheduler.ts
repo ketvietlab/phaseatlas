@@ -50,12 +50,13 @@ export class AgentExecutionScheduler {
   ): Promise<PreparedAgentRun> {
     const [repository, snapshot] = await Promise.all([this.inspector.describe(), this.inspector.taskSnapshot()]);
     const task = resolveAgentRunTask(request, snapshot);
+    const taskKey = `${task.key.workspaceSlug}/${task.key.taskId}`;
     const sandbox = deriveSandboxPolicy(request, task);
     if (request.expectedCheckoutId && request.expectedCheckoutId !== repository.checkoutId) {
       throw new Error("Agent run request targets a different checkout.");
     }
     const runId = randomUUID();
-    this.store.recordRun({ runId, kind: "agent", status: "starting", taskKeys: [request.taskKey] });
+    this.store.recordRun({ runId, kind: "agent", status: "starting", taskKeys: [taskKey] });
     let lease: WorktreeLeaseRecord | undefined;
     try {
       if (sandbox === "workspace-write") lease = await this.leases.acquire(runId);
@@ -85,12 +86,16 @@ export class AgentExecutionScheduler {
       });
       return { spec, ...(lease ? { lease } : {}) };
     } catch (error) {
-      this.store.appendEvent({
-        runId,
-        type: "run.failed",
-        payload: { message: error instanceof Error ? error.message : "Agent run preparation failed." },
-        status: "failed",
-      });
+      try {
+        this.store.appendEvent({
+          runId,
+          type: "run.failed",
+          payload: { message: error instanceof Error ? error.message : "Agent run preparation failed." },
+          status: "failed",
+        });
+      } finally {
+        if (lease) await this.leases.release(runId, "preparation_failed");
+      }
       throw error;
     }
   }
@@ -129,18 +134,17 @@ export class AgentExecutionScheduler {
       throw signal.reason instanceof Error ? signal.reason : new Error("Agent run was cancelled.");
     }
     let adapterTerminalEvent = false;
-    const readOnlyBaseline = spec.sandbox === "read-only"
-      ? await captureGitState({ worktreePath: spec.executionDirectory, ...(this.changeGit ? { git: this.changeGit } : {}) })
-      : null;
     const emit = (event: AgentEventWithoutSequence) => {
-      if (event.type === "run.failed" || (event.type === "run.status" && event.status === "cancelled")) {
+      const cancelled = event.type === "run.status" && event.status === "cancelled";
+      if (event.type === "run.failed" || cancelled) {
         adapterTerminalEvent = true;
       }
       const payload = { ...event } as Record<string, unknown>;
+      delete payload.type;
       const terminal = event.type === "run.failed"
         ? this.store.terminalizeRun({ runId: spec.runId, type: event.type, payload, status: "failed" })
-        : event.type === "run.status" && event.status === "cancelled"
-          ? this.store.terminalizeRun({ runId: spec.runId, type: event.type, payload, status: "cancelled" })
+        : cancelled
+          ? this.store.terminalizeRun({ runId: spec.runId, type: "run.cancelled", payload, status: "cancelled" })
           : null;
       const persisted = terminal
         ? terminal.event
@@ -154,6 +158,9 @@ export class AgentExecutionScheduler {
     };
     try {
       emit({ type: "run.status", status: "running" });
+      const readOnlyBaseline = spec.sandbox === "read-only"
+        ? await captureGitState({ worktreePath: spec.executionDirectory, ...(this.changeGit ? { git: this.changeGit } : {}) })
+        : null;
       const rawResult = await adapter.execute({
         spec,
         workingDirectory: spec.executionDirectory,
@@ -162,6 +169,9 @@ export class AgentExecutionScheduler {
         emit,
       });
       if (signal.aborted) throw signal.reason instanceof Error ? signal.reason : new Error("Agent run was cancelled.");
+      if (adapterTerminalEvent) {
+        throw new Error(`Agent adapter terminalized the run as ${this.store.getRun(spec.runId).status}.`);
+      }
       const result = validateAgentRunResult(rawResult);
       const readOnlyChanged = readOnlyBaseline !== null && readOnlyBaseline !== await captureGitState({
         worktreePath: spec.executionDirectory,
@@ -178,6 +188,7 @@ export class AgentExecutionScheduler {
         change.policyViolations.map((violation) => `${change.path}: ${violation}`),
       );
       if (readOnlyChanged) policyViolations.push("read_only_checkout_modified");
+      if (signal.aborted) throw signal.reason instanceof Error ? signal.reason : new Error("Agent run was cancelled.");
       const validated: ValidatedAgentRunResult = { result, inspectedChanges, policyViolations };
       this.store.recordAgentResult({
         runId: spec.runId,

@@ -45,8 +45,9 @@ renderer.
 3. Inspect the worker-provided availability reasons. Read-only actions start directly; implementation
    requires acknowledgement of the exact task revision, provider/model, isolated worktree, sandbox,
    writable paths, and network policy.
-4. Keep the workbench open to observe persisted normalized events. Command lifecycle is grouped into
-   activity cards, while the event sequence remains visible through the durable timeline.
+4. Keep the workbench open to observe the provider narrative. Command activity remains collapsed and
+   contains metadata only; opening one command fetches a bounded SQLite page on demand. Previous/next
+   navigation replaces the visible page instead of accumulating output in the DOM.
 5. Reload during a run. The renderer lists checkout-owned history, reconstructs the selected transcript
    from persisted pages, then resumes after its highest contiguous sequence while deduplicating live
    events and backfilling a detected gap.
