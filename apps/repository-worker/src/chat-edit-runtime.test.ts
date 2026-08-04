@@ -1,13 +1,13 @@
 import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
-import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { promisify } from "node:util";
 import test from "node:test";
-import type { RepositorySummary, RunnerDescriptor } from "@phaseatlas/contracts";
+import type { ChatEditSpec, RepositorySummary, RunnerDescriptor } from "@phaseatlas/contracts";
 import { CheckoutOperationalStore, WorktreeLeaseManager } from "@phaseatlas/core";
-import type { ChatEditAdapter } from "./chat-edit-adapter-registry.js";
+import { ChatEditAdapterRegistry, type ChatEditAdapter } from "./chat-edit-adapter-registry.js";
 import { ChatEditRuntime } from "./chat-edit-runtime.js";
 
 const exec = promisify(execFile);
@@ -68,10 +68,14 @@ test("requires confirmation, isolates edits, derives review evidence, and applie
     modelDiscovery: { status: "available" },
   };
   let editNumber = 0;
+  let observedAccessMode = "";
+  let observedAttachmentCount = 0;
   const adapter: ChatEditAdapter = {
     runnerId: "codex-cli",
     async execute(context) {
       editNumber += 1;
+      observedAccessMode = context.spec.accessMode;
+      observedAttachmentCount = context.spec.attachments.length;
       await writeFile(path.join(context.workingDirectory, "README.md"), `# Edited in isolation ${editNumber}\n`, "utf8");
       await writeFile(path.join(context.workingDirectory, "NEW.md"), "new file\n", "utf8");
       context.emit("chat.edit.delta", { text: "Edited the fixture." });
@@ -89,20 +93,31 @@ test("requires confirmation, isolates edits, derives review evidence, and applie
   );
 
   await assert.rejects(
-    runtime.prepare({ sessionId: "session-one", prompt: "Edit files", scope: { allowedPaths: ["../outside"], forbiddenPaths: [] } }),
-    /unsafe or protected/,
+    runtime.prepare({ sessionId: "session-one", prompt: "Edit files", accessMode: "invalid" as never }),
+    /access mode is invalid/,
   );
   const prepared = await runtime.prepare({
     sessionId: "session-one",
     prompt: "Edit the fixture files",
-    scope: { allowedPaths: ["README.md", "NEW.md"], forbiddenPaths: [] },
+    accessMode: "ask_for_approval",
+    attachments: [
+      { path: "README.md" },
+      { type: "image", name: "reference.png", mediaType: "image/png", data: "aGVsbG8=" },
+    ],
   });
   assert.equal(prepared.reasoningEffort, "high");
+  assert.equal(prepared.accessMode, "ask_for_approval");
+  assert.deepEqual(prepared.scope.allowedPaths, ["**"]);
+  assert.deepEqual(prepared.scope.forbiddenPaths, [".git", ".phaseatlas"]);
+  assert.equal(prepared.scope.allowDependencyChanges, true);
+  assert.equal(prepared.scope.allowDatabaseMigrations, true);
   assert.equal(leases.list().length, 0, "preparation must not allocate a worktree");
   await assert.rejects(runtime.start({ editId: prepared.editId, confirmationDigest: "stale" }), /stale or incomplete/);
   assert.equal(leases.list().length, 0);
   await runtime.start({ editId: prepared.editId, confirmationDigest: prepared.confirmationDigest });
   await waitFor(() => runtime.result(prepared.editId).status === "completed");
+  assert.equal(observedAccessMode, "ask_for_approval");
+  assert.equal(observedAttachmentCount, 2);
   const review = runtime.result(prepared.editId);
   assert.equal(review.reasoningEffort, "high");
   assert.deepEqual(review.changedFiles.map((change) => change.path), ["NEW.md", "README.md"]);
@@ -121,8 +136,9 @@ test("requires confirmation, isolates edits, derives review evidence, and applie
   const retainedConfirmation = await runtime.prepare({
     sessionId: "session-one",
     prompt: "Continue editing the fixture",
-    scope: { allowedPaths: ["README.md", "NEW.md"], forbiddenPaths: [] },
+    accessMode: "full_access",
   });
+  assert.equal(retainedConfirmation.accessMode, "full_access");
   await runtime.start({ editId: retainedConfirmation.editId, confirmationDigest: retainedConfirmation.confirmationDigest });
   await waitFor(() => runtime.result(retainedConfirmation.editId).status === "completed");
   assert.equal(runtime.retain(retainedConfirmation.editId).disposition, "retained");
@@ -135,4 +151,55 @@ test("requires confirmation, isolates edits, derives review evidence, and applie
   store.close();
   await rm(root, { recursive: true, force: true });
   await rm(support, { recursive: true, force: true });
+});
+
+test("projects image and repository attachments into edit providers", async () => {
+  const spec: ChatEditSpec = {
+    schemaVersion: "phaseatlas.chat-edit/v1",
+    editId: "edit-one",
+    sessionId: "session-one",
+    checkout: { repositoryId: "repo-one", checkoutId: "checkout-one", canonicalPath: "/private/repository" },
+    baseRevision: "a".repeat(40),
+    runnerId: "codex-cli",
+    model: "model-one",
+    prompt: "Follow the visual reference.",
+    accessMode: "full_access",
+    attachments: [
+      { path: "apps/ui/src" },
+      { type: "image", name: "reference.png", mediaType: "image/png", data: "aGVsbG8=" },
+    ],
+    scope: { allowedPaths: ["**"], forbiddenPaths: [".git", ".phaseatlas"], writable: true, allowDependencyChanges: true, allowDatabaseMigrations: true, allowExternalNetwork: false },
+    sandbox: "workspace-write",
+    createdAt: new Date().toISOString(),
+    confirmationDigest: "digest",
+  };
+  let codexImagePath = "";
+  let codexInput = "";
+  const codexRegistry = new ChatEditAdapterRegistry({
+    codexExecutableResolver: async () => ({ executable: "codex", version: "fixture" }),
+    processRunner: async (input) => {
+      codexInput = input.stdin ?? "";
+      const imageArgument = input.args.indexOf("--image");
+      codexImagePath = input.args[imageArgument + 1] ?? "";
+      assert.equal(await readFile(codexImagePath, "utf8"), "hello");
+      input.onStdout?.(`${JSON.stringify({ type: "item.completed", item: { type: "agent_message", text: "Done" } })}\n`);
+      return { stdout: "", stderr: "" };
+    },
+  });
+  await codexRegistry.get("codex-cli").execute({ spec, workingDirectory: "/private/worktree", signal: new AbortController().signal, emit: () => undefined });
+  assert.match(codexInput, /apps\/ui\/src/);
+  await assert.rejects(stat(codexImagePath));
+
+  let claudeInput = "";
+  const claudeRegistry = new ChatEditAdapterRegistry({
+    processRunner: async (input) => {
+      claudeInput = input.stdin ?? "";
+      assert.ok(input.args.includes("--input-format"));
+      input.onStdout?.(`${JSON.stringify({ type: "result", result: "Done" })}\n`);
+      return { stdout: "", stderr: "" };
+    },
+  });
+  await claudeRegistry.get("claude-code").execute({ spec: { ...spec, runnerId: "claude-code" }, workingDirectory: "/private/worktree", signal: new AbortController().signal, emit: () => undefined });
+  assert.match(claudeInput, /"type":"image"/);
+  assert.match(claudeInput, /aGVsbG8=/);
 });

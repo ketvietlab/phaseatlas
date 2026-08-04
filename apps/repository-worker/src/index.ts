@@ -21,6 +21,7 @@ import type {
   ChatEditStartInput,
   PersistedRunEventPage,
   RepositoryChatCreateInput,
+  RepositoryChatAttachment,
   RepositoryChatImageMediaType,
   RepositoryChatRenameInput,
   RepositoryChatRetryInput,
@@ -209,8 +210,13 @@ function chatSendInput(value: unknown): RepositoryChatSendInput {
   if (typeof value.sessionId !== "string" || typeof value.text !== "string") {
     throw new Error("sessionId and text are required.");
   }
-  if (value.attachments !== undefined && !Array.isArray(value.attachments)) throw new Error("attachments must be an array.");
-  const attachments = (value.attachments ?? []).map((attachment) => {
+  const attachments = chatAttachments(value.attachments);
+  return { sessionId: value.sessionId, text: value.text, ...(attachments.length ? { attachments } : {}) };
+}
+
+function chatAttachments(value: unknown): RepositoryChatAttachment[] {
+  if (value !== undefined && !Array.isArray(value)) throw new Error("attachments must be an array.");
+  return (value ?? []).map((attachment) => {
     if (!isRecord(attachment)) {
       throw new Error("Chat attachment is invalid.");
     }
@@ -227,29 +233,25 @@ function chatSendInput(value: unknown): RepositoryChatSendInput {
     }
     return { path: attachment.path };
   });
-  return { sessionId: value.sessionId, text: value.text, ...(attachments.length ? { attachments } : {}) };
 }
 
 function chatEditPrepareInput(value: unknown): ChatEditPrepareInput {
-  if (!isRecord(value) || Object.keys(value).some((field) => !["sessionId", "prompt", "scope"].includes(field))) {
+  if (!isRecord(value) || Object.keys(value).some((field) => !["sessionId", "prompt", "accessMode", "attachments"].includes(field))) {
     throw new Error("Chat edit preparation input is invalid.");
   }
-  if (typeof value.sessionId !== "string" || typeof value.prompt !== "string" || !isRecord(value.scope)) {
-    throw new Error("sessionId, prompt, and scope are required.");
+  if (
+    typeof value.sessionId !== "string" ||
+    typeof value.prompt !== "string" ||
+    !["ask_for_approval", "full_access"].includes(String(value.accessMode))
+  ) {
+    throw new Error("sessionId, prompt, and a supported accessMode are required.");
   }
-  if (Object.keys(value.scope).some((field) => !["allowedPaths", "forbiddenPaths"].includes(field))) {
-    throw new Error("Chat edit scope contains unsupported fields.");
-  }
-  if (!Array.isArray(value.scope.allowedPaths) || !Array.isArray(value.scope.forbiddenPaths)) {
-    throw new Error("Chat edit scope paths must be arrays.");
-  }
+  const attachments = chatAttachments(value.attachments);
   return {
     sessionId: value.sessionId,
     prompt: value.prompt,
-    scope: {
-      allowedPaths: value.scope.allowedPaths as string[],
-      forbiddenPaths: value.scope.forbiddenPaths as string[],
-    },
+    accessMode: value.accessMode as ChatEditPrepareInput["accessMode"],
+    ...(attachments.length ? { attachments } : {}),
   };
 }
 

@@ -22,6 +22,7 @@ function normalizeRule(rule: string): string {
 
 function matchesRule(filePath: string, rule: string): boolean {
   const normalized = normalizeRule(rule);
+  if (normalized === "**") return true;
   return Boolean(normalized && (filePath === normalized || filePath.startsWith(`${normalized}/`)));
 }
 
