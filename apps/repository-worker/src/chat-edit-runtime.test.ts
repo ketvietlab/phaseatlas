@@ -43,6 +43,7 @@ test("requires confirmation, isolates edits, derives review evidence, and applie
     checkoutId,
     runnerId: "codex-cli",
     model: "gpt-fixture",
+    reasoningEffort: "high",
     title: "Edit fixture",
     state: "open",
     createdAt: now,
@@ -63,7 +64,7 @@ test("requires confirmation, isolates edits, derives review evidence, and applie
     name: "Codex CLI",
     available: true,
     capabilities: ["execution", "repository_write"],
-    models: [{ id: "gpt-fixture", displayName: "GPT Fixture", isDefault: true, reasoningEfforts: [] }],
+    models: [{ id: "gpt-fixture", displayName: "GPT Fixture", isDefault: true, reasoningEfforts: ["high"], defaultReasoningEffort: "high" }],
     modelDiscovery: { status: "available" },
   };
   let editNumber = 0;
@@ -96,12 +97,14 @@ test("requires confirmation, isolates edits, derives review evidence, and applie
     prompt: "Edit the fixture files",
     scope: { allowedPaths: ["README.md", "NEW.md"], forbiddenPaths: [] },
   });
+  assert.equal(prepared.reasoningEffort, "high");
   assert.equal(leases.list().length, 0, "preparation must not allocate a worktree");
   await assert.rejects(runtime.start({ editId: prepared.editId, confirmationDigest: "stale" }), /stale or incomplete/);
   assert.equal(leases.list().length, 0);
   await runtime.start({ editId: prepared.editId, confirmationDigest: prepared.confirmationDigest });
   await waitFor(() => runtime.result(prepared.editId).status === "completed");
   const review = runtime.result(prepared.editId);
+  assert.equal(review.reasoningEffort, "high");
   assert.deepEqual(review.changedFiles.map((change) => change.path), ["NEW.md", "README.md"]);
   assert.match(review.patch, /NEW\.md/);
   assert.equal(await readFile(path.join(root, "README.md"), "utf8"), "# Fixture\n", "canonical checkout must remain unchanged before acceptance");

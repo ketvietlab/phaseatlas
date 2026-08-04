@@ -12,6 +12,7 @@ import {
 import {
   formatCodexJsonEvent,
   assertRunnerModel,
+  assertRunnerSelection,
   parseClaudeModelHelp,
   parseCodexModelCatalog,
   RunnerRegistry,
@@ -96,6 +97,9 @@ test("projects provider model catalogs without accepting arbitrary model text", 
   };
   assert.doesNotThrow(() => assertRunnerModel(descriptor, "gpt-safe"));
   assert.throws(() => assertRunnerModel(descriptor, "manually-entered-model"), /selected model is not present/);
+  assert.doesNotThrow(() => assertRunnerSelection(descriptor, "gpt-safe", "high"));
+  assert.throws(() => assertRunnerSelection(descriptor, "gpt-safe", "medium"), /reasoning effort is not supported/);
+  assert.throws(() => assertRunnerSelection(descriptor, undefined, "high"), /model must be selected/);
 });
 
 const normalizedResult: AgentRunResult = {
@@ -135,7 +139,9 @@ const executionSpec: AgentRunSpec = {
 };
 
 test("Codex and Claude fixtures translate to the same normalized execution contract", async () => {
+  const observedArgs = new Map<string, string[]>();
   const fakeProcessRunner: ProviderProcessRunner = async (options) => {
+    observedArgs.set(options.executable, options.args);
     if (options.executable === "fixture-codex") {
       const outputPath = options.args[options.args.indexOf("--output-last-message") + 1];
       assert.ok(outputPath);
@@ -168,6 +174,7 @@ test("Codex and Claude fixtures translate to the same normalized execution contr
     const result = await registry.getExecution(runnerId, "implement", "workspace-write").execute({
       spec: executionSpec,
       workingDirectory: executionSpec.executionDirectory,
+      ...(runnerId === "codex-cli" ? { modelId: "gpt-safe", reasoningEffort: "high" } : {}),
       signal: new AbortController().signal,
       emit: (event) => events.push(event),
     });
@@ -188,6 +195,8 @@ test("Codex and Claude fixtures translate to the same normalized execution contr
   ]);
   assert.equal(JSON.stringify(codex.events).includes("/private/"), false);
   assert.equal(JSON.stringify(claude.events).includes("/private/"), false);
+  assert.equal(observedArgs.get("fixture-codex")?.includes("--config"), true);
+  assert.equal(observedArgs.get("fixture-codex")?.includes('model_reasoning_effort="high"'), true);
 });
 
 test("formats Codex JSONL events as readable terminal progress", () => {

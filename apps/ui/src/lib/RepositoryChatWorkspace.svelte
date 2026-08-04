@@ -19,8 +19,9 @@
   export let runners: RunnerDescriptor[] = [];
   export let runnerId = "";
   export let modelId = "";
+  export let reasoningEffort = "";
   export let onClose: () => void = () => undefined;
-  export let onOpenProviderSettings: () => void = () => undefined;
+  export let onShowAgentConfiguration: () => void = () => undefined;
   export let onOpenExplorer: () => void = () => undefined;
   export let onCreateTaskProposal: (request: string) => void = () => undefined;
 
@@ -197,6 +198,7 @@
       const session = await window.phaseatlas.chat.createSession(checkoutId, {
         runnerId,
         model: modelId,
+        ...(reasoningEffort ? { reasoningEffort } : {}),
         title: `New chat · ${new Date().toLocaleDateString([], { month: "short", day: "numeric" })}`,
       });
       sessions = [session, ...sessions];
@@ -512,7 +514,7 @@
         <p>Repository intelligence</p>
         <h2 id="repository-chat-title">Agent chat <span>/ {repositoryName}</span></h2>
       </div>
-      <button class="provider-chip" class:unavailable={!providerReady} type="button" title="Open provider settings" onclick={onOpenProviderSettings}>
+      <button class="provider-chip" class:unavailable={!providerReady} type="button" title="Show agent configuration" onclick={onShowAgentConfiguration}>
         <span></span>
         <div><small>{selectedRunner?.name ?? "Provider unavailable"}</small><strong>{selectedModel?.displayName ?? "Select a discovered model"}</strong></div>
       </button>
@@ -544,7 +546,7 @@
                 {:else}
                   <button class="session-select" role="tab" aria-selected={session.sessionId === selectedSessionId} type="button" onclick={() => selectSession(session.sessionId)}>
                     <span class="session-state" data-state={(turnsBySession[session.sessionId] ?? []).some((turn) => ACTIVE.has(turn.status)) ? "running" : session.state}></span>
-                    <span><strong>{session.title}</strong><small>{session.runnerId} · {relativeTime(session.updatedAt)}</small></span>
+                    <span><strong>{session.title}</strong><small>{session.runnerId}{session.reasoningEffort ? ` · ${session.reasoningEffort}` : ""} · {relativeTime(session.updatedAt)}</small></span>
                   </button>
                   <div class="session-actions">
                     <button type="button" aria-label={`Rename ${session.title}`} title="Rename" onclick={() => beginRename(session)}>✎</button>
@@ -644,7 +646,7 @@
             {#if preparedEdit}
               <section class="edit-confirmation" aria-label="Confirm isolated edit">
                 <header><span>Explicit confirmation</span><strong>Isolated edit #{preparedEdit.editId.slice(0, 6)}</strong></header>
-                <dl><div><dt>Repository</dt><dd>{preparedEdit.repositoryName} · {preparedEdit.baseRevision.slice(0, 8)}</dd></div><div><dt>Provider</dt><dd>{preparedEdit.runnerId} · {preparedEdit.model}</dd></div><div><dt>Writable scope</dt><dd>{preparedEdit.scope.allowedPaths.join(", ")}</dd></div><div><dt>Policy</dt><dd>Isolated worktree · no network · no dependency or database changes</dd></div></dl>
+                <dl><div><dt>Repository</dt><dd>{preparedEdit.repositoryName} · {preparedEdit.baseRevision.slice(0, 8)}</dd></div><div><dt>Provider</dt><dd>{preparedEdit.runnerId} · {preparedEdit.model}{preparedEdit.reasoningEffort ? ` · ${preparedEdit.reasoningEffort}` : ""}</dd></div><div><dt>Writable scope</dt><dd>{preparedEdit.scope.allowedPaths.join(", ")}</dd></div><div><dt>Policy</dt><dd>Isolated worktree · no network · no dependency or database changes</dd></div></dl>
                 <p>Nothing reaches the canonical checkout until you review the Git-derived diff and explicitly accept it.</p>
                 <div><button type="button" onclick={() => preparedEdit = null}>Cancel</button><button class="confirm-edit" type="button" onclick={confirmEdit} disabled={editBusy}>{editBusy ? "Starting…" : "Confirm and start"}</button></div>
               </section>
@@ -690,7 +692,7 @@
             <p>Repository agent chat</p><h3>Start an independent conversation</h3>
             <p>Chat with a discovered provider without selecting a workspace or canonical task.</p>
             <button type="button" onclick={createSession} disabled={!providerReady || creating}>{creating ? "Creating conversation…" : "New conversation"}</button>
-            {#if !providerReady}<small>Choose an available CLI and model first.</small><button class="settings-link" type="button" onclick={onOpenProviderSettings}>Open provider settings</button>{/if}
+            {#if !providerReady}<small>Choose an available CLI and model first.</small><button class="settings-link" type="button" onclick={onShowAgentConfiguration}>Show agent configuration</button>{/if}
           </section>
         {/if}
       </main>

@@ -23,7 +23,7 @@ import type {
   ValidatedAgentRunResult,
 } from "@phaseatlas/contracts";
 
-const SCHEMA_VERSION = "2";
+const SCHEMA_VERSION = "3";
 const RUN_KINDS = new Set<PersistedRunKind>(["planning", "task_content", "agent"]);
 const RUN_STATUSES = new Set<PersistedRunStatus>(["starting", "running", "completed", "failed", "cancelled", "interrupted"]);
 const TERMINAL_RUN_STATUSES = new Set<PersistedRunStatus>(["completed", "failed", "cancelled", "interrupted"]);
@@ -92,6 +92,7 @@ export interface PersistedAgentRunSpecRecord {
   checkoutId: string;
   runnerId: string;
   model?: string;
+  reasoningEffort?: string;
   createdAt: string;
 }
 
@@ -361,8 +362,8 @@ export class CheckoutOperationalStore {
     if (run.kind !== "agent") throw new Error("Agent run spec requires an agent run.");
     this.database.prepare(`
       INSERT INTO agent_run_specs (
-        run_id, task_key, task_revision, action, sandbox, checkout_id, runner_id, model_id, created_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        run_id, task_key, task_revision, action, sandbox, checkout_id, runner_id, model_id, reasoning_effort, created_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `).run(
       input.runId,
       input.taskKey,
@@ -372,6 +373,7 @@ export class CheckoutOperationalStore {
       input.checkoutId,
       input.runnerId,
       input.model ?? null,
+      input.reasoningEffort ?? null,
       input.createdAt,
     );
     return input;
@@ -389,6 +391,7 @@ export class CheckoutOperationalStore {
       checkoutId: String(row.checkout_id),
       runnerId: String(row.runner_id),
       ...(typeof row.model_id === "string" ? { model: row.model_id } : {}),
+      ...(typeof row.reasoning_effort === "string" ? { reasoningEffort: row.reasoning_effort } : {}),
       createdAt: String(row.created_at),
     };
   }
@@ -464,13 +467,14 @@ export class CheckoutOperationalStore {
     }
     this.database.prepare(`
       INSERT INTO chat_sessions (
-        session_id, checkout_id, runner_id, model_id, title, state, created_at, updated_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        session_id, checkout_id, runner_id, model_id, reasoning_effort, title, state, created_at, updated_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
     `).run(
       input.sessionId,
       input.checkoutId,
       input.runnerId,
       input.model,
+      input.reasoningEffort ?? null,
       input.title,
       input.state,
       input.createdAt,
@@ -519,7 +523,10 @@ export class CheckoutOperationalStore {
   }): RepositoryChatTurn {
     const session = this.getChatSession(input.turn.sessionId);
     if (session.state !== "open") throw new Error("Chat session is closed.");
-    if (input.turn.runnerId !== session.runnerId || input.turn.model !== session.model) {
+    if (
+      input.turn.runnerId !== session.runnerId || input.turn.model !== session.model ||
+      input.turn.reasoningEffort !== session.reasoningEffort
+    ) {
       throw new Error("Chat turn provider does not match its session.");
     }
     if (!input.turn.turnId.trim() || !input.turn.userMessageId.trim() || input.turn.status !== "starting") {
@@ -572,15 +579,16 @@ export class CheckoutOperationalStore {
       }
       this.database.prepare(`
         INSERT INTO chat_turns (
-          turn_id, session_id, status, runner_id, model_id, user_message_id,
+          turn_id, session_id, status, runner_id, model_id, reasoning_effort, user_message_id,
           assistant_message_id, parent_turn_id, created_at, updated_at
-        ) VALUES (?, ?, ?, ?, ?, ?, NULL, ?, ?, ?)
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, NULL, ?, ?, ?)
       `).run(
         input.turn.turnId,
         session.sessionId,
         input.turn.status,
         input.turn.runnerId,
         input.turn.model,
+        input.turn.reasoningEffort ?? null,
         input.turn.userMessageId,
         input.turn.parentTurnId ?? null,
         input.turn.createdAt,
@@ -854,6 +862,7 @@ export class CheckoutOperationalStore {
       checkoutId: String(row.checkout_id),
       runnerId: String(row.runner_id),
       model: String(row.model_id),
+      ...(typeof row.reasoning_effort === "string" ? { reasoningEffort: row.reasoning_effort } : {}),
       title: String(row.title),
       state: state as RepositoryChatSession["state"],
       createdAt: String(row.created_at),
@@ -896,6 +905,7 @@ export class CheckoutOperationalStore {
       status,
       runnerId: String(row.runner_id),
       model: String(row.model_id),
+      ...(typeof row.reasoning_effort === "string" ? { reasoningEffort: row.reasoning_effort } : {}),
       userMessageId: String(row.user_message_id),
       ...(typeof row.assistant_message_id === "string" ? { assistantMessageId: row.assistant_message_id } : {}),
       ...(typeof row.parent_turn_id === "string" ? { parentTurnId: row.parent_turn_id } : {}),
@@ -950,6 +960,7 @@ export class CheckoutOperationalStore {
         checkout_id TEXT NOT NULL,
         runner_id TEXT NOT NULL,
         model_id TEXT,
+        reasoning_effort TEXT,
         created_at TEXT NOT NULL
       );
       CREATE TABLE IF NOT EXISTS agent_run_results (
@@ -987,6 +998,7 @@ export class CheckoutOperationalStore {
         checkout_id TEXT NOT NULL,
         runner_id TEXT NOT NULL,
         model_id TEXT NOT NULL,
+        reasoning_effort TEXT,
         title TEXT NOT NULL,
         state TEXT NOT NULL CHECK(state IN ('open', 'closed')),
         created_at TEXT NOT NULL,
@@ -1009,6 +1021,7 @@ export class CheckoutOperationalStore {
         status TEXT NOT NULL CHECK(status IN ('starting', 'running', 'completed', 'failed', 'cancelled', 'interrupted')),
         runner_id TEXT NOT NULL,
         model_id TEXT NOT NULL,
+        reasoning_effort TEXT,
         user_message_id TEXT NOT NULL REFERENCES chat_messages(message_id),
         assistant_message_id TEXT REFERENCES chat_messages(message_id),
         parent_turn_id TEXT REFERENCES chat_turns(turn_id),
@@ -1026,9 +1039,17 @@ export class CheckoutOperationalStore {
     `);
     const schema = this.database.prepare("SELECT value FROM store_meta WHERE key = 'schema_version'").get() as { value?: string } | undefined;
     if (existingDatabase && !schema?.value) this.failInitialization("Checkout store schema metadata is missing.");
-    if (schema?.value === "1") this.migrateVersionOne();
-    else if (schema?.value && schema.value !== SCHEMA_VERSION) {
-      this.failInitialization(`Unsupported checkout store schema version ${schema.value}.`);
+    let schemaVersion = schema?.value;
+    if (schemaVersion === "1") {
+      this.migrateVersionOne();
+      schemaVersion = "2";
+    }
+    if (schemaVersion === "2") {
+      this.migrateVersionTwo();
+      schemaVersion = "3";
+    }
+    if (schemaVersion && schemaVersion !== SCHEMA_VERSION) {
+      this.failInitialization(`Unsupported checkout store schema version ${schemaVersion}.`);
     }
     const identity = this.database.prepare("SELECT value FROM store_meta WHERE key = 'checkout_id'").get() as { value?: string } | undefined;
     if (existingDatabase && !identity?.value) this.failInitialization("Checkout store identity metadata is missing.");
@@ -1078,6 +1099,27 @@ export class CheckoutOperationalStore {
     } catch (error) {
       this.database.exec("ROLLBACK");
       throw error;
+    }
+  }
+
+  private migrateVersionTwo(): void {
+    this.database.exec("BEGIN IMMEDIATE");
+    try {
+      this.addColumnIfMissing("agent_run_specs", "reasoning_effort", "TEXT");
+      this.addColumnIfMissing("chat_sessions", "reasoning_effort", "TEXT");
+      this.addColumnIfMissing("chat_turns", "reasoning_effort", "TEXT");
+      this.database.prepare("UPDATE store_meta SET value = '3' WHERE key = 'schema_version'").run();
+      this.database.exec("COMMIT");
+    } catch (error) {
+      this.database.exec("ROLLBACK");
+      throw error;
+    }
+  }
+
+  private addColumnIfMissing(table: string, column: string, definition: string): void {
+    const columns = this.database.prepare(`PRAGMA table_info(${table})`).all() as Array<{ name?: string }>;
+    if (!columns.some((candidate) => candidate.name === column)) {
+      this.database.exec(`ALTER TABLE ${table} ADD COLUMN ${column} ${definition}`);
     }
   }
 

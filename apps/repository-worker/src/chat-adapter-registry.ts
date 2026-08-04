@@ -3,6 +3,7 @@ import type {
   RepositoryChatMessage,
 } from "@phaseatlas/contracts";
 import {
+  codexReasoningEffortArguments,
   resolveCodexExecutable,
   runChildProcess,
   type ProviderProcessRunner,
@@ -11,6 +12,7 @@ import {
 export interface RepositoryChatAdapterContext {
   repositoryRoot: string;
   model: string;
+  reasoningEffort?: string;
   messages: RepositoryChatMessage[];
   signal: AbortSignal;
   emit(event: RepositoryChatAdapterEvent): void;
@@ -79,6 +81,7 @@ class CodexChatAdapter implements RepositoryChatAdapter {
       "--json",
       "--cd", context.repositoryRoot,
       "--model", context.model,
+      ...codexReasoningEffortArguments(context.reasoningEffort),
       "-",
     ];
     let buffer = "";

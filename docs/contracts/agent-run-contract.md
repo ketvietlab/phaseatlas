@@ -82,15 +82,19 @@ name, provider-default marker, and supported reasoning-effort labels. Raw provid
 instructions, credentials, executable locations, and authentication details do not cross the worker
 boundary.
 
-Repository UI preferences store only the selected runner and model IDs for a checkout. Before a
-planning or task-content provider handoff, the repository worker compares a supplied model ID with a
-fresh descriptor and rejects an ID that is not present. When model discovery is unavailable, the UI
-disables model-dependent actions; it never substitutes a free-form field or a hardcoded catalog.
+Repository UI preferences store only the selected runner ID, model ID, and optional reasoning-effort
+label for a checkout. The active selection remains visible in the repository header. Model and effort
+share one compact selector because effort belongs to a specific model catalog entry. Before any
+planning, task-content, chat, isolated edit, or task-run handoff, the repository worker compares both
+values with a fresh descriptor and rejects a model or effort that is not present. When discovery is
+unavailable, the UI disables model-dependent actions; it never substitutes a free-form field or a
+hardcoded catalog.
 
-Execution adapters receive the same trusted model selection through the provider-neutral execution
-boundary when execution orchestration is enabled. They may translate the ID into their private CLI
-argument, but they cannot accept a renderer-supplied executable, command, working directory, or
-permission flag.
+Execution adapters receive the same trusted model and effort selection through the provider-neutral
+execution boundary. They may translate those values into private CLI arguments, but they cannot
+accept a renderer-supplied executable, command, working directory, or permission flag. Agent run
+specifications and chat sessions persist the selected effort so replay and retry do not silently use
+a different provider policy after restart.
 
 ## Git-derived changes and result validation
 
