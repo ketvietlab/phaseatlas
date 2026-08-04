@@ -134,6 +134,7 @@
   let terminalHeight = 300;
   let terminalPanel: { focus(): void; hasFocus(): boolean } | undefined;
   let repositoryWorkbench: { closeActiveSurface(): void; focusActiveEditor(): void } | undefined;
+  let taskContentPanel: { closeActiveSurface(): void } | undefined;
   let chatOpen = false;
   let workbenchStateReady = false;
 
@@ -1327,7 +1328,7 @@
     } else if (executionOpen) {
       closeExecutionWorkbench();
     } else if (contentPanelTask) {
-      contentPanelTaskKey = "";
+      taskContentPanel?.closeActiveSurface();
     } else if (plannerOpen) {
       closePlanner();
     } else if (terminalOpen) {
@@ -2313,6 +2314,8 @@
 
 {#if contentPanelTask}
   <TaskContentPanel
+    bind:this={taskContentPanel}
+    checkoutId={selectedCheckoutId}
     task={contentPanelTask}
     initializing={activeContentTaskKeys.has(canonicalTaskKey(contentPanelTask))}
     stream={contentLogs[canonicalTaskKey(contentPanelTask)] ?? ""}
