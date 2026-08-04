@@ -12,9 +12,11 @@ import {
 import {
   formatCodexJsonEvent,
   assertRunnerModel,
+  assertRunnerSelection,
   parseClaudeModelHelp,
   parseCodexModelCatalog,
   RunnerRegistry,
+  runChildProcess,
   type ProviderProcessRunner,
 } from "./runner-registry.js";
 
@@ -95,6 +97,9 @@ test("projects provider model catalogs without accepting arbitrary model text", 
   };
   assert.doesNotThrow(() => assertRunnerModel(descriptor, "gpt-safe"));
   assert.throws(() => assertRunnerModel(descriptor, "manually-entered-model"), /selected model is not present/);
+  assert.doesNotThrow(() => assertRunnerSelection(descriptor, "gpt-safe", "high"));
+  assert.throws(() => assertRunnerSelection(descriptor, "gpt-safe", "medium"), /reasoning effort is not supported/);
+  assert.throws(() => assertRunnerSelection(descriptor, undefined, "high"), /model must be selected/);
 });
 
 const normalizedResult: AgentRunResult = {
@@ -134,7 +139,9 @@ const executionSpec: AgentRunSpec = {
 };
 
 test("Codex and Claude fixtures translate to the same normalized execution contract", async () => {
+  const observedArgs = new Map<string, string[]>();
   const fakeProcessRunner: ProviderProcessRunner = async (options) => {
+    observedArgs.set(options.executable, options.args);
     if (options.executable === "fixture-codex") {
       const outputPath = options.args[options.args.indexOf("--output-last-message") + 1];
       assert.ok(outputPath);
@@ -167,6 +174,7 @@ test("Codex and Claude fixtures translate to the same normalized execution contr
     const result = await registry.getExecution(runnerId, "implement", "workspace-write").execute({
       spec: executionSpec,
       workingDirectory: executionSpec.executionDirectory,
+      ...(runnerId === "codex-cli" ? { modelId: "gpt-safe", reasoningEffort: "high" } : {}),
       signal: new AbortController().signal,
       emit: (event) => events.push(event),
     });
@@ -187,6 +195,8 @@ test("Codex and Claude fixtures translate to the same normalized execution contr
   ]);
   assert.equal(JSON.stringify(codex.events).includes("/private/"), false);
   assert.equal(JSON.stringify(claude.events).includes("/private/"), false);
+  assert.equal(observedArgs.get("fixture-codex")?.includes("--config"), true);
+  assert.equal(observedArgs.get("fixture-codex")?.includes('model_reasoning_effort="high"'), true);
 });
 
 test("formats Codex JSONL events as readable terminal progress", () => {
@@ -209,4 +219,39 @@ test("formats Codex JSONL events as readable terminal progress", () => {
     "Turn completed · 1,250 input / 340 output tokens\n",
   );
   assert.equal(formatCodexJsonEvent({ type: "unknown.event" }), "");
+});
+
+test("cancellation waits for provider exit and force-terminates an unresponsive owned process", async () => {
+  const controller = new AbortController();
+  const startedAt = Date.now();
+  let outputAfterAbort = "";
+  const execution = runChildProcess({
+    executable: process.execPath,
+    args: ["-e", "process.on('SIGTERM', () => {}); process.stdout.write('ready\\n'); setInterval(() => process.stdout.write('late\\n'), 20);"],
+    cwd: process.cwd(),
+    signal: controller.signal,
+    terminationGraceMs: 80,
+    onStdout: (chunk) => {
+      if (chunk.includes("ready")) controller.abort();
+      else if (controller.signal.aborted) outputAfterAbort += chunk;
+    },
+  });
+  await assert.rejects(execution, /cancelled/);
+  assert.ok(Date.now() - startedAt >= 60, "cancellation must wait for confirmed force termination");
+  assert.equal(outputAfterAbort, "");
+});
+
+test("bounds retained provider diagnostics while streaming complete output", async () => {
+  const streamed: string[] = [];
+  const marker = "provider-tail-marker";
+  const result = await runChildProcess({
+    executable: process.execPath,
+    args: ["-e", `process.stdout.write("x".repeat(100000) + "${marker}")`],
+    cwd: process.cwd(),
+    signal: new AbortController().signal,
+    onStdout: (chunk) => streamed.push(chunk),
+  });
+  assert.ok(streamed.join("").length > 100_000);
+  assert.ok(result.stdout.length <= 64 * 1024);
+  assert.ok(result.stdout.endsWith(marker));
 });

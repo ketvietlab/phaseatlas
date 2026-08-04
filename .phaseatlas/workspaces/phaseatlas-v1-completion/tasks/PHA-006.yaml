@@ -3,7 +3,7 @@ id: PHA-006
 title: Complete cancellation, resume, and stale-result safeguards
 kind: code
 phase: execution-resilience
-state: planned
+state: done
 priority: high
 objective: Runs can be cancelled or resumed from persisted state without losing event continuity,
   and results from obsolete task revisions are prevented from being promoted as current evidence.
@@ -53,3 +53,5 @@ acceptanceCriteria:
 verification: []
 evidenceRequirements:
   - type: human_review
+content:
+  path: PHA-006.md

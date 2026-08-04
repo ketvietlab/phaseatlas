@@ -6,8 +6,12 @@ export default defineConfig({
   platform: "node",
   target: "node24",
   external: ["node:sqlite", "node-pty"],
+  noExternal: [/^(?!node-pty(?:\/|$)).+/],
   clean: true,
   esbuildOptions(options) {
     options.supported = { ...options.supported, "node-colon-prefix-import": true };
+    options.banner = {
+      js: 'import { createRequire as __phaseatlasCreateRequire } from "node:module"; const require = __phaseatlasCreateRequire(import.meta.url);',
+    };
   },
 });

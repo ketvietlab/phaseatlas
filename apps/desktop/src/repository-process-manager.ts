@@ -6,17 +6,43 @@ import path from "node:path";
 import type { DatabaseSync as DatabaseSyncType } from "node:sqlite";
 import { utilityProcess, type UtilityProcess } from "electron";
 import {
+  type AgentResultReview,
+  type AgentRunActionAvailability,
+  type AgentRunActionQuery,
+  type AgentRunCancellationResult,
+  type AgentRunCommandOutputPage,
+  type AgentRunRecoveryInput,
+  type AgentRunRecoveryResult,
+  type AgentRunStartInput,
+  type AgentRunSummary,
+  type ChatEditCancellationResult,
+  type ChatEditConfirmation,
+  type ChatEditPrepareInput,
+  type ChatEditRecoveryInput,
+  type ChatEditResult,
+  type ChatEditStartInput,
   isWorkerEvent,
   isWorkerResponse,
   type PersistedRunEvent,
+  type PersistedRunEventPage,
   type PersistedRunRecord,
   type PlanningEvent,
   type PlanningPublishInput,
   type PlanningStartInput,
+  type PersistedRepositoryChatEvent,
   type PhaseAtlasDesktopEvent,
   type RepositoryFileDocument,
   type RepositoryFileEntry,
   type RepositoryLifecycleState,
+  type RepositoryChatCancellationResult,
+  type RepositoryChatCreateInput,
+  type RepositoryChatEventPage,
+  type RepositoryChatMessage,
+  type RepositoryChatRenameInput,
+  type RepositoryChatRetryInput,
+  type RepositoryChatSendInput,
+  type RepositoryChatSession,
+  type RepositoryChatTurn,
   type RepositorySummary,
   type RepositoryWorkerMethod,
   type RunnerDescriptor,
@@ -61,7 +87,7 @@ interface CatalogRow extends Record<string, unknown> {
 const CATALOG_SCHEMA_VERSION = "1";
 const LIFECYCLE_STATES = new Set<RepositoryLifecycleState>(["closed", "starting", "online", "cooling", "recovery_required"]);
 const ACTIVE_STATES = new Set(["starting", "running"]);
-const TERMINAL_STATES = new Set(["completed", "failed", "cancelled"]);
+const TERMINAL_STATES = new Set(["completed", "failed", "cancelled", "interrupted"]);
 const { DatabaseSync } = createRequire(import.meta.url)("node:" + "sqlite") as {
   DatabaseSync: typeof DatabaseSyncType;
 };
@@ -257,6 +283,7 @@ class RepositoryWorkerHandle {
   private rejectReady!: (error: Error) => void;
   private readySettled = false;
   private readonly readyTimeout: NodeJS.Timeout;
+  private stderrTail = "";
 
   constructor(
     workerEntry: string,
@@ -279,7 +306,11 @@ class RepositoryWorkerHandle {
     this.child.on("message", (message: unknown) => this.onMessage(message));
     this.child.on("exit", (code) => this.onExit(code));
     this.child.stdout?.on("data", (chunk) => console.info(`[repository-worker] ${chunk}`));
-    this.child.stderr?.on("data", (chunk) => console.error(`[repository-worker] ${chunk}`));
+    this.child.stderr?.on("data", (chunk) => {
+      const diagnostic = String(chunk);
+      this.stderrTail = `${this.stderrTail}${diagnostic}`.slice(-4_000);
+      console.error(`[repository-worker] ${diagnostic}`);
+    });
   }
 
   async call<T>(method: RepositoryWorkerMethod, params?: Record<string, unknown>): Promise<T> {
@@ -313,7 +344,8 @@ class RepositoryWorkerHandle {
   }
 
   private onExit(code: number): void {
-    const error = new Error(`Repository worker exited with code ${code}.`);
+    const diagnostic = this.stderrTail.trim();
+    const error = new Error(`Repository worker exited with code ${code}.${diagnostic ? ` ${diagnostic}` : ""}`);
     this.failReady(error);
     for (const pending of this.pending.values()) {
       clearTimeout(pending.timeout);
@@ -353,6 +385,7 @@ export class RepositoryProcessManager {
   private readonly viewDemand = new Map<string, Set<number>>();
   private readonly runDemand = new Map<string, Set<string>>();
   private readonly terminalDemand = new Map<string, Set<string>>();
+  private readonly chatDemand = new Map<string, Set<string>>();
   private readonly idleMs: number;
   private stopped = false;
 
@@ -451,6 +484,57 @@ export class RepositoryProcessManager {
     return (await this.ensureWorker(checkoutId)).call<PersistedRunEvent[]>("run.events", { runId, afterSequence });
   }
 
+  async listRunEventPage(checkoutId: string, runId: string, afterSequence = 0, limit = 200): Promise<PersistedRunEventPage> {
+    return (await this.ensureWorker(checkoutId)).call<PersistedRunEventPage>("run.events-page", { runId, afterSequence, limit });
+  }
+
+  async agentRunCommandOutput(
+    checkoutId: string,
+    runId: string,
+    commandId: string,
+    offset = 0,
+    limit = 20_000,
+  ): Promise<AgentRunCommandOutputPage> {
+    return (await this.ensureWorker(checkoutId)).call<AgentRunCommandOutputPage>("agent-run.command-output", {
+      runId,
+      commandId,
+      offset,
+      limit,
+    });
+  }
+
+  async agentRunActions(checkoutId: string, input: AgentRunActionQuery): Promise<AgentRunActionAvailability[]> {
+    return (await this.ensureWorker(checkoutId)).call<AgentRunActionAvailability[]>("agent-run.actions", { input });
+  }
+
+  async listAgentRuns(checkoutId: string, taskKey?: string): Promise<AgentRunSummary[]> {
+    return (await this.ensureWorker(checkoutId)).call<AgentRunSummary[]>("agent-run.list", {
+      ...(taskKey ? { taskKey } : {}),
+    });
+  }
+
+  async startAgentRun(checkoutId: string, input: AgentRunStartInput): Promise<{ runId: string }> {
+    const started = await (await this.ensureWorker(checkoutId)).call<{ runId: string }>("agent-run.start", { input });
+    this.trackRun(checkoutId, started.runId, "running");
+    return started;
+  }
+
+  async cancelAgentRun(checkoutId: string, runId: string): Promise<AgentRunCancellationResult> {
+    const result = await (await this.ensureWorker(checkoutId)).call<AgentRunCancellationResult>("agent-run.cancel", { runId });
+    this.trackRun(checkoutId, runId, result.status);
+    return result;
+  }
+
+  async agentRunResult(checkoutId: string, runId: string): Promise<AgentResultReview> {
+    return (await this.ensureWorker(checkoutId)).call<AgentResultReview>("agent-run.result", { runId });
+  }
+
+  async recoverAgentRun(checkoutId: string, input: AgentRunRecoveryInput): Promise<AgentRunRecoveryResult> {
+    const result = await (await this.ensureWorker(checkoutId)).call<AgentRunRecoveryResult>("agent-run.recover", { input });
+    if (result.retryRunId) this.trackRun(checkoutId, result.retryRunId, "running");
+    return result;
+  }
+
   async listTerminals(checkoutId: string): Promise<TerminalSessionSnapshot[]> {
     return (await this.ensureWorker(checkoutId)).call<TerminalSessionSnapshot[]>("terminal.list");
   }
@@ -472,6 +556,100 @@ export class RepositoryProcessManager {
   async closeTerminal(checkoutId: string, sessionId: string): Promise<void> {
     await (await this.ensureWorker(checkoutId)).call<void>("terminal.close", { sessionId });
     this.trackTerminal(checkoutId, sessionId, false);
+  }
+
+  async createChatSession(checkoutId: string, input: RepositoryChatCreateInput): Promise<RepositoryChatSession> {
+    return (await this.ensureWorker(checkoutId)).call<RepositoryChatSession>("chat.session.create", { input });
+  }
+
+  async listChatSessions(checkoutId: string): Promise<RepositoryChatSession[]> {
+    return (await this.ensureWorker(checkoutId)).call<RepositoryChatSession[]>("chat.session.list");
+  }
+
+  async getChatSession(checkoutId: string, sessionId: string): Promise<RepositoryChatSession> {
+    return (await this.ensureWorker(checkoutId)).call<RepositoryChatSession>("chat.session.get", { sessionId });
+  }
+
+  async renameChatSession(checkoutId: string, input: RepositoryChatRenameInput): Promise<RepositoryChatSession> {
+    return (await this.ensureWorker(checkoutId)).call<RepositoryChatSession>("chat.session.rename", { input });
+  }
+
+  async closeChatSession(checkoutId: string, sessionId: string): Promise<RepositoryChatSession> {
+    return (await this.ensureWorker(checkoutId)).call<RepositoryChatSession>("chat.session.close", { sessionId });
+  }
+
+  async listChatMessages(checkoutId: string, sessionId: string): Promise<RepositoryChatMessage[]> {
+    return (await this.ensureWorker(checkoutId)).call<RepositoryChatMessage[]>("chat.message.list", { sessionId });
+  }
+
+  async listChatTurns(checkoutId: string, sessionId: string): Promise<RepositoryChatTurn[]> {
+    return (await this.ensureWorker(checkoutId)).call<RepositoryChatTurn[]>("chat.turn.list", { sessionId });
+  }
+
+  async sendChatTurn(checkoutId: string, input: RepositoryChatSendInput): Promise<{ turnId: string }> {
+    const result = await (await this.ensureWorker(checkoutId)).call<{ turnId: string }>("chat.turn.send", { input });
+    this.trackChatTurn(checkoutId, result.turnId, "running");
+    return result;
+  }
+
+  async listChatEvents(checkoutId: string, turnId: string, afterSequence = 0, limit = 200): Promise<RepositoryChatEventPage> {
+    return (await this.ensureWorker(checkoutId)).call<RepositoryChatEventPage>("chat.turn.events", { turnId, afterSequence, limit });
+  }
+
+  async cancelChatTurn(checkoutId: string, turnId: string): Promise<RepositoryChatCancellationResult> {
+    const result = await (await this.ensureWorker(checkoutId)).call<RepositoryChatCancellationResult>("chat.turn.cancel", { turnId });
+    this.trackChatTurn(checkoutId, turnId, result.status);
+    return result;
+  }
+
+  async retryChatTurn(checkoutId: string, input: RepositoryChatRetryInput): Promise<{ turnId: string }> {
+    const result = await (await this.ensureWorker(checkoutId)).call<{ turnId: string }>("chat.turn.retry", { input });
+    this.trackChatTurn(checkoutId, result.turnId, "running");
+    return result;
+  }
+
+  async prepareChatEdit(checkoutId: string, input: ChatEditPrepareInput): Promise<ChatEditConfirmation> {
+    return (await this.ensureWorker(checkoutId)).call<ChatEditConfirmation>("chat.edit.prepare", { input });
+  }
+
+  async listChatEdits(checkoutId: string, sessionId?: string): Promise<ChatEditResult[]> {
+    return (await this.ensureWorker(checkoutId)).call<ChatEditResult[]>("chat.edit.list", { ...(sessionId ? { sessionId } : {}) });
+  }
+
+  async startChatEdit(checkoutId: string, input: ChatEditStartInput): Promise<{ editId: string }> {
+    const result = await (await this.ensureWorker(checkoutId)).call<{ editId: string }>("chat.edit.start", { input });
+    this.trackRun(checkoutId, result.editId, "running");
+    return result;
+  }
+
+  async listChatEditEvents(checkoutId: string, editId: string, afterSequence = 0, limit = 200): Promise<PersistedRunEventPage> {
+    return (await this.ensureWorker(checkoutId)).call<PersistedRunEventPage>("chat.edit.events", { editId, afterSequence, limit });
+  }
+
+  async chatEditResult(checkoutId: string, editId: string): Promise<ChatEditResult> {
+    return (await this.ensureWorker(checkoutId)).call<ChatEditResult>("chat.edit.result", { editId });
+  }
+
+  async cancelChatEdit(checkoutId: string, editId: string): Promise<ChatEditCancellationResult> {
+    const result = await (await this.ensureWorker(checkoutId)).call<ChatEditCancellationResult>("chat.edit.cancel", { editId });
+    this.trackRun(checkoutId, editId, "cancelled");
+    return result;
+  }
+
+  async acceptChatEdit(checkoutId: string, editId: string): Promise<ChatEditResult> {
+    return (await this.ensureWorker(checkoutId)).call<ChatEditResult>("chat.edit.accept", { editId });
+  }
+
+  async discardChatEdit(checkoutId: string, editId: string): Promise<ChatEditResult> {
+    return (await this.ensureWorker(checkoutId)).call<ChatEditResult>("chat.edit.discard", { editId });
+  }
+
+  async retainChatEdit(checkoutId: string, editId: string): Promise<ChatEditResult> {
+    return (await this.ensureWorker(checkoutId)).call<ChatEditResult>("chat.edit.retain", { editId });
+  }
+
+  async recoverChatEdit(checkoutId: string, input: ChatEditRecoveryInput): Promise<ChatEditResult> {
+    return (await this.ensureWorker(checkoutId)).call<ChatEditResult>("chat.edit.recover", { input });
   }
 
   close(checkoutId: string, viewId?: number): void {
@@ -577,6 +755,8 @@ export class RepositoryProcessManager {
 
   private onWorkerEvent(checkoutId: string, worker: RepositoryWorkerHandle, event: WorkerEvent): void {
     if (worker.expectedStop) return;
+    const currentWorker = this.workers.get(checkoutId);
+    if (currentWorker && currentWorker !== worker) return;
     if (event.type === "planning.event" && event.payload.event) {
       const planningEvent = event.payload.event as PlanningEvent;
       this.trackRun(checkoutId, planningEvent.runId, planningEvent.type === "planning.status" ? planningEvent.status : undefined);
@@ -585,10 +765,43 @@ export class RepositoryProcessManager {
       const contentEvent = event.payload.event as TaskContentEvent;
       this.trackRun(checkoutId, contentEvent.runId, contentEvent.type === "task-content.status" ? contentEvent.status : undefined);
       this.eventSink?.({ type: "task-content.event", checkoutId, event: contentEvent });
+    } else if (event.type === "agent-run.event" && typeof event.payload.runId === "string" && event.payload.event) {
+      const persistedEvent = event.payload.event as PersistedRunEvent;
+      const status = persistedEvent.type === "run.status" && typeof persistedEvent.payload.status === "string"
+        ? persistedEvent.payload.status
+        : persistedEvent.type === "agent.result" && typeof persistedEvent.payload.status === "string"
+          ? persistedEvent.payload.status
+          : persistedEvent.type === "run.failed"
+            ? "failed"
+            : persistedEvent.type === "run.cancelled"
+              ? "cancelled"
+              : persistedEvent.type === "run.interrupted"
+                ? "interrupted"
+                : undefined;
+      this.trackRun(checkoutId, event.payload.runId, status);
+      this.eventSink?.({ type: "agent-run.event", checkoutId, runId: event.payload.runId, event: persistedEvent });
     } else if (event.type === "terminal.event" && event.payload.event) {
       const terminalEvent = event.payload.event as TerminalEvent;
       if (terminalEvent.type === "terminal.closed") this.trackTerminal(checkoutId, terminalEvent.sessionId, false);
       this.eventSink?.({ type: "terminal.event", checkoutId, event: terminalEvent });
+    } else if (event.type === "chat.turn.event" && typeof event.payload.turnId === "string" && event.payload.event) {
+      const chatEvent = event.payload.event as PersistedRepositoryChatEvent;
+      const status = chatEvent.type === "chat.turn.completed" ? "completed"
+        : chatEvent.type === "chat.turn.failed" ? "failed"
+          : chatEvent.type === "chat.turn.cancelled" ? "cancelled"
+            : chatEvent.type === "chat.turn.interrupted" ? "interrupted"
+              : chatEvent.type === "chat.turn.status" && typeof chatEvent.payload.status === "string"
+                ? chatEvent.payload.status
+                : undefined;
+      this.trackChatTurn(checkoutId, event.payload.turnId, status);
+      this.eventSink?.({ type: "chat.turn.event", checkoutId, turnId: event.payload.turnId, event: chatEvent });
+    } else if (event.type === "chat.edit.event" && typeof event.payload.editId === "string" && event.payload.event) {
+      const editEvent = event.payload.event as PersistedRunEvent;
+      const status = editEvent.type === "chat.edit.result" ? "completed"
+        : editEvent.type === "chat.edit.failed" ? "failed"
+          : editEvent.type === "chat.edit.running" ? "running" : undefined;
+      this.trackRun(checkoutId, event.payload.editId, status);
+      this.eventSink?.({ type: "chat.edit.event", checkoutId, editId: event.payload.editId, event: editEvent });
     } else if (event.type === "repository.changed") {
       const paths = Array.isArray(event.payload.paths)
         ? event.payload.paths.filter((item): item is string => typeof item === "string")
@@ -623,11 +836,25 @@ export class RepositoryProcessManager {
     }
   }
 
+  private trackChatTurn(checkoutId: string, turnId: string, status?: string): void {
+    const turns = this.chatDemand.get(checkoutId) ?? new Set<string>();
+    if (status && ACTIVE_STATES.has(status)) turns.add(turnId);
+    if (status && TERMINAL_STATES.has(status)) turns.delete(turnId);
+    if (turns.size) {
+      this.chatDemand.set(checkoutId, turns);
+      this.cancelIdle(checkoutId);
+    } else {
+      this.chatDemand.delete(checkoutId);
+      this.scheduleIdle(checkoutId);
+    }
+  }
+
   private onWorkerExit(checkoutId: string, worker: RepositoryWorkerHandle, error: Error, expected: boolean): void {
     if (this.workers.get(checkoutId) !== worker) return;
     this.workers.delete(checkoutId);
     this.runDemand.delete(checkoutId);
     this.terminalDemand.delete(checkoutId);
+    this.chatDemand.delete(checkoutId);
     if (this.stopped) return;
     if (expected) this.catalog.setRuntime(checkoutId, "closed");
     else this.catalog.setRuntime(checkoutId, "recovery_required", error.message);
@@ -635,12 +862,12 @@ export class RepositoryProcessManager {
 
   private scheduleIdle(checkoutId: string): void {
     const worker = this.workers.get(checkoutId);
-    if (!worker || this.viewDemand.get(checkoutId)?.size || this.runDemand.get(checkoutId)?.size || this.terminalDemand.get(checkoutId)?.size) return;
+    if (!worker || this.viewDemand.get(checkoutId)?.size || this.runDemand.get(checkoutId)?.size || this.terminalDemand.get(checkoutId)?.size || this.chatDemand.get(checkoutId)?.size) return;
     this.cancelIdle(checkoutId);
     this.catalog.setRuntime(checkoutId, "cooling");
     const timer = setTimeout(() => {
       this.idleTimers.delete(checkoutId);
-      if (this.viewDemand.get(checkoutId)?.size || this.runDemand.get(checkoutId)?.size || this.terminalDemand.get(checkoutId)?.size) return;
+      if (this.viewDemand.get(checkoutId)?.size || this.runDemand.get(checkoutId)?.size || this.terminalDemand.get(checkoutId)?.size || this.chatDemand.get(checkoutId)?.size) return;
       if (this.workers.get(checkoutId) !== worker) return;
       this.workers.delete(checkoutId);
       this.catalog.setRuntime(checkoutId, "closed");

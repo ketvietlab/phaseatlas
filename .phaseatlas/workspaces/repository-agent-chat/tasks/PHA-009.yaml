@@ -1,0 +1,58 @@
+schemaVersion: phaseatlas.task/v1
+id: PHA-009
+title: Establish durable repository chat sessions
+kind: code
+phase: agent-chat-runtime
+state: done
+priority: high
+objective: A user can start and resume a provider-neutral agent conversation scoped to an open
+  repository without selecting a workspace or canonical task, while messages, normalized events,
+  provider identity, and session state remain durable and renderer-safe.
+owners: []
+dependencies:
+  - taskKey: PHA-006
+    relation: blocks_start
+    requiredState: done
+scope:
+  allowedPaths:
+    - packages/contracts/src/index.ts
+    - packages/core/src
+    - apps/repository-worker/src
+    - docs/contracts
+    - docs/decisions
+    - .phaseatlas/workspaces/repository-agent-chat
+  forbiddenPaths: []
+  writable: true
+  allowDependencyChanges: false
+  allowDatabaseMigrations: false
+  allowExternalNetwork: false
+acceptanceCriteria:
+  - id: AC-1
+    statement: Repository chat sessions can be created, listed, resumed, renamed, and closed without a
+      workspace slug or task key.
+    verification:
+      type: human
+      reviewerRole: PhaseAtlas maintainer
+  - id: AC-2
+    statement: User and assistant messages plus normalized tool activity survive worker and application
+      restart with gap-free cursor replay.
+    verification:
+      type: human
+      reviewerRole: PhaseAtlas maintainer
+  - id: AC-3
+    statement: Each turn uses a model discovered for the repository's registered provider and rejects
+      arbitrary executable paths, model IDs, commands, credentials, or provider payloads.
+    verification:
+      type: human
+      reviewerRole: PhaseAtlas maintainer
+  - id: AC-4
+    statement: Chat mode is read-only by default and cannot write canonical tasks, promote evidence, or
+      modify the repository through conversational output.
+    verification:
+      type: human
+      reviewerRole: PhaseAtlas maintainer
+verification: []
+evidenceRequirements:
+  - type: human_review
+content:
+  path: PHA-009.md

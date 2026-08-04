@@ -9,7 +9,22 @@ import type {
   PersistedRunStatus,
   AgentRunCreateInput,
   AgentRunAction,
+  AgentRunActionAvailability,
+  AgentRunActionQuery,
+  AgentRunCancellationResult,
+  AgentRunRecoveryInput,
+  AgentRunRecoveryResult,
+  AgentRunStartInput,
+  AgentRunSummary,
   AgentSandbox,
+  ChatEditPrepareInput,
+  ChatEditStartInput,
+  PersistedRunEventPage,
+  RepositoryChatCreateInput,
+  RepositoryChatImageMediaType,
+  RepositoryChatRenameInput,
+  RepositoryChatRetryInput,
+  RepositoryChatSendInput,
   TaskContentEvent,
   TaskContentRunStatus,
   TaskContentRunSummary,
@@ -27,12 +42,22 @@ import {
   listRepositoryFiles,
   readRepositoryFile,
   saveRepositoryFile,
+  reviewAgentResult,
   writeTaskContent,
   WorktreeLeaseManager,
 } from "@phaseatlas/core";
 import { watch, type FSWatcher } from "chokidar";
-import { assertRunnerModel, RunnerRegistry } from "./runner-registry.js";
+import { assertRunnerSelection, RunnerRegistry } from "./runner-registry.js";
 import { TerminalSessionManager } from "./terminal-session-manager.js";
+import { RepositoryChatAdapterRegistry } from "./chat-adapter-registry.js";
+import { RepositoryChatRuntime } from "./repository-chat-runtime.js";
+import { ChatEditAdapterRegistry } from "./chat-edit-adapter-registry.js";
+import { ChatEditRuntime } from "./chat-edit-runtime.js";
+import {
+  AgentTaskRunGuard,
+  canonicalAgentTaskKey,
+  resolveAgentTaskReference,
+} from "./agent-task-run-guard.js";
 
 interface ElectronParentPort {
   on(event: "message", listener: (event: { data: unknown }) => void): void;
@@ -65,10 +90,29 @@ if (
 }
 const operationalStore = new CheckoutOperationalStore(resolvedCheckoutStorePath, initialRepository.checkoutId);
 operationalStore.reconcileInterruptedRuns();
+operationalStore.reconcileInterruptedChatTurns();
 const leaseManager = new WorktreeLeaseManager(canonicalRepositoryRoot, initialRepository.checkoutId, operationalStore);
 const executionScheduler = new AgentExecutionScheduler(inspector, operationalStore, leaseManager);
 const abandonedLeases = await leaseManager.reconcileAbandoned();
 const runners = new RunnerRegistry();
+const chatRuntime = new RepositoryChatRuntime(
+  operationalStore,
+  runners,
+  new RepositoryChatAdapterRegistry(),
+  canonicalRepositoryRoot,
+  initialRepository.checkoutId,
+  (event) => send({ type: "chat.turn.event", payload: { turnId: event.turnId, event } }),
+);
+const chatEditRuntime = new ChatEditRuntime(
+  operationalStore,
+  inspector,
+  leaseManager,
+  runners,
+  new ChatEditAdapterRegistry(),
+  canonicalRepositoryRoot,
+  initialRepository.checkoutId,
+  (editId, event) => send({ type: "chat.edit.event", payload: { editId, event } }),
+);
 const parentPort: ElectronParentPort = utilityParentPort;
 const activePlanningRuns = new Map<string, AbortController>();
 const activeTaskContentRuns = new Map<string, {
@@ -76,6 +120,12 @@ const activeTaskContentRuns = new Map<string, {
   status: TaskContentRunStatus;
   taskKeys: string[];
 }>();
+const activeAgentRuns = new Map<string, {
+  controller: AbortController;
+  completion: Promise<void>;
+  cancellation?: Promise<AgentRunCancellationResult>;
+}>();
+const agentTaskRunGuard = new AgentTaskRunGuard();
 const terminalSessions = new TerminalSessionManager(canonicalRepositoryRoot, (event) => {
   send({ type: "terminal.event", payload: { event } });
 });
@@ -123,6 +173,103 @@ function terminalCreateInput(value: unknown): Partial<TerminalCreateInput> {
   };
 }
 
+function chatCreateInput(value: unknown): RepositoryChatCreateInput {
+  if (!isRecord(value)) throw new Error("Chat session input is required.");
+  const allowed = new Set(["runnerId", "model", "reasoningEffort", "title"]);
+  if (Object.keys(value).some((field) => !allowed.has(field))) throw new Error("Chat session input contains unsupported fields.");
+  if (typeof value.runnerId !== "string" || typeof value.model !== "string") {
+    throw new Error("runnerId and model are required.");
+  }
+  if (value.title !== undefined && typeof value.title !== "string") throw new Error("title must be a string.");
+  if (value.reasoningEffort !== undefined && (typeof value.reasoningEffort !== "string" || !value.reasoningEffort.trim())) {
+    throw new Error("reasoningEffort must be a non-empty string.");
+  }
+  return {
+    runnerId: value.runnerId,
+    model: value.model,
+    ...(typeof value.reasoningEffort === "string" ? { reasoningEffort: value.reasoningEffort.trim() } : {}),
+    ...(typeof value.title === "string" ? { title: value.title } : {}),
+  };
+}
+
+function chatRenameInput(value: unknown): RepositoryChatRenameInput {
+  if (!isRecord(value) || Object.keys(value).some((field) => !["sessionId", "title"].includes(field))) {
+    throw new Error("Chat rename input is invalid.");
+  }
+  if (typeof value.sessionId !== "string" || typeof value.title !== "string") {
+    throw new Error("sessionId and title are required.");
+  }
+  return { sessionId: value.sessionId, title: value.title };
+}
+
+function chatSendInput(value: unknown): RepositoryChatSendInput {
+  if (!isRecord(value) || Object.keys(value).some((field) => !["sessionId", "text", "attachments"].includes(field))) {
+    throw new Error("Chat turn input is invalid.");
+  }
+  if (typeof value.sessionId !== "string" || typeof value.text !== "string") {
+    throw new Error("sessionId and text are required.");
+  }
+  if (value.attachments !== undefined && !Array.isArray(value.attachments)) throw new Error("attachments must be an array.");
+  const attachments = (value.attachments ?? []).map((attachment) => {
+    if (!isRecord(attachment)) {
+      throw new Error("Chat attachment is invalid.");
+    }
+    if (attachment.type === "image") {
+      if (Object.keys(attachment).some((field) => !["type", "name", "mediaType", "data"].includes(field)) ||
+          typeof attachment.name !== "string" || typeof attachment.mediaType !== "string" || typeof attachment.data !== "string") {
+        throw new Error("Chat image attachment is invalid.");
+      }
+      return { type: "image" as const, name: attachment.name, mediaType: attachment.mediaType as RepositoryChatImageMediaType, data: attachment.data };
+    }
+    if (Object.keys(attachment).some((field) => !["type", "path"].includes(field)) || typeof attachment.path !== "string" ||
+        (attachment.type !== undefined && attachment.type !== "repository")) {
+      throw new Error("Chat repository attachment is invalid.");
+    }
+    return { path: attachment.path };
+  });
+  return { sessionId: value.sessionId, text: value.text, ...(attachments.length ? { attachments } : {}) };
+}
+
+function chatEditPrepareInput(value: unknown): ChatEditPrepareInput {
+  if (!isRecord(value) || Object.keys(value).some((field) => !["sessionId", "prompt", "scope"].includes(field))) {
+    throw new Error("Chat edit preparation input is invalid.");
+  }
+  if (typeof value.sessionId !== "string" || typeof value.prompt !== "string" || !isRecord(value.scope)) {
+    throw new Error("sessionId, prompt, and scope are required.");
+  }
+  if (Object.keys(value.scope).some((field) => !["allowedPaths", "forbiddenPaths"].includes(field))) {
+    throw new Error("Chat edit scope contains unsupported fields.");
+  }
+  if (!Array.isArray(value.scope.allowedPaths) || !Array.isArray(value.scope.forbiddenPaths)) {
+    throw new Error("Chat edit scope paths must be arrays.");
+  }
+  return {
+    sessionId: value.sessionId,
+    prompt: value.prompt,
+    scope: {
+      allowedPaths: value.scope.allowedPaths as string[],
+      forbiddenPaths: value.scope.forbiddenPaths as string[],
+    },
+  };
+}
+
+function chatEditStartInput(value: unknown): ChatEditStartInput {
+  if (!isRecord(value) || Object.keys(value).some((field) => !["editId", "confirmationDigest"].includes(field))) {
+    throw new Error("Chat edit start input is invalid.");
+  }
+  if (typeof value.editId !== "string" || typeof value.confirmationDigest !== "string") {
+    throw new Error("editId and confirmationDigest are required.");
+  }
+  return { editId: value.editId, confirmationDigest: value.confirmationDigest };
+}
+
+function chatRetryInput(value: unknown): RepositoryChatRetryInput {
+  if (!isRecord(value) || Object.keys(value).some((field) => field !== "turnId") || typeof value.turnId !== "string") {
+    throw new Error("Chat retry input is invalid.");
+  }
+  return { turnId: value.turnId };
+}
+
 function planningInput(value: unknown): PlanningStartInput {
   if (!value || typeof value !== "object") throw new Error("Planning input is required.");
   const input = value as Record<string, unknown>;
@@ -133,6 +280,9 @@ function planningInput(value: unknown): PlanningStartInput {
   }
   if (input.model !== undefined && typeof input.model !== "string") {
     throw new Error("model must be a string.");
+  }
+  if (input.reasoningEffort !== undefined && (typeof input.reasoningEffort !== "string" || !input.reasoningEffort.trim())) {
+    throw new Error("reasoningEffort must be a non-empty string.");
   }
   if (!input.target || typeof input.target !== "object") throw new Error("target is required.");
   const targetValue = input.target as Record<string, unknown>;
@@ -153,6 +303,7 @@ function planningInput(value: unknown): PlanningStartInput {
     runnerId: (input.runnerId as string).trim(),
     request: (input.request as string).trim(),
     ...(typeof input.model === "string" && input.model.trim() ? { model: input.model.trim() } : {}),
+    ...(typeof input.reasoningEffort === "string" ? { reasoningEffort: input.reasoningEffort.trim() } : {}),
   };
 }
 
@@ -181,6 +332,80 @@ function agentRunInput(value: unknown): AgentRunCreateInput {
     ...(typeof value.expectedTaskRevision === "string" ? { expectedTaskRevision: value.expectedTaskRevision } : {}),
     ...(typeof value.expectedCheckoutId === "string" ? { expectedCheckoutId: value.expectedCheckoutId } : {}),
     ...(value.requestedSandbox ? { requestedSandbox: value.requestedSandbox as AgentSandbox } : {}),
+  };
+}
+
+function agentRunStartInput(value: unknown): AgentRunStartInput {
+  if (!isRecord(value)) throw new Error("Agent run start input is required.");
+  const allowedFields = new Set([
+    "taskKey", "expectedTaskRevision", "expectedCheckoutId", "action", "requestedSandbox", "runnerId", "model", "reasoningEffort",
+  ]);
+  if (Object.keys(value).some((field) => !allowedFields.has(field))) {
+    throw new Error("Agent run start input contains unsupported fields.");
+  }
+  if (typeof value.runnerId !== "string" || !value.runnerId.trim()) throw new Error("runnerId is required.");
+  if (value.model !== undefined && (typeof value.model !== "string" || !value.model.trim())) {
+    throw new Error("model must be a non-empty string.");
+  }
+  if (value.reasoningEffort !== undefined && (typeof value.reasoningEffort !== "string" || !value.reasoningEffort.trim())) {
+    throw new Error("reasoningEffort must be a non-empty string.");
+  }
+  const request = agentRunInput(Object.fromEntries(
+    Object.entries(value).filter(([field]) => !["runnerId", "model", "reasoningEffort"].includes(field)),
+  ));
+  return {
+    ...request,
+    runnerId: value.runnerId.trim(),
+    ...(typeof value.model === "string" ? { model: value.model.trim() } : {}),
+    ...(typeof value.reasoningEffort === "string" ? { reasoningEffort: value.reasoningEffort.trim() } : {}),
+  };
+}
+
+function agentRunActionQuery(value: unknown): AgentRunActionQuery {
+  if (!isRecord(value)) throw new Error("Agent run action query is required.");
+  const allowedFields = new Set(["taskKey", "runnerId", "model", "reasoningEffort"]);
+  if (Object.keys(value).some((field) => !allowedFields.has(field))) {
+    throw new Error("Agent run action query contains unsupported fields.");
+  }
+  if (typeof value.taskKey !== "string" || !value.taskKey.trim()) throw new Error("taskKey is required.");
+  if (typeof value.runnerId !== "string" || !value.runnerId.trim()) throw new Error("runnerId is required.");
+  if (value.model !== undefined && (typeof value.model !== "string" || !value.model.trim())) {
+    throw new Error("model must be a non-empty string.");
+  }
+  if (value.reasoningEffort !== undefined && (typeof value.reasoningEffort !== "string" || !value.reasoningEffort.trim())) {
+    throw new Error("reasoningEffort must be a non-empty string.");
+  }
+  return {
+    taskKey: value.taskKey.trim(),
+    runnerId: value.runnerId.trim(),
+    ...(typeof value.model === "string" ? { model: value.model.trim() } : {}),
+    ...(typeof value.reasoningEffort === "string" ? { reasoningEffort: value.reasoningEffort.trim() } : {}),
+  };
+}
+
+function agentRunRecoveryInput(value: unknown): AgentRunRecoveryInput {
+  if (!isRecord(value)) throw new Error("Agent run recovery input is required.");
+  const allowedFields = new Set(["runId", "decision", "runnerId", "model", "reasoningEffort"]);
+  if (Object.keys(value).some((field) => !allowedFields.has(field))) {
+    throw new Error("Agent run recovery input contains unsupported fields.");
+  }
+  if (typeof value.runId !== "string" || !/^[a-f0-9-]{8,64}$/i.test(value.runId)) throw new Error("runId is invalid.");
+  if (value.decision !== "leave_interrupted" && value.decision !== "retry") throw new Error("Recovery decision is invalid.");
+  if (value.decision === "retry" && (typeof value.runnerId !== "string" || !value.runnerId.trim())) {
+    throw new Error("runnerId is required for retry.");
+  }
+  if (value.model !== undefined && (typeof value.model !== "string" || !value.model.trim())) {
+    throw new Error("model must be a non-empty string.");
+  }
+  if (value.reasoningEffort !== undefined && (typeof value.reasoningEffort !== "string" || !value.reasoningEffort.trim())) {
+    throw new Error("reasoningEffort must be a non-empty string.");
+  }
+  return {
+    runId: value.runId,
+    decision: value.decision,
+    ...(typeof value.runnerId === "string" ? { runnerId: value.runnerId.trim() } : {}),
+    ...(typeof value.model === "string" ? { model: value.model.trim() } : {}),
+    ...(typeof value.reasoningEffort === "string" ? { reasoningEffort: value.reasoningEffort.trim() } : {}),
   };
 }
 
@@ -288,7 +513,7 @@ function startPlanning(input: PlanningStartInput): { runId: string } {
         queueDelta(`PhaseAtlas · Checking runner · ${input.runnerId}\n`);
         const descriptor = await runner.describe();
         if (!descriptor.available) throw new Error(descriptor.unavailableReason || `${descriptor.name} is unavailable.`);
-        assertRunnerModel(descriptor, input.model);
+        assertRunnerSelection(descriptor, input.model, input.reasoningEffort);
 
         status("running");
         heartbeatStage = `${descriptor.name} active`;
@@ -350,10 +575,14 @@ function taskContentInput(value: unknown): TaskContentStartInput {
     throw new Error("runnerId must be a non-empty string.");
   }
   if (value.model !== undefined && typeof value.model !== "string") throw new Error("model must be a string.");
+  if (value.reasoningEffort !== undefined && (typeof value.reasoningEffort !== "string" || !value.reasoningEffort.trim())) {
+    throw new Error("reasoningEffort must be a non-empty string.");
+  }
   return {
     taskKeys: [...new Set((value.taskKeys as string[]).map((taskKey) => taskKey.trim()))],
     runnerId: value.runnerId.trim(),
     ...(typeof value.model === "string" && value.model.trim() ? { model: value.model.trim() } : {}),
+    ...(typeof value.reasoningEffort === "string" ? { reasoningEffort: value.reasoningEffort.trim() } : {}),
   };
 }
 
@@ -427,7 +656,7 @@ function startTaskContent(input: TaskContentStartInput): { runId: string } {
         const runner = runners.get(input.runnerId);
         const descriptor = await runner.describe();
         if (!descriptor.available) throw new Error(descriptor.unavailableReason || `${descriptor.name} is unavailable.`);
-        assertRunnerModel(descriptor, input.model);
+        assertRunnerSelection(descriptor, input.model, input.reasoningEffort);
         status("running");
         await mapConcurrent(tasks, 4, async (task) => {
           const taskKey = `${task.key.workspaceSlug}/${task.key.taskId}`;
@@ -449,6 +678,7 @@ function startTaskContent(input: TaskContentStartInput): { runId: string } {
                   runnerId: input.runnerId,
                   request: `Initialize the approved body for canonical task ${taskKey}.`,
                   ...(input.model ? { model: input.model } : {}),
+                  ...(input.reasoningEffort ? { reasoningEffort: input.reasoningEffort } : {}),
                 },
                 canonicalTasks: snapshot.tasks,
                 workspaces,
@@ -522,6 +752,211 @@ function listTaskContentRuns(): TaskContentRunSummary[] {
   }));
 }
 
+async function agentRunActions(
+  input: AgentRunActionQuery,
+  options: { ignoreStartingTaskKey?: string; snapshot?: Awaited<ReturnType<typeof inspector.taskSnapshot>> } = {},
+): Promise<AgentRunActionAvailability[]> {
+  const [snapshot, descriptor] = await Promise.all([
+    options.snapshot ?? inspector.taskSnapshot(),
+    runners.get(input.runnerId).describe(),
+  ]);
+  const task = resolveAgentTaskReference(snapshot, input.taskKey);
+  const taskKey = canonicalAgentTaskKey(task);
+  const commonReasons: string[] = [];
+  if (snapshot.issues.some((issue) => issue.severity === "error")) {
+    commonReasons.push("Resolve canonical task validation errors before execution.");
+  }
+  if (!descriptor.available) commonReasons.push(descriptor.unavailableReason || `${descriptor.name} is unavailable.`);
+  try {
+    assertRunnerSelection(descriptor, input.model, input.reasoningEffort);
+  } catch (error) {
+    commonReasons.push(error instanceof Error ? error.message : "The selected model is unavailable.");
+  }
+  const hasActiveTaskRun = operationalStore.listRuns().some((run) =>
+    run.kind === "agent" && ["starting", "running"].includes(run.status) && operationalStore.getAgentSpec(run.runId)?.taskKey === taskKey
+  );
+  if (hasActiveTaskRun || (agentTaskRunGuard.has(taskKey) && options.ignoreStartingTaskKey !== taskKey)) {
+    commonReasons.push("Another agent run is already active for this task.");
+  }
+
+  const incompleteDependencies = task.dependencies.flatMap((dependency) => {
+    if (dependency.relation !== "blocks_start") return [];
+    const dependencyTask = snapshot.tasks.find((candidate) =>
+      `${candidate.key.workspaceSlug}/${candidate.key.taskId}` === dependency.taskKey ||
+      candidate.key.taskId === dependency.taskKey
+    );
+    const requiredState = dependency.requiredState ?? "done";
+    return dependencyTask?.state === requiredState
+      ? []
+      : [`Dependency ${dependency.taskKey} must be ${requiredState.replaceAll("_", " ")}.`];
+  });
+  const hasAbandonedAttempt = leaseManager.list().some((lease) => {
+    if (lease.status !== "abandoned") return false;
+    return operationalStore.getAgentSpec(lease.runId)?.taskKey === taskKey;
+  });
+  const actions: AgentRunAction[] = ["analyze", "plan", "implement", "review"];
+  return actions.map((action) => {
+    const sandbox: AgentSandbox = action === "implement" ? "workspace-write" : "read-only";
+    const blockingReasons = [...commonReasons];
+    if (!descriptor.execution?.actions.includes(action)) {
+      blockingReasons.push(`${descriptor.name} does not support ${action} runs.`);
+    }
+    if (!descriptor.execution?.sandboxes.includes(sandbox)) {
+      blockingReasons.push(`${descriptor.name} cannot enforce the required ${sandbox} sandbox.`);
+    }
+    if (action === "implement") {
+      if (!task.scope.writable) blockingReasons.push("This task contract does not permit repository writes.");
+      if (!["ready", "in_progress", "in_review"].includes(task.state)) {
+        blockingReasons.push(`Task state ${task.state.replaceAll("_", " ")} is not execution-ready.`);
+      }
+      blockingReasons.push(...incompleteDependencies);
+      if (hasAbandonedAttempt) blockingReasons.push("Resolve the abandoned worktree attempt before starting another implementation.");
+    }
+    return { action, sandbox, available: blockingReasons.length === 0, blockingReasons };
+  });
+}
+
+async function listAgentRuns(taskKey?: string): Promise<AgentRunSummary[]> {
+  if (taskKey !== undefined && (!taskKey.trim() || taskKey.length > 160)) throw new Error("taskKey is invalid.");
+  const summaries: AgentRunSummary[] = [];
+  for (const run of operationalStore.listRuns().filter((candidate) => candidate.kind === "agent")) {
+    const spec = operationalStore.getAgentSpec(run.runId);
+    if (!spec || (taskKey && spec.taskKey !== taskKey)) continue;
+    let review: Awaited<ReturnType<typeof reviewAgentResult>> | undefined;
+    if (operationalStore.getAgentResult(run.runId)) {
+      try {
+        review = await reviewAgentResult(operationalStore, inspector, run.runId);
+      } catch {
+        review = undefined;
+      }
+    }
+    const parentRunId = operationalStore.parentRunId(run.runId);
+    summaries.push({
+      runId: run.runId,
+      taskKey: spec.taskKey,
+      taskRevision: spec.taskRevision,
+      action: spec.action,
+      sandbox: spec.sandbox,
+      runnerId: spec.runnerId,
+      ...(spec.model ? { model: spec.model } : {}),
+      ...(spec.reasoningEffort ? { reasoningEffort: spec.reasoningEffort } : {}),
+      status: run.status,
+      ...(parentRunId ? { parentRunId } : {}),
+      ...(review ? { freshness: review.freshness, promotable: review.promotable } : {}),
+      createdAt: run.createdAt,
+      updatedAt: run.updatedAt,
+    });
+  }
+  return summaries;
+}
+
+async function startAgentRun(input: AgentRunStartInput, parentRunId?: string): Promise<{ runId: string }> {
+  const snapshot = await inspector.taskSnapshot();
+  const taskKey = canonicalAgentTaskKey(resolveAgentTaskReference(snapshot, input.taskKey));
+  const releaseTaskStart = agentTaskRunGuard.acquire(taskKey);
+  try {
+    const availability = (await agentRunActions({
+      taskKey,
+      runnerId: input.runnerId,
+      ...(input.model ? { model: input.model } : {}),
+      ...(input.reasoningEffort ? { reasoningEffort: input.reasoningEffort } : {}),
+    }, { ignoreStartingTaskKey: taskKey, snapshot })).find((candidate) => candidate.action === input.action);
+    if (!availability?.available) {
+      throw new Error(availability?.blockingReasons.join(" ") || `Action ${input.action} is unavailable.`);
+    }
+    const runner = runners.get(input.runnerId);
+    const descriptor = await runner.describe();
+    if (!descriptor.available) throw new Error(descriptor.unavailableReason || `${descriptor.name} is unavailable.`);
+    assertRunnerSelection(descriptor, input.model, input.reasoningEffort);
+    const expectedSandbox: AgentSandbox = input.action === "implement" ? "workspace-write" : "read-only";
+    const adapter = runners.getExecution(input.runnerId, input.action, expectedSandbox);
+    const request: AgentRunCreateInput = {
+      taskKey,
+      action: input.action,
+      ...(input.expectedTaskRevision ? { expectedTaskRevision: input.expectedTaskRevision } : {}),
+      ...(input.expectedCheckoutId ? { expectedCheckoutId: input.expectedCheckoutId } : {}),
+      ...(input.requestedSandbox ? { requestedSandbox: input.requestedSandbox } : {}),
+    };
+    const prepared = await executionScheduler.prepare(request, {
+      runnerId: input.runnerId,
+      ...(input.model ? { model: input.model } : {}),
+      ...(input.reasoningEffort ? { reasoningEffort: input.reasoningEffort } : {}),
+    });
+    if (parentRunId) operationalStore.linkRunAttempt(prepared.spec.runId, parentRunId);
+    const controller = new AbortController();
+    const entry: {
+      controller: AbortController;
+      completion: Promise<void>;
+      cancellation?: Promise<AgentRunCancellationResult>;
+    } = { controller, completion: Promise.resolve() };
+    entry.completion = executionScheduler.executePrepared(
+      prepared,
+      adapter,
+      controller.signal,
+      (event) => send({ type: "agent-run.event", payload: { runId: prepared.spec.runId, event } }),
+      input.model,
+      input.reasoningEffort,
+    ).then(() => undefined).finally(() => {
+      if (activeAgentRuns.get(prepared.spec.runId) === entry) activeAgentRuns.delete(prepared.spec.runId);
+    });
+    activeAgentRuns.set(prepared.spec.runId, entry);
+    void entry.completion.catch(() => undefined);
+    return { runId: prepared.spec.runId };
+  } finally {
+    releaseTaskStart();
+  }
+}
+
+async function cancelAgentRun(runId: string): Promise<AgentRunCancellationResult> {
+  const run = operationalStore.getRun(runId);
+  if (run.kind !== "agent") throw new Error("Run is not an agent execution.");
+  if (["completed", "failed", "cancelled", "interrupted"].includes(run.status)) {
+    return {
+      runId,
+      status: run.status as AgentRunCancellationResult["status"],
+      disposition: "already_terminal",
+    };
+  }
+  const active = activeAgentRuns.get(runId);
+  if (!active) throw new Error("The agent process is not owned by this worker and requires recovery.");
+  if (!active.cancellation) {
+    active.controller.abort(new Error("Agent run cancellation requested."));
+    active.cancellation = active.completion.catch(() => undefined).then(() => {
+      const terminal = operationalStore.getRun(runId);
+      if (!["completed", "failed", "cancelled", "interrupted"].includes(terminal.status)) {
+        throw new Error("Agent cancellation did not reach a durable terminal state.");
+      }
+      return {
+        runId,
+        status: terminal.status as AgentRunCancellationResult["status"],
+        disposition: terminal.status === "cancelled" ? "cancelled" as const : "already_terminal" as const,
+      };
+    });
+  }
+  return active.cancellation;
+}
+
+async function recoverAgentRun(input: AgentRunRecoveryInput): Promise<AgentRunRecoveryResult> {
+  const run = operationalStore.getRun(input.runId);
+  if (run.kind !== "agent" || run.status !== "interrupted") {
+    throw new Error("Only an interrupted agent run can be recovered.");
+  }
+  if (input.decision === "leave_interrupted") {
+    return { originalRunId: input.runId, decision: input.decision };
+  }
+  const previous = operationalStore.getAgentSpec(input.runId);
+  if (!previous || !input.runnerId) throw new Error("Interrupted run specification is unavailable.");
+  const retry = await startAgentRun({
+    taskKey: previous.taskKey,
+    action: previous.action,
+    expectedCheckoutId: initialRepository.checkoutId,
+    runnerId: input.runnerId,
+    ...(input.model ? { model: input.model } : {}),
+    ...(input.reasoningEffort ? { reasoningEffort: input.reasoningEffort } : {}),
+  }, input.runId);
+  return { originalRunId: input.runId, decision: input.decision, retryRunId: retry.runId };
+}
+
 async function dispatch(request: WorkerRequest): Promise<unknown> {
   switch (request.method) {
     case "repository.describe":
@@ -570,8 +1005,45 @@ async function dispatch(request: WorkerRequest): Promise<unknown> {
       }
       return operationalStore.listEvents(runId, Number(afterSequence ?? 0));
     }
+    case "run.events-page": {
+      const { runId, afterSequence, limit } = requestParams(request);
+      if (typeof runId !== "string") throw new Error("runId is required.");
+      return operationalStore.listEventsPage(runId, Number(afterSequence ?? 0), Number(limit ?? 200));
+    }
     case "agent-run.prepare":
       return executionScheduler.prepare(agentRunInput(requestParams(request).input));
+    case "agent-run.actions":
+      return agentRunActions(agentRunActionQuery(requestParams(request).input));
+    case "agent-run.list": {
+      const taskKey = requestParams(request).taskKey;
+      if (taskKey !== undefined && typeof taskKey !== "string") throw new Error("taskKey must be a string.");
+      return listAgentRuns(taskKey);
+    }
+    case "agent-run.command-output": {
+      const { runId, commandId, offset, limit } = requestParams(request);
+      if (typeof runId !== "string" || !/^[a-f0-9-]{8,64}$/i.test(runId)) throw new Error("runId is invalid.");
+      if (typeof commandId !== "string" || !/^command-[1-9][0-9]*$/.test(commandId)) throw new Error("commandId is invalid.");
+      return operationalStore.readAgentCommandOutput(
+        runId,
+        commandId,
+        Number(offset ?? 0),
+        Number(limit ?? 20_000),
+      );
+    }
+    case "agent-run.start":
+      return startAgentRun(agentRunStartInput(requestParams(request).input));
+    case "agent-run.cancel": {
+      const runId = requestParams(request).runId;
+      if (typeof runId !== "string" || !/^[a-f0-9-]{8,64}$/i.test(runId)) throw new Error("runId is invalid.");
+      return cancelAgentRun(runId);
+    }
+    case "agent-run.result": {
+      const runId = requestParams(request).runId;
+      if (typeof runId !== "string" || !/^[a-f0-9-]{8,64}$/i.test(runId)) throw new Error("runId is invalid.");
+      return reviewAgentResult(operationalStore, inspector, runId);
+    }
+    case "agent-run.recover":
+      return recoverAgentRun(agentRunRecoveryInput(requestParams(request).input));
     case "agent-run.leases":
       return leaseManager.list();
     case "agent-run.release": {
@@ -609,6 +1081,96 @@ async function dispatch(request: WorkerRequest): Promise<unknown> {
       if (typeof sessionId !== "string") throw new Error("sessionId is required.");
       terminalSessions.close(sessionId);
       return undefined;
+    }
+    case "chat.session.create":
+      return chatRuntime.createSession(chatCreateInput(requestParams(request).input));
+    case "chat.session.list":
+      return chatRuntime.listSessions();
+    case "chat.session.get": {
+      const sessionId = requestParams(request).sessionId;
+      if (typeof sessionId !== "string") throw new Error("sessionId is required.");
+      return chatRuntime.getSession(sessionId);
+    }
+    case "chat.session.rename":
+      return chatRuntime.renameSession(chatRenameInput(requestParams(request).input));
+    case "chat.session.close": {
+      const sessionId = requestParams(request).sessionId;
+      if (typeof sessionId !== "string") throw new Error("sessionId is required.");
+      return chatRuntime.closeSession(sessionId);
+    }
+    case "chat.message.list": {
+      const sessionId = requestParams(request).sessionId;
+      if (typeof sessionId !== "string") throw new Error("sessionId is required.");
+      return chatRuntime.listMessages(sessionId);
+    }
+    case "chat.turn.list": {
+      const sessionId = requestParams(request).sessionId;
+      if (typeof sessionId !== "string") throw new Error("sessionId is required.");
+      return chatRuntime.listTurns(sessionId);
+    }
+    case "chat.turn.send":
+      return chatRuntime.send(chatSendInput(requestParams(request).input));
+    case "chat.turn.events": {
+      const { turnId, afterSequence, limit } = requestParams(request);
+      if (typeof turnId !== "string") throw new Error("turnId is required.");
+      return chatRuntime.eventPage(turnId, Number(afterSequence ?? 0), Number(limit ?? 200));
+    }
+    case "chat.turn.cancel": {
+      const turnId = requestParams(request).turnId;
+      if (typeof turnId !== "string") throw new Error("turnId is required.");
+      return chatRuntime.cancel(turnId);
+    }
+    case "chat.turn.retry":
+      return chatRuntime.retry(chatRetryInput(requestParams(request).input));
+    case "chat.edit.prepare":
+      return chatEditRuntime.prepare(chatEditPrepareInput(requestParams(request).input));
+    case "chat.edit.list": {
+      const sessionId = requestParams(request).sessionId;
+      if (sessionId !== undefined && typeof sessionId !== "string") throw new Error("sessionId must be a string.");
+      return chatEditRuntime.list(sessionId as string | undefined);
+    }
+    case "chat.edit.start":
+      return chatEditRuntime.start(chatEditStartInput(requestParams(request).input));
+    case "chat.edit.events": {
+      const { editId, afterSequence, limit } = requestParams(request);
+      if (typeof editId !== "string") throw new Error("editId is required.");
+      return chatEditRuntime.events(editId, Number(afterSequence ?? 0), Number(limit ?? 200));
+    }
+    case "chat.edit.result": {
+      const editId = requestParams(request).editId;
+      if (typeof editId !== "string") throw new Error("editId is required.");
+      return chatEditRuntime.result(editId);
+    }
+    case "chat.edit.cancel": {
+      const editId = requestParams(request).editId;
+      if (typeof editId !== "string") throw new Error("editId is required.");
+      return chatEditRuntime.cancel(editId);
+    }
+    case "chat.edit.accept": {
+      const editId = requestParams(request).editId;
+      if (typeof editId !== "string") throw new Error("editId is required.");
+      return chatEditRuntime.accept(editId);
+    }
+    case "chat.edit.discard": {
+      const editId = requestParams(request).editId;
+      if (typeof editId !== "string") throw new Error("editId is required.");
+      return chatEditRuntime.discard(editId);
+    }
+    case "chat.edit.retain": {
+      const editId = requestParams(request).editId;
+      if (typeof editId !== "string") throw new Error("editId is required.");
+      return chatEditRuntime.retain(editId);
+    }
+    case "chat.edit.recover": {
+      const input = requestParams(request).input;
+      if (!isRecord(input) || Object.keys(input).some((field) => !["editId", "decision"].includes(field))) {
+        throw new Error("Chat edit recovery input is invalid.");
+      }
+      const { editId, decision } = input;
+      if (typeof editId !== "string" || !["resume_review", "discard"].includes(String(decision))) {
+        throw new Error("Chat edit recovery input is invalid.");
+      }
+      return chatEditRuntime.recover(editId, decision as "resume_review" | "discard");
     }
     case "file.list": {
       const directory = requestParams(request).directory;
@@ -692,7 +1254,9 @@ try {
 process.once("exit", () => {
   for (const controller of activePlanningRuns.values()) controller.abort();
   for (const run of activeTaskContentRuns.values()) run.controller.abort();
+  for (const run of activeAgentRuns.values()) run.controller.abort();
   terminalSessions.dispose();
+  chatRuntime.shutdown();
   operationalStore.close();
   if (changeTimer) clearTimeout(changeTimer);
   void watcher?.close();

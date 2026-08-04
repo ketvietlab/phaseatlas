@@ -1,11 +1,17 @@
 <script lang="ts">
   import { onMount, tick } from "svelte";
   import RepositoryWorkbench from "$lib/RepositoryWorkbench.svelte";
+  import RepositoryChatWorkspace from "$lib/RepositoryChatWorkspace.svelte";
   import TerminalPanel from "$lib/TerminalPanel.svelte";
   import TaskContentPanel from "$lib/TaskContentPanel.svelte";
   import TaskMap from "$lib/TaskMap.svelte";
   import type {
+    AgentResultReview,
+    AgentRunAction,
+    AgentRunActionAvailability,
+    AgentRunSummary,
     CanonicalTask,
+    PersistedRunEvent,
     PlanningProposalSet,
     PlanningStatus,
     PlanningTarget,
@@ -23,9 +29,42 @@
   const TASK_PRIORITY_OPTIONS: TaskPriority[] = ["critical", "high", "normal", "low"];
   const TASK_VIEW_STORAGE_KEY = "phaseatlas.task-view";
   const PROVIDER_SETTINGS_STORAGE_KEY = "phaseatlas.repository-provider-settings.v1";
+  const SELECTED_AGENT_RUN_STORAGE_KEY = "phaseatlas.selected-agent-run.v1";
   const TERMINAL_HEIGHT_STORAGE_KEY = "phaseatlas.terminal-height.v1";
+  const LEGACY_WORKBENCH_STATE_STORAGE_KEY = "phaseatlas.workbench-state.v1";
+  const WORKBENCH_STATE_STORAGE_KEY = "phaseatlas.workbench-state.v2";
 
-  type RepositoryProviderSettings = Record<string, { runnerId: string; modelId: string }>;
+  type RepositoryProviderSettings = Record<string, {
+    runnerId: string;
+    modelId: string;
+    reasoningEffort?: string;
+  }>;
+  type PersistedWorkbenchSurfaceState = {
+    chatOpen: boolean;
+    editorOpen: boolean;
+    terminalOpen: boolean;
+    terminalMaximized: boolean;
+  };
+  type PersistedWorkbenchState = {
+    selectedCheckoutId: string;
+    repositories: Record<string, PersistedWorkbenchSurfaceState>;
+  };
+  type CommandCard = {
+    commandId: string;
+    command: string;
+    outputCharacters: number;
+    exitCode?: number;
+    sequence: number;
+  };
+  type CommandOutputState = {
+    text: string;
+    offset: number;
+    nextOffset: number;
+    totalCharacters: number;
+    hasMore: boolean;
+    loading: boolean;
+    error: string;
+  };
 
   let repositories: RepositorySummary[] = [];
   let workspaces: WorkspaceSummary[] = [];
@@ -38,16 +77,18 @@
   let platform = "desktop";
   let theme = "light";
   let loading = true;
+  let repositoryLoading = false;
+  let repositoryLoadRequest = 0;
   let opening = false;
   let refreshing = false;
   let menuOpen = false;
   let errorMessage = "";
   let refreshTimer = 0;
   let plannerOpen = false;
-  let providerSettingsOpen = false;
   let plannerRequest = "";
   let plannerRunnerId = "";
   let plannerModel = "";
+  let plannerReasoningEffort = "";
   let planningRunId = "";
   let planningStatus: PlanningStatus | "idle" = "idle";
   let planningLog = "";
@@ -73,10 +114,38 @@
   let contentLogs: Record<string, string> = {};
   let contentFailures: Record<string, string> = {};
   let openEditorAfterTask: Record<string, boolean> = {};
+  let executionOpen = false;
+  let executionActions: AgentRunActionAvailability[] = [];
+  let executionActionsLoading = false;
+  let executionError = "";
+  let executionNotice = "";
+  let executionStartingAction: AgentRunAction | "" = "";
+  let executionConfirmAction: AgentRunActionAvailability | null = null;
+  let executionScopeConfirmed = false;
+  let agentRuns: AgentRunSummary[] = [];
+  let selectedAgentRunId = "";
+  let agentEvents: Record<string, PersistedRunEvent[]> = {};
+  let agentEventCursors: Record<string, number> = {};
+  let agentResultReviews: Record<string, AgentResultReview> = {};
+  let expandedCommandKeys = new Set<string>();
+  let commandOutputs: Record<string, CommandOutputState> = {};
+  let cancellingAgentRunId = "";
+  let recoveringAgentRunId = "";
+  const reconcilingAgentRuns = new Set<string>();
+  let executionPanelElement: HTMLElement;
+  let executionConfirmElement: HTMLElement;
+  let agentConfigurationElement: HTMLElement;
+  let executionReturnFocus: HTMLElement | null = null;
+  let executionActionRequest = 0;
+  let agentRunListRequest = 0;
   let terminalOpen = false;
   let terminalMaximized = false;
   let terminalHeight = 300;
-  let terminalPanel: { focus(): void } | undefined;
+  let terminalPanel: { focus(): void; hasFocus(): boolean } | undefined;
+  let repositoryWorkbench: { closeActiveSurface(): void; focusActiveEditor(): void } | undefined;
+  let taskContentPanel: { closeActiveSurface(): void } | undefined;
+  let chatOpen = false;
+  let workbenchStateReady = false;
 
   $: selectedRepository = repositories.find(
     (repository) => repository.checkoutId === selectedCheckoutId,
@@ -95,8 +164,12 @@
   $: availableRunners = runners.filter((runner) => runner.available);
   $: selectedRunner = runners.find((runner) => runner.id === plannerRunnerId);
   $: selectedModels = selectedRunner?.models ?? [];
+  $: selectedProviderModel = selectedModels.find((model) => model.id === plannerModel);
+  $: selectedReasoningEfforts = selectedProviderModel?.reasoningEfforts ?? [];
+  $: selectedModelEffortValue = modelEffortValue(plannerModel, plannerReasoningEffort);
   $: providerSelectionReady = Boolean(
-    selectedRunner?.available && selectedModels.some((model) => model.id === plannerModel),
+    selectedRunner?.available && selectedProviderModel &&
+    (!plannerReasoningEffort || selectedReasoningEfforts.includes(plannerReasoningEffort)),
   );
   $: planningActive = planningStatus === "starting" || planningStatus === "running";
   $: normalizedPlanningLog = normalizePlanningLog(planningLog);
@@ -113,7 +186,27 @@
   $: planningSilenceMs = planningActive && planningLastActivityAt
     ? Math.max(planningClock - planningLastActivityAt, 0)
     : 0;
+  $: selectedAgentRun = agentRuns.find((run) => run.runId === selectedAgentRunId) ?? null;
+  $: selectedAgentEvents = selectedAgentRunId ? agentEvents[selectedAgentRunId] ?? [] : [];
+  $: selectedAgentReview = selectedAgentRunId ? agentResultReviews[selectedAgentRunId] : undefined;
+  $: selectedCommandCards = buildCommandCards(selectedAgentEvents);
+  $: selectedNarrativeEvents = buildNarrativeEvents(selectedAgentEvents);
+  $: selectedTaskRuns = selectedTask
+    ? agentRuns.filter((run) => run.taskKey === canonicalTaskKey(selectedTask))
+    : [];
+  $: explorerShortcutLabel = platform === "darwin" ? "⌘⇧E" : "Ctrl+Shift+E";
   $: terminalShortcutLabel = platform === "darwin" ? "⌘`" : "Ctrl+`";
+  $: chatShortcutLabel = platform === "darwin" ? "⌥L" : "Alt+L";
+  $: chatActive = chatOpen && !editorOpen;
+  $: if (workbenchStateReady && selectedCheckoutId) {
+    persistWorkbenchState(selectedCheckoutId, {
+      chatOpen,
+      editorOpen,
+      terminalOpen,
+      terminalMaximized,
+    });
+  }
+
   onMount(() => {
     theme = document.documentElement.dataset.theme === "dark" ? "dark" : "light";
     const savedTaskView = window.localStorage.getItem(TASK_VIEW_STORAGE_KEY);
@@ -139,17 +232,23 @@
         handleTaskContentEvent(event.event);
         return;
       }
+      if (event.type === "agent-run.event") {
+        void handleAgentRunEvent(event.runId, event.event);
+        return;
+      }
       if (event.type === "repository.changed") {
         window.clearTimeout(refreshTimer);
         refreshTimer = window.setTimeout(() => void refreshRepository(event.checkoutId), 180);
       }
     });
+    const unsubscribeCloseSurface = window.phaseatlas.runtime.onCloseSurface(closeCurrentSurface);
 
     void initialize();
     return () => {
       window.clearTimeout(refreshTimer);
       window.clearInterval(planningClockTimer);
       unsubscribe();
+      unsubscribeCloseSurface();
     };
   });
 
@@ -160,12 +259,89 @@
         window.phaseatlas.repositories.list(),
         window.phaseatlas.runtime.platform(),
       ]);
-      if (repositories[0]) await selectRepository(repositories[0].checkoutId);
+      const savedWorkbenchState = readWorkbenchState();
+      const savedRepository = repositories.find((repository) => repository.checkoutId === savedWorkbenchState?.selectedCheckoutId);
+      const initialRepository = savedRepository ?? repositories[0];
+      if (initialRepository) await selectRepository(initialRepository.checkoutId);
+      workbenchStateReady = true;
     } catch (error) {
       errorMessage = error instanceof Error ? error.message : "PhaseAtlas could not be initialized.";
     } finally {
       loading = false;
     }
+  }
+
+  function readWorkbenchState(): PersistedWorkbenchState | null {
+    try {
+      const persisted = window.localStorage.getItem(WORKBENCH_STATE_STORAGE_KEY);
+      const value = JSON.parse(persisted ?? window.localStorage.getItem(LEGACY_WORKBENCH_STATE_STORAGE_KEY) ?? "null") as unknown;
+      if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+      const state = value as Record<string, unknown>;
+      if (typeof state.selectedCheckoutId !== "string") return null;
+      const parseSurface = (candidate: unknown): PersistedWorkbenchSurfaceState | null => {
+        if (!candidate || typeof candidate !== "object" || Array.isArray(candidate)) return null;
+        const surface = candidate as Record<string, unknown>;
+        return {
+          chatOpen: surface.chatOpen === true,
+          editorOpen: surface.editorOpen === true,
+          terminalOpen: surface.terminalOpen === true,
+          terminalMaximized: surface.terminalOpen === true && surface.terminalMaximized === true,
+        };
+      };
+      if (state.repositories && typeof state.repositories === "object" && !Array.isArray(state.repositories)) {
+        const repositories = Object.fromEntries(Object.entries(state.repositories as Record<string, unknown>)
+          .map(([checkoutId, candidate]) => [checkoutId, parseSurface(candidate)] as const)
+          .filter((entry): entry is [string, PersistedWorkbenchSurfaceState] => Boolean(entry[1])));
+        return { selectedCheckoutId: state.selectedCheckoutId, repositories };
+      }
+      const legacySurface = parseSurface(state);
+      if (!legacySurface) return null;
+      return {
+        selectedCheckoutId: state.selectedCheckoutId,
+        repositories: { [state.selectedCheckoutId]: legacySurface },
+      };
+    } catch {
+      return null;
+    }
+  }
+
+  function persistWorkbenchState(checkoutId: string, surface: PersistedWorkbenchSurfaceState) {
+    const existing = readWorkbenchState();
+    const state: PersistedWorkbenchState = {
+      selectedCheckoutId: checkoutId,
+      repositories: { ...existing?.repositories, [checkoutId]: surface },
+    };
+    window.localStorage.setItem(WORKBENCH_STATE_STORAGE_KEY, JSON.stringify(state));
+    window.localStorage.removeItem(LEGACY_WORKBENCH_STATE_STORAGE_KEY);
+  }
+
+  function restoreWorkbenchState(state: PersistedWorkbenchSurfaceState | undefined) {
+    if (!state) return;
+    chatOpen = state.chatOpen;
+    editorOpen = state.editorOpen;
+    terminalOpen = state.terminalOpen;
+    terminalMaximized = state.terminalOpen && state.terminalMaximized;
+  }
+
+  function clearWorkbenchState() {
+    window.localStorage.removeItem(WORKBENCH_STATE_STORAGE_KEY);
+    window.localStorage.removeItem(LEGACY_WORKBENCH_STATE_STORAGE_KEY);
+  }
+
+  function removeRepositoryWorkbenchState(checkoutId: string) {
+    const existing = readWorkbenchState();
+    if (!existing) return;
+    const repositories = { ...existing.repositories };
+    delete repositories[checkoutId];
+    if (!Object.keys(repositories).length) {
+      clearWorkbenchState();
+      return;
+    }
+    const selectedCheckoutId = existing.selectedCheckoutId === checkoutId
+      ? Object.keys(repositories)[0] ?? ""
+      : existing.selectedCheckoutId;
+    window.localStorage.setItem(WORKBENCH_STATE_STORAGE_KEY, JSON.stringify({ selectedCheckoutId, repositories }));
+    window.localStorage.removeItem(LEGACY_WORKBENCH_STATE_STORAGE_KEY);
   }
 
   async function openRepository() {
@@ -189,6 +365,17 @@
 
   async function selectRepository(checkoutId: string) {
     if (!window.phaseatlas) return;
+    if (workbenchStateReady && selectedCheckoutId) {
+      persistWorkbenchState(selectedCheckoutId, {
+        chatOpen,
+        editorOpen,
+        terminalOpen,
+        terminalMaximized,
+      });
+    }
+    const savedSurface = readWorkbenchState()?.repositories[checkoutId];
+    const requestId = ++repositoryLoadRequest;
+    repositoryLoading = true;
     selectedCheckoutId = checkoutId;
     workspaces = [];
     runners = [];
@@ -196,6 +383,9 @@
     selectedWorkspaceSlug = "";
     selectedTaskKey = "";
     editorOpen = false;
+    editorInitialPath = "";
+    terminalOpen = false;
+    terminalMaximized = false;
     contentPanelTaskKey = "";
     contentRuns = {};
     contentTaskStatuses = {};
@@ -203,16 +393,32 @@
     contentLogs = {};
     contentFailures = {};
     openEditorAfterTask = {};
+    executionOpen = false;
+    chatOpen = false;
+    restoreWorkbenchState(savedSurface);
+    executionActions = [];
+    executionError = "";
+    executionNotice = "";
+    agentRuns = [];
+    selectedAgentRunId = "";
+    agentEvents = {};
+    agentEventCursors = {};
+    agentResultReviews = {};
+    expandedCommandKeys = new Set();
+    commandOutputs = {};
     errorMessage = "";
     menuOpen = false;
     try {
       const recoveredRepository = await window.phaseatlas.repositories.refresh(checkoutId);
-      const [nextWorkspaces, nextTaskSnapshot, nextRunners, activeContentRuns] = await Promise.all([
+      if (requestId !== repositoryLoadRequest || checkoutId !== selectedCheckoutId) return;
+      const [nextWorkspaces, nextTaskSnapshot, nextRunners, activeContentRuns, nextAgentRuns] = await Promise.all([
         window.phaseatlas.workspaces.list(checkoutId),
         window.phaseatlas.tasks.snapshot(checkoutId),
         window.phaseatlas.runners.list(checkoutId),
         window.phaseatlas.tasks.listContentRuns(checkoutId),
+        window.phaseatlas.agentRuns.list(checkoutId),
       ]);
+      if (requestId !== repositoryLoadRequest || checkoutId !== selectedCheckoutId) return;
       workspaces = nextWorkspaces;
       repositories = repositories.map((repository) => repository.checkoutId === checkoutId ? recoveredRepository : repository);
       taskSnapshot = nextTaskSnapshot;
@@ -227,22 +433,38 @@
       contentTaskRunIds = Object.fromEntries(activeContentRuns.flatMap((run) =>
         run.taskKeys.map((taskKey) => [taskKey, run.runId]),
       ));
+      agentRuns = nextAgentRuns;
+      const savedAgentRun = readSelectedAgentRuns()[checkoutId];
+      selectedAgentRunId = nextAgentRuns.some((run) => run.runId === savedAgentRun)
+        ? savedAgentRun
+        : nextAgentRuns[0]?.runId ?? "";
       applyRepositoryProviderSettings(checkoutId);
       selectWorkspace(workspaces[0]?.slug ?? "");
     } catch (error) {
+      if (requestId !== repositoryLoadRequest || checkoutId !== selectedCheckoutId) return;
       errorMessage = error instanceof Error ? error.message : "The repository workspaces could not be read.";
+    } finally {
+      if (requestId === repositoryLoadRequest && checkoutId === selectedCheckoutId) repositoryLoading = false;
     }
   }
 
   async function toggleTerminal() {
     if (!selectedCheckoutId) return;
-    terminalOpen = !terminalOpen;
-    if (!terminalOpen) {
-      terminalMaximized = false;
+    if (terminalOpen) {
+      await closeTerminal();
       return;
     }
+    terminalOpen = true;
     await tick();
     terminalPanel?.focus();
+  }
+
+  async function closeTerminal(restoreEditorFocus = true) {
+    terminalOpen = false;
+    terminalMaximized = false;
+    if (!restoreEditorFocus || !editorOpen) return;
+    await tick();
+    repositoryWorkbench?.focusActiveEditor();
   }
 
   function updateTerminalHeight(nextHeight: number) {
@@ -264,6 +486,13 @@
     return runner?.models?.find((model) => model.isDefault)?.id ?? runner?.models?.[0]?.id ?? "";
   }
 
+  function defaultReasoningEffort(modelId: string, runnerId = plannerRunnerId): string {
+    const model = runners.find((runner) => runner.id === runnerId)?.models.find((candidate) => candidate.id === modelId);
+    return model?.defaultReasoningEffort && model.reasoningEfforts.includes(model.defaultReasoningEffort)
+      ? model.defaultReasoningEffort
+      : "";
+  }
+
   function applyRepositoryProviderSettings(checkoutId: string) {
     const saved = readRepositoryProviderSettings()[checkoutId];
     const runner = runners.find((candidate) => candidate.available && candidate.id === saved?.runnerId)
@@ -273,26 +502,56 @@
     plannerModel = runner?.models?.some((model) => model.id === saved?.modelId)
       ? saved.modelId
       : defaultModelId(runner);
+    const selectedModel = runner?.models.find((model) => model.id === plannerModel);
+    plannerReasoningEffort = saved?.reasoningEffort && selectedModel?.reasoningEfforts.includes(saved.reasoningEffort)
+      ? saved.reasoningEffort
+      : selectedModel?.defaultReasoningEffort && selectedModel.reasoningEfforts.includes(selectedModel.defaultReasoningEffort)
+        ? selectedModel.defaultReasoningEffort
+        : "";
     if (plannerRunnerId && plannerModel) persistRepositoryProviderSettings();
   }
 
   function persistRepositoryProviderSettings() {
     if (!selectedCheckoutId || !plannerRunnerId || !plannerModel) return;
     const settings = readRepositoryProviderSettings();
-    settings[selectedCheckoutId] = { runnerId: plannerRunnerId, modelId: plannerModel };
+    settings[selectedCheckoutId] = {
+      runnerId: plannerRunnerId,
+      modelId: plannerModel,
+      ...(plannerReasoningEffort ? { reasoningEffort: plannerReasoningEffort } : {}),
+    };
     window.localStorage.setItem(PROVIDER_SETTINGS_STORAGE_KEY, JSON.stringify(settings));
   }
 
   function selectProviderRunner(runnerId: string) {
     plannerRunnerId = runnerId;
     plannerModel = defaultModelId(runners.find((runner) => runner.id === runnerId));
+    plannerReasoningEffort = defaultReasoningEffort(plannerModel, runnerId);
     persistRepositoryProviderSettings();
+    if (executionOpen && selectedTask) void loadExecutionActions(selectedTask);
   }
 
-  function selectProviderModel(modelId: string) {
-    if (!selectedModels.some((model) => model.id === modelId)) return;
+  function modelEffortValue(modelId: string, reasoningEffort: string): string {
+    return `${encodeURIComponent(modelId)}|${encodeURIComponent(reasoningEffort)}`;
+  }
+
+  function selectProviderModelEffort(value: string) {
+    const separator = value.indexOf("|");
+    if (separator < 0) return;
+    const modelId = decodeURIComponent(value.slice(0, separator));
+    const reasoningEffort = decodeURIComponent(value.slice(separator + 1));
+    const model = selectedModels.find((candidate) => candidate.id === modelId);
+    if (!model || reasoningEffort && !model.reasoningEfforts.includes(reasoningEffort)) return;
     plannerModel = modelId;
+    plannerReasoningEffort = reasoningEffort;
     persistRepositoryProviderSettings();
+    if (executionOpen && selectedTask) void loadExecutionActions(selectedTask);
+  }
+
+  async function revealAgentConfiguration() {
+    chatOpen = false;
+    await tick();
+    agentConfigurationElement?.scrollIntoView({ behavior: "smooth", block: "center" });
+    agentConfigurationElement?.querySelector<HTMLSelectElement>("select")?.focus({ preventScroll: true });
   }
 
   async function refreshRepository(checkoutId: string) {
@@ -312,6 +571,7 @@
         ? selectedWorkspaceSlug
         : nextWorkspaces[0]?.slug ?? "";
       selectWorkspace(workspaceSlug, selectedTaskKey);
+      if (executionOpen) await loadAgentRuns(selectedAgentRunId);
     } catch (error) {
       errorMessage = error instanceof Error ? error.message : "The repository could not be refreshed.";
     } finally {
@@ -330,6 +590,7 @@
   function selectTask(task: CanonicalTask) {
     selectedTaskKey = canonicalTaskKey(task);
     contentPanelTaskKey = canonicalTaskKey(task);
+    if (executionOpen) void loadExecutionActions(task);
   }
 
   function openTaskDetails(task: CanonicalTask) {
@@ -400,7 +661,7 @@
   async function initializeTaskContent(taskKeys: string[], openAfter = false) {
     if (!window.phaseatlas || !taskKeys.length) return;
     if (!providerSelectionReady) {
-      errorMessage = "Choose a provider model from Repository settings before initializing task content.";
+      errorMessage = "Choose an available CLI and model from Agent configuration before initializing task content.";
       return;
     }
     const requestedTaskKeys = [...new Set(taskKeys)].filter((taskKey) => !activeContentTaskKeys.has(taskKey));
@@ -424,6 +685,7 @@
         taskKeys: requestedTaskKeys,
         runnerId: plannerRunnerId,
         ...(plannerModel.trim() ? { model: plannerModel.trim() } : {}),
+        ...(plannerReasoningEffort ? { reasoningEffort: plannerReasoningEffort } : {}),
       });
       contentRuns = {
         ...contentRuns,
@@ -456,6 +718,447 @@
   async function handleEditorSaved(path: string) {
     if (!window.phaseatlas || !path.startsWith(".phaseatlas/")) return;
     taskSnapshot = await window.phaseatlas.tasks.snapshot(selectedCheckoutId);
+  }
+
+  function readSelectedAgentRuns(): Record<string, string> {
+    try {
+      const value = JSON.parse(window.localStorage.getItem(SELECTED_AGENT_RUN_STORAGE_KEY) ?? "{}") as unknown;
+      return value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, string> : {};
+    } catch {
+      return {};
+    }
+  }
+
+  function rememberSelectedAgentRun(runId: string) {
+    if (!selectedCheckoutId || !runId) return;
+    const selections = readSelectedAgentRuns();
+    selections[selectedCheckoutId] = runId;
+    window.localStorage.setItem(SELECTED_AGENT_RUN_STORAGE_KEY, JSON.stringify(selections));
+  }
+
+  async function openExecutionWorkbench(task: CanonicalTask | undefined = selectedTask) {
+    if (!window.phaseatlas) return;
+    if (!executionOpen) {
+      executionReturnFocus = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+    }
+    if (task) selectedTaskKey = canonicalTaskKey(task);
+    contentPanelTaskKey = "";
+    executionOpen = true;
+    executionError = "";
+    executionNotice = "";
+    await tick();
+    executionPanelElement?.focus();
+    await Promise.all([
+      loadAgentRuns(selectedAgentRunId),
+      task ? loadExecutionActions(task) : Promise.resolve(),
+    ]);
+    if (selectedAgentRunId) await selectAgentRun(selectedAgentRunId);
+  }
+
+  function closeExecutionWorkbench() {
+    const returnFocus = executionReturnFocus;
+    executionOpen = false;
+    executionConfirmAction = null;
+    executionScopeConfirmed = false;
+    executionError = "";
+    executionReturnFocus = null;
+    void tick().then(() => returnFocus?.focus());
+  }
+
+  async function loadExecutionActions(task: CanonicalTask) {
+    if (!window.phaseatlas) return;
+    const requestId = ++executionActionRequest;
+    const checkoutId = selectedCheckoutId;
+    executionActionsLoading = true;
+    executionError = "";
+    if (!providerSelectionReady) {
+      executionActions = (["analyze", "plan", "implement", "review"] as AgentRunAction[]).map((action) => ({
+        action,
+        sandbox: action === "implement" ? "workspace-write" : "read-only",
+        available: false,
+        blockingReasons: ["Choose an available CLI and model from Agent configuration."],
+      }));
+      executionActionsLoading = false;
+      return;
+    }
+    try {
+      const nextActions = await window.phaseatlas.agentRuns.actions(checkoutId, {
+        taskKey: canonicalTaskKey(task),
+        runnerId: plannerRunnerId,
+        ...(plannerModel ? { model: plannerModel } : {}),
+        ...(plannerReasoningEffort ? { reasoningEffort: plannerReasoningEffort } : {}),
+      });
+      if (requestId === executionActionRequest && checkoutId === selectedCheckoutId) executionActions = nextActions;
+    } catch (error) {
+      if (requestId === executionActionRequest && checkoutId === selectedCheckoutId) {
+        executionActions = [];
+        executionError = error instanceof Error ? error.message : "Task actions could not be evaluated.";
+      }
+    } finally {
+      if (requestId === executionActionRequest) executionActionsLoading = false;
+    }
+  }
+
+  async function loadAgentRuns(preferredRunId = "") {
+    if (!window.phaseatlas || !selectedCheckoutId) return;
+    const requestId = ++agentRunListRequest;
+    const checkoutId = selectedCheckoutId;
+    try {
+      const nextRuns = await window.phaseatlas.agentRuns.list(checkoutId);
+      if (requestId !== agentRunListRequest || checkoutId !== selectedCheckoutId) return;
+      agentRuns = nextRuns;
+      const nextSelected = nextRuns.find((run) => run.runId === preferredRunId)?.runId
+        ?? nextRuns.find((run) => run.runId === selectedAgentRunId)?.runId
+        ?? nextRuns[0]?.runId
+        ?? "";
+      selectedAgentRunId = nextSelected;
+      if (nextSelected) rememberSelectedAgentRun(nextSelected);
+    } catch (error) {
+      if (requestId === agentRunListRequest && checkoutId === selectedCheckoutId) {
+        executionError = error instanceof Error ? error.message : "Run history could not be loaded.";
+      }
+    }
+  }
+
+  function requestAgentAction(availability: AgentRunActionAvailability) {
+    if (!availability.available || executionStartingAction) return;
+    executionError = "";
+    executionNotice = "";
+    if (availability.sandbox === "workspace-write") {
+      executionConfirmAction = availability;
+      executionScopeConfirmed = false;
+      void tick().then(() => executionConfirmElement?.focus());
+      return;
+    }
+    void startAgentRun(availability);
+  }
+
+  async function startAgentRun(availability: AgentRunActionAvailability) {
+    if (!window.phaseatlas || !selectedTask || !availability.available || executionStartingAction) return;
+    executionStartingAction = availability.action;
+    executionError = "";
+    executionNotice = `Preparing ${availability.action} run…`;
+    try {
+      const started = await window.phaseatlas.agentRuns.start(selectedCheckoutId, {
+        taskKey: canonicalTaskKey(selectedTask),
+        expectedTaskRevision: selectedTask.revision,
+        expectedCheckoutId: selectedCheckoutId,
+        action: availability.action,
+        requestedSandbox: availability.sandbox,
+        runnerId: plannerRunnerId,
+        ...(plannerModel ? { model: plannerModel } : {}),
+        ...(plannerReasoningEffort ? { reasoningEffort: plannerReasoningEffort } : {}),
+      });
+      executionConfirmAction = null;
+      executionScopeConfirmed = false;
+      executionNotice = `${actionLabel(availability.action)} run started.`;
+      await loadAgentRuns(started.runId);
+      await selectAgentRun(started.runId);
+      if (selectedTask) await loadExecutionActions(selectedTask);
+    } catch (error) {
+      executionError = error instanceof Error ? error.message : "The agent run could not start.";
+      executionNotice = "";
+      if (selectedTask) await loadExecutionActions(selectedTask);
+    } finally {
+      executionStartingAction = "";
+    }
+  }
+
+  async function selectAgentRun(runId: string) {
+    if (!runId) return;
+    selectedAgentRunId = runId;
+    rememberSelectedAgentRun(runId);
+    executionError = "";
+    expandedCommandKeys = new Set();
+    commandOutputs = {};
+    await reconcileAgentEvents(runId);
+    const run = agentRuns.find((candidate) => candidate.runId === runId);
+    if (run && ["completed", "failed"].includes(run.status)) await loadAgentResult(runId);
+  }
+
+  function mergeAgentEvents(runId: string, incoming: PersistedRunEvent[]) {
+    const merged = new Map((agentEvents[runId] ?? []).map((event) => [event.sequence, event]));
+    for (const event of incoming) merged.set(event.sequence, event);
+    const ordered = [...merged.values()].sort((left, right) => left.sequence - right.sequence);
+    let contiguous = 0;
+    for (const event of ordered) {
+      if (event.sequence !== contiguous + 1) break;
+      contiguous = event.sequence;
+    }
+    agentEvents = { ...agentEvents, [runId]: ordered };
+    agentEventCursors = { ...agentEventCursors, [runId]: contiguous };
+  }
+
+  async function reconcileAgentEvents(runId: string) {
+    if (!window.phaseatlas) return;
+    const checkoutId = selectedCheckoutId;
+    const reconciliationKey = `${checkoutId}:${runId}`;
+    if (reconcilingAgentRuns.has(reconciliationKey)) return;
+    reconcilingAgentRuns.add(reconciliationKey);
+    let stalledOnGap = false;
+    try {
+      let cursor = agentEventCursors[runId] ?? 0;
+      for (;;) {
+        const page = await window.phaseatlas.agentRuns.events(checkoutId, runId, cursor, 200);
+        if (checkoutId !== selectedCheckoutId) return;
+        if (page.runId !== runId || page.afterSequence !== cursor) {
+          throw new Error("Persisted event page does not match the requested run cursor.");
+        }
+        const previousCursor = cursor;
+        mergeAgentEvents(runId, page.events);
+        cursor = agentEventCursors[runId] ?? cursor;
+        if (page.events.length && cursor === previousCursor) {
+          stalledOnGap = true;
+          throw new Error(`Persisted event sequence has a gap after ${previousCursor}.`);
+        }
+        if (page.hasMore && !page.events.length) {
+          stalledOnGap = true;
+          throw new Error("Persisted event page cannot advance its cursor.");
+        }
+        if (!page.hasMore) break;
+      }
+    } catch (error) {
+      executionError = error instanceof Error ? error.message : "Run events could not be resumed.";
+    } finally {
+      reconcilingAgentRuns.delete(reconciliationKey);
+      const highestObserved = (agentEvents[runId] ?? []).at(-1)?.sequence ?? 0;
+      if (!stalledOnGap && checkoutId === selectedCheckoutId && highestObserved > (agentEventCursors[runId] ?? 0)) {
+        void reconcileAgentEvents(runId);
+      }
+    }
+  }
+
+  async function handleAgentRunEvent(runId: string, event: PersistedRunEvent) {
+    const priorCursor = agentEventCursors[runId] ?? 0;
+    mergeAgentEvents(runId, [event]);
+    if (event.sequence > priorCursor + 1) await reconcileAgentEvents(runId);
+    const status = agentEventStatus(event);
+    if (status) {
+      if (agentRuns.some((run) => run.runId === runId)) {
+        agentRuns = agentRuns.map((run) => run.runId === runId
+          ? { ...run, status, updatedAt: event.timestamp }
+          : run);
+      } else {
+        await loadAgentRuns(runId);
+      }
+      if (["completed", "failed", "cancelled", "interrupted"].includes(status)) {
+        await loadAgentRuns(runId);
+        if (["completed", "failed"].includes(status)) await loadAgentResult(runId);
+      }
+      if (selectedTask) await loadExecutionActions(selectedTask);
+    }
+  }
+
+  function agentEventStatus(event: PersistedRunEvent): AgentRunSummary["status"] | undefined {
+    if (event.type === "run.status" && ["starting", "running", "cancelled"].includes(String(event.payload.status))) {
+      return event.payload.status as "starting" | "running" | "cancelled";
+    }
+    if (event.type === "agent.result" && ["completed", "failed"].includes(String(event.payload.status))) {
+      return event.payload.status as "completed" | "failed";
+    }
+    if (event.type === "run.failed") return "failed";
+    if (event.type === "run.cancelled") return "cancelled";
+    if (event.type === "run.interrupted") return "interrupted";
+    return undefined;
+  }
+
+  async function loadAgentResult(runId: string) {
+    if (!window.phaseatlas) return;
+    const checkoutId = selectedCheckoutId;
+    try {
+      const review = await window.phaseatlas.agentRuns.result(checkoutId, runId);
+      if (checkoutId === selectedCheckoutId) agentResultReviews = { ...agentResultReviews, [runId]: review };
+    } catch {
+      if (checkoutId === selectedCheckoutId) {
+        agentResultReviews = Object.fromEntries(Object.entries(agentResultReviews).filter(([key]) => key !== runId));
+      }
+    }
+  }
+
+  async function cancelAgentRun(runId: string) {
+    if (!window.phaseatlas || cancellingAgentRunId) return;
+    cancellingAgentRunId = runId;
+    executionError = "";
+    executionNotice = "Stopping the owned provider process…";
+    try {
+      const result = await window.phaseatlas.agentRuns.cancel(selectedCheckoutId, runId);
+      executionNotice = result.status === "cancelled" ? "Run cancelled after provider exit." : `Run is already ${result.status}.`;
+      await Promise.all([loadAgentRuns(runId), reconcileAgentEvents(runId)]);
+    } catch (error) {
+      executionError = error instanceof Error ? error.message : "The run could not be cancelled.";
+    } finally {
+      cancellingAgentRunId = "";
+    }
+  }
+
+  async function recoverAgentRun(runId: string, decision: "leave_interrupted" | "retry") {
+    if (!window.phaseatlas || recoveringAgentRunId) return;
+    recoveringAgentRunId = runId;
+    executionError = "";
+    try {
+      const result = await window.phaseatlas.agentRuns.recover(selectedCheckoutId, {
+        runId,
+        decision,
+        ...(decision === "retry" ? {
+          runnerId: plannerRunnerId,
+          ...(plannerModel ? { model: plannerModel } : {}),
+          ...(plannerReasoningEffort ? { reasoningEffort: plannerReasoningEffort } : {}),
+        } : {}),
+      });
+      executionNotice = decision === "retry" ? "A linked retry was created from the current task revision." : "Interrupted attempt retained as history.";
+      await loadAgentRuns(result.retryRunId ?? runId);
+      if (result.retryRunId) await selectAgentRun(result.retryRunId);
+    } catch (error) {
+      executionError = error instanceof Error ? error.message : "The interrupted run could not be recovered.";
+    } finally {
+      recoveringAgentRunId = "";
+    }
+  }
+
+  function buildCommandCards(events: PersistedRunEvent[]): CommandCard[] {
+    const commands = new Map<string, CommandCard>();
+    for (const event of events) {
+      const commandId = typeof event.payload.commandId === "string" ? event.payload.commandId : "";
+      if (!commandId) continue;
+      const current = commands.get(commandId) ?? { commandId, command: "Repository command", outputCharacters: 0, sequence: event.sequence };
+      if (event.type === "command.started" && typeof event.payload.command === "string") current.command = event.payload.command;
+      if (event.type === "command.output" && typeof event.payload.characterCount === "number") {
+        current.outputCharacters += event.payload.characterCount;
+      }
+      if (event.type === "command.completed" && typeof event.payload.exitCode === "number") current.exitCode = event.payload.exitCode;
+      commands.set(commandId, current);
+    }
+    return [...commands.values()].sort((left, right) => left.sequence - right.sequence);
+  }
+
+  function buildNarrativeEvents(events: PersistedRunEvent[]): PersistedRunEvent[] {
+    const deltas = events.filter((event) => event.type === "agent.delta" && typeof event.payload.text === "string");
+    const narrative: PersistedRunEvent[] = [];
+    if (deltas.length) {
+      let text = "";
+      let previousChunkLength = 0;
+      for (const event of deltas) {
+        const chunk = event.payload.text as string;
+        const separator = text && previousChunkLength > 40 && chunk.length > 40 ? "\n\n" : "";
+        text += `${separator}${chunk}`;
+        previousChunkLength = chunk.length;
+      }
+      const first = deltas[0] as PersistedRunEvent;
+      narrative.push({ ...first, payload: { ...first.payload, text: text.trimEnd() } });
+    }
+    narrative.push(...events.filter((event) =>
+      ["run.failed", "run.cancelled", "run.interrupted"].includes(event.type) ||
+      (event.type === "turn.completed" && !deltas.length)
+    ));
+    return narrative.sort((left, right) => left.sequence - right.sequence);
+  }
+
+  function commandOutputKey(runId: string, commandId: string) {
+    return `${runId}:${commandId}`;
+  }
+
+  async function toggleCommandOutput(runId: string, commandId: string) {
+    const key = commandOutputKey(runId, commandId);
+    if (expandedCommandKeys.has(key)) {
+      expandedCommandKeys = new Set([...expandedCommandKeys].filter((candidate) => candidate !== key));
+      commandOutputs = Object.fromEntries(Object.entries(commandOutputs).filter(([candidate]) => candidate !== key));
+      return;
+    }
+    expandedCommandKeys = new Set([...expandedCommandKeys, key]);
+    await loadCommandOutput(runId, commandId, 0);
+  }
+
+  async function loadCommandOutput(runId: string, commandId: string, offset: number) {
+    if (!window.phaseatlas) return;
+    const key = commandOutputKey(runId, commandId);
+    const previous = commandOutputs[key];
+    commandOutputs = {
+      ...commandOutputs,
+      [key]: {
+        text: previous?.text ?? "",
+        offset: previous?.offset ?? offset,
+        nextOffset: offset,
+        totalCharacters: previous?.totalCharacters ?? 0,
+        hasMore: previous?.hasMore ?? false,
+        loading: true,
+        error: "",
+      },
+    };
+    try {
+      const page = await window.phaseatlas.agentRuns.commandOutput(selectedCheckoutId, runId, commandId, offset, 20_000);
+      if (!expandedCommandKeys.has(key) || page.runId !== runId || page.commandId !== commandId) return;
+      commandOutputs = {
+        ...commandOutputs,
+        [key]: {
+          text: page.text,
+          offset: page.offset,
+          nextOffset: page.nextOffset,
+          totalCharacters: page.totalCharacters,
+          hasMore: page.hasMore,
+          loading: false,
+          error: "",
+        },
+      };
+    } catch (error) {
+      if (!expandedCommandKeys.has(key)) return;
+      commandOutputs = {
+        ...commandOutputs,
+        [key]: {
+          text: previous?.text ?? "",
+          offset: previous?.offset ?? offset,
+          nextOffset: offset,
+          totalCharacters: previous?.totalCharacters ?? 0,
+          hasMore: previous?.hasMore ?? false,
+          loading: false,
+          error: error instanceof Error ? error.message : "Command output could not be loaded.",
+        },
+      };
+    }
+  }
+
+  function formatCharacterCount(value: number) {
+    if (value < 1_000) return `${value} chars`;
+    return `${(value / 1_000).toFixed(value < 10_000 ? 1 : 0)}k chars`;
+  }
+
+  function formatCharacterPosition(value: number) {
+    return value.toLocaleString("en-US");
+  }
+
+  function eventHeading(event: PersistedRunEvent) {
+    const labels: Record<string, string> = {
+      "agent.prepared": "Run prepared",
+      "run.status": `Run ${String(event.payload.status ?? "updated")}`,
+      "agent.delta": "Agent message",
+      "command.started": "Command",
+      "file.changed": "File changed",
+      "turn.completed": "Turn completed",
+      "agent.result": "Validated result",
+      "run.failed": "Run failed",
+      "run.cancelled": "Run cancelled",
+      "run.interrupted": "Run interrupted",
+    };
+    return labels[event.type] ?? event.type.replaceAll(".", " ");
+  }
+
+  function eventBody(event: PersistedRunEvent) {
+    for (const key of ["text", "summary", "message", "path", "reason"] as const) {
+      if (typeof event.payload[key] === "string") return event.payload[key] as string;
+    }
+    return "";
+  }
+
+  function actionLabel(action: AgentRunAction) {
+    return ({ analyze: "Analyze", plan: "Plan", implement: "Implement", review: "Review" })[action];
+  }
+
+  function formatRunTime(value: string) {
+    const date = new Date(value);
+    return Number.isNaN(date.getTime()) ? "Unknown time" : date.toLocaleString([], { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" });
+  }
+
+  function isAgentRunActive(run: AgentRunSummary | null) {
+    return Boolean(run && (run.status === "starting" || run.status === "running"));
   }
 
   function canonicalTaskKey(task: CanonicalTask) {
@@ -613,6 +1316,7 @@
         runnerId: plannerRunnerId,
         request: plannerRequest.trim(),
         ...(plannerModel.trim() ? { model: plannerModel.trim() } : {}),
+        ...(plannerReasoningEffort ? { reasoningEffort: plannerReasoningEffort } : {}),
       });
       if (!planningRunId) planningRunId = result.runId;
     } catch (error) {
@@ -683,16 +1387,28 @@
     if (!window.phaseatlas) return;
     await window.phaseatlas.repositories.close(checkoutId);
     repositories = repositories.filter((repository) => repository.checkoutId !== checkoutId);
+    removeRepositoryWorkbenchState(checkoutId);
     if (selectedCheckoutId === checkoutId) {
+      repositoryLoadRequest += 1;
+      repositoryLoading = false;
       selectedCheckoutId = "";
       workspaces = [];
       runners = [];
       taskSnapshot = null;
       selectedWorkspaceSlug = "";
       selectedTaskKey = "";
+      chatOpen = false;
+      executionOpen = false;
+      agentRuns = [];
+      agentEvents = {};
+      agentEventCursors = {};
       terminalMaximized = false;
       if (repositories[0]) await selectRepository(repositories[0].checkoutId);
-      else terminalOpen = false;
+      else {
+        terminalOpen = false;
+        editorOpen = false;
+        clearWorkbenchState();
+      }
     }
   }
 
@@ -702,18 +1418,94 @@
     localStorage.setItem("phaseatlas-theme", nextTheme);
   }
 
+  function closeCurrentSurface() {
+    if (terminalOpen && terminalPanel?.hasFocus()) {
+      void closeTerminal();
+    } else if (editorOpen) {
+      repositoryWorkbench?.closeActiveSurface();
+    } else if (chatOpen) {
+      chatOpen = false;
+    } else if (executionConfirmAction) {
+      executionConfirmAction = null;
+      executionScopeConfirmed = false;
+      executionPanelElement?.focus();
+    } else if (executionOpen) {
+      closeExecutionWorkbench();
+    } else if (contentPanelTask) {
+      taskContentPanel?.closeActiveSurface();
+    } else if (plannerOpen) {
+      closePlanner();
+    } else if (terminalOpen) {
+      void closeTerminal(false);
+    } else {
+      menuOpen = false;
+    }
+  }
+
   function handleWindowKeydown(event: KeyboardEvent) {
+    if (event.key === "Tab" && executionOpen && executionPanelElement) {
+      const focusable = [...executionPanelElement.querySelectorAll<HTMLElement>(
+        'button:not([disabled]), input:not([disabled]), [href], [tabindex]:not([tabindex="-1"])',
+      )].filter((element) => !element.hidden && element.getClientRects().length > 0);
+      const first = focusable[0];
+      const last = focusable.at(-1);
+      if (first && last && event.shiftKey && document.activeElement === first) {
+        event.preventDefault();
+        last.focus();
+      } else if (first && last && !event.shiftKey && document.activeElement === last) {
+        event.preventDefault();
+        first.focus();
+      }
+      return;
+    }
+    const chatShortcut = event.altKey && !event.metaKey && !event.ctrlKey && !event.shiftKey && event.key.toLowerCase() === "l";
+    if (chatShortcut && !event.repeat && selectedCheckoutId) {
+      if (!editorOpen && (chatOpen || (!executionOpen && !plannerOpen && !contentPanelTask))) {
+        event.preventDefault();
+        chatOpen = !chatOpen;
+      }
+      return;
+    }
     const modifier = event.metaKey || event.ctrlKey;
+    const closeShortcut = modifier && !event.shiftKey && !event.altKey && event.key.toLowerCase() === "w";
+    if (closeShortcut) {
+      event.preventDefault();
+      event.stopPropagation();
+      if (!event.repeat) closeCurrentSurface();
+      return;
+    }
+    const explorerShortcut = modifier && event.shiftKey && !event.altKey && event.code === "KeyE";
+    if (explorerShortcut) {
+      event.preventDefault();
+      if (
+        !event.repeat &&
+        selectedCheckoutId &&
+        !chatActive &&
+        !executionOpen &&
+        !plannerOpen &&
+        !contentPanelTask
+      ) openRepositoryEditor();
+      return;
+    }
     const terminalShortcut = modifier && !event.shiftKey && !event.altKey && (
       event.code === "Backquote" || event.key.toLowerCase() === "j"
     );
-    if (terminalShortcut && !event.repeat && !plannerOpen && !providerSettingsOpen && !editorOpen && !contentPanelTask) {
+    if (terminalShortcut && !event.repeat && selectedCheckoutId) {
       event.preventDefault();
       void toggleTerminal();
       return;
     }
     if (event.key !== "Escape") return;
-    if (terminalMaximized) terminalMaximized = false;
+    if (terminalOpen && terminalPanel?.hasFocus()) return;
+    if (editorOpen) return;
+    if (chatOpen) chatOpen = false;
+    else if (executionConfirmAction) {
+      executionConfirmAction = null;
+      executionScopeConfirmed = false;
+      executionPanelElement?.focus();
+    }
+    else if (executionOpen) closeExecutionWorkbench();
+    else if (terminalMaximized) terminalMaximized = false;
     else if (plannerOpen) closePlanner();
     else menuOpen = false;
   }
@@ -734,8 +1526,8 @@
 <div class="app-shell">
   <aside class:mobile-open={menuOpen} class="sidebar" aria-label="Repository navigation">
     <div class="brand-lockup">
-      <img class="product-mark" src="./assets/phaseatlas-logo-mark.png" width="1254" height="1254" alt="" />
-      <span class="product-name"><strong>PhaseAtlas</strong><small>KétViệt workspace</small></span>
+      <img class="product-mark" src={theme === "dark" ? "./assets/phaseatlas-logo-mark-dark.png" : "./assets/phaseatlas-logo-mark.png"} width="1254" height="1254" alt="" />
+      <span class="product-name"><strong>PhaseAtlas</strong><small>Unify AI Tool</small></span>
     </div>
 
     <div class="sidebar-section-heading">
@@ -752,7 +1544,6 @@
       {#each repositories as repository}
         <div class:active={repository.checkoutId === selectedCheckoutId} class="repository-row">
           <button class="repository-select" type="button" onclick={() => selectRepository(repository.checkoutId)}>
-            <span class="repository-mark" aria-hidden="true">{repository.name.slice(0, 2).toUpperCase()}</span>
             <span class="repository-copy">
               <strong>{repository.name}</strong>
               <small>{repository.workspaceCount} {repository.workspaceCount === 1 ? "workspace" : "workspaces"}</small>
@@ -774,8 +1565,8 @@
 
   <header class="mobile-topbar">
     <div class="mobile-brand">
-      <img class="product-mark" src="./assets/phaseatlas-logo-mark.png" width="1254" height="1254" alt="" />
-      <span class="product-name"><strong>PhaseAtlas</strong><small>KétViệt workspace</small></span>
+      <img class="product-mark" src={theme === "dark" ? "./assets/phaseatlas-logo-mark-dark.png" : "./assets/phaseatlas-logo-mark.png"} width="1254" height="1254" alt="" />
+      <span class="product-name"><strong>PhaseAtlas</strong><small>Unify AI Tool</small></span>
     </div>
     <button class="icon-button" type="button" aria-label={menuOpen ? "Close menu" : "Open menu"} aria-expanded={menuOpen} onclick={() => (menuOpen = !menuOpen)}>
       <svg class="icon" viewBox="0 0 24 24" aria-hidden="true">{#if menuOpen}<path d="m6 6 12 12M18 6 6 18"/>{:else}<path d="M4 7h16M4 12h16M4 17h16"/>{/if}</svg>
@@ -784,7 +1575,7 @@
   {#if menuOpen}<button class="sidebar-backdrop" type="button" aria-label="Close menu" onclick={() => (menuOpen = false)}></button>{/if}
 
   <main
-    class:terminal-visible={terminalOpen && Boolean(selectedCheckoutId) && !terminalMaximized}
+    class:terminal-visible={terminalOpen && !editorOpen && Boolean(selectedCheckoutId) && !terminalMaximized}
     class="main"
     id="main-content"
     style={`--terminal-panel-height: ${terminalHeight}px`}
@@ -794,6 +1585,34 @@
         <span>PhaseAtlas</span><span>/</span><strong>{selectedRepository?.name || "Repositories"}</strong>
       </div>
       <div class="command-actions">
+        <button
+          class:active={chatActive}
+          class="terminal-toggle"
+          type="button"
+          aria-label={`${chatActive ? "Close" : "Open"} repository agent chat`}
+          aria-pressed={chatActive}
+          title={`Toggle agent chat (${chatShortcutLabel})`}
+          onclick={() => chatOpen = !chatOpen}
+          disabled={!selectedCheckoutId}
+        >
+          <svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M5 5h14v10H9l-4 4z"/><path d="M9 9h6M9 12h4"/></svg>
+          <span>Chat</span>
+          <kbd>{chatShortcutLabel}</kbd>
+        </button>
+        <button
+          class:active={editorOpen}
+          class="terminal-toggle"
+          type="button"
+          aria-label="Open repository explorer"
+          aria-pressed={editorOpen}
+          title={`Open explorer (${explorerShortcutLabel})`}
+          onclick={() => openRepositoryEditor()}
+          disabled={!selectedCheckoutId}
+        >
+          <svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M4 5h16v14H4zM8 5v14M11 9h6M11 13h4"/></svg>
+          <span>Explorer</span>
+          <kbd>{explorerShortcutLabel}</kbd>
+        </button>
         <button
           class:active={terminalOpen}
           class="terminal-toggle"
@@ -838,14 +1657,34 @@
             </div>
           </div>
           <div class="repository-toolbar-actions">
-            <button class="secondary-button" type="button" onclick={() => openRepositoryEditor()}>
-              <svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M4 5h16v14H4zM8 5v14M11 9h6M11 13h4"/></svg>
-              Explorer
+            <button class="secondary-button" type="button" onclick={() => openExecutionWorkbench()}>
+              <svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M5 4h14v16H5zM8 8h8M8 12h5M8 16h7"/><path d="m15 11 4 2.5-4 2.5z"/></svg>
+              Runs
             </button>
-            <button class="secondary-button" type="button" onclick={() => providerSettingsOpen = true}>
-              <svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.7 1.7 0 0 0 .3 1.9l.1.1-2.8 2.8-.1-.1a1.7 1.7 0 0 0-1.9-.3 1.7 1.7 0 0 0-1 1.5V21h-4v-.1a1.7 1.7 0 0 0-1-1.5 1.7 1.7 0 0 0-1.9.3l-.1.1L4.2 17l.1-.1a1.7 1.7 0 0 0 .3-1.9A1.7 1.7 0 0 0 3.1 14H3v-4h.1a1.7 1.7 0 0 0 1.5-1 1.7 1.7 0 0 0-.3-1.9L4.2 7 7 4.2l.1.1a1.7 1.7 0 0 0 1.9.3A1.7 1.7 0 0 0 10 3.1V3h4v.1a1.7 1.7 0 0 0 1 1.5 1.7 1.7 0 0 0 1.9-.3l.1-.1L19.8 7l-.1.1a1.7 1.7 0 0 0-.3 1.9 1.7 1.7 0 0 0 1.5 1h.1v4h-.1a1.7 1.7 0 0 0-1.5 1z"/></svg>
-              Provider settings
-            </button>
+            <div class:unavailable={!providerSelectionReady} class="provider-quick-controls" bind:this={agentConfigurationElement}>
+              <span class="provider-quick-status" aria-hidden="true"></span>
+              <label>
+                <span class="sr-only">Agent CLI</span>
+                <select value={plannerRunnerId} onchange={(event) => selectProviderRunner(event.currentTarget.value)} aria-label="Agent CLI" title="Agent CLI">
+                  {#each runners as runner}
+                    <option value={runner.id} disabled={!runner.available}>{runner.name}</option>
+                  {/each}
+                </select>
+              </label>
+              <label>
+                <span class="sr-only">Model and reasoning effort</span>
+                <select value={selectedModelEffortValue} onchange={(event) => selectProviderModelEffort(event.currentTarget.value)} disabled={!selectedModels.length} aria-label="Model and reasoning effort" title="Model and reasoning effort">
+                  {#each selectedModels as model}
+                    <optgroup label={model.displayName}>
+                      <option value={modelEffortValue(model.id, "")}>{model.displayName} · Provider default</option>
+                      {#each model.reasoningEfforts as effort}
+                        <option value={modelEffortValue(model.id, effort)}>{model.displayName} · {effort} effort{effort === model.defaultReasoningEffort ? " · default" : ""}</option>
+                      {/each}
+                    </optgroup>
+                  {/each}
+                </select>
+              </label>
+            </div>
             <button class="secondary-button" type="button" onclick={() => openPlanner("repository")}>
               <svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="4" width="7" height="7" rx="1"/><rect x="14" y="4" width="7" height="7" rx="1"/><rect x="3" y="15" width="7" height="6" rx="1"/><path d="M14 18h7M17.5 14.5v7"/></svg>
               Plan workspace
@@ -862,7 +1701,12 @@
         {/if}
 
         <section class="workspace-section">
-          {#if workspaces.length}
+          {#if repositoryLoading}
+            <div class="card loading-state repository-loading-state" aria-live="polite" aria-busy="true">
+              <span class="loading-mark" aria-hidden="true"></span>
+              <div><h2>Loading repository</h2><p>Reading workspaces and canonical tasks for {selectedRepository.name}…</p></div>
+            </div>
+          {:else if workspaces.length}
             {#if selectedWorkspace}
               <div class="card workspace-switcher">
                 <span class="workspace-switcher-icon" aria-hidden="true"><svg class="icon" viewBox="0 0 24 24"><rect x="3" y="4" width="7" height="7" rx="1"/><rect x="14" y="4" width="7" height="7" rx="1"/><rect x="3" y="15" width="7" height="6" rx="1"/><path d="M14 18h7M17.5 14.5v7"/></svg></span>
@@ -954,7 +1798,9 @@
                         <h2>{selectedTask.title}</h2>
                         <p>{selectedTask.objective}</p>
                       </div>
-                      <div class="task-badges"><span class="state-badge" data-state={selectedTask.state}>{stateLabel(selectedTask.state)}</span><span class="priority-badge" data-priority={selectedTask.priority}>{selectedTask.priority}</span></div>
+                      <div class="task-header-actions">
+                        <div class="task-badges"><span class="state-badge" data-state={selectedTask.state}>{stateLabel(selectedTask.state)}</span><span class="priority-badge" data-priority={selectedTask.priority}>{selectedTask.priority}</span></div>
+                      </div>
                     </header>
 
                     <div class="task-detail-grid">
@@ -1031,9 +1877,9 @@
                 {/if}
               </section>
             {/if}
-          {:else}
+          {:else if !errorMessage}
             <div class="card empty-state">
-              <img src="./assets/phaseatlas-logo-mark.png" width="1254" height="1254" alt="" aria-hidden="true" />
+              <img src={theme === "dark" ? "./assets/phaseatlas-logo-mark-dark.png" : "./assets/phaseatlas-logo-mark.png"} width="1254" height="1254" alt="" aria-hidden="true" />
               <div><h2>This repository has no workspaces</h2><p>Let a read-only runner inspect the repository and propose its first workspace with starter tasks.</p><button class="primary-button empty-state-action" type="button" onclick={() => openPlanner("repository")}>Plan first workspace</button></div>
             </div>
           {/if}
@@ -1061,62 +1907,250 @@
   </main>
 </div>
 
-{#if providerSettingsOpen}
-  <button class="provider-settings-backdrop" type="button" aria-label="Close repository provider settings" onclick={() => providerSettingsOpen = false}></button>
-  <div class="provider-settings-panel" role="dialog" aria-modal="true" aria-labelledby="provider-settings-title">
-    <header>
+{#if executionOpen}
+  <button class="execution-backdrop" type="button" aria-label="Close execution workbench" onclick={closeExecutionWorkbench}></button>
+  <div
+    class:terminal-docked={terminalOpen && !terminalMaximized}
+    class="execution-panel"
+    role="dialog"
+    aria-modal="true"
+    aria-labelledby="execution-title"
+    tabindex="-1"
+    bind:this={executionPanelElement}
+    style={`--persistent-terminal-height: ${terminalHeight}px`}
+  >
+    <header class="execution-header">
+      <div class="execution-header-mark" aria-hidden="true"><svg class="icon" viewBox="0 0 24 24"><path d="M5 4h14v16H5zM8 8h8M8 12h5M8 16h7"/><path d="m15 11 4 2.5-4 2.5z"/></svg></div>
       <div>
-        <p class="eyebrow">Repository preferences</p>
-        <h2 id="provider-settings-title">Provider settings</h2>
-        <p>{selectedRepository?.name} · applies to planning and task content</p>
+        <p class="eyebrow">Durable execution</p>
+        <h2 id="execution-title">Run workbench</h2>
+        <p>{selectedRepository?.name} · persisted events remain available after restart</p>
       </div>
-      <button class="icon-button" type="button" aria-label="Close repository provider settings" onclick={() => providerSettingsOpen = false}>
+      <button class="icon-button" type="button" aria-label="Close execution workbench" onclick={closeExecutionWorkbench}>
         <svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="m7 7 10 10M17 7 7 17"/></svg>
       </button>
     </header>
-    <div class="provider-settings-body">
-      <section class="provider-settings-intro">
-        <span class="provider-settings-icon" aria-hidden="true"><svg class="icon" viewBox="0 0 24 24"><path d="M5 5h14v14H5zM9 9h6M9 13h4"/></svg></span>
-        <div><strong>Choose the agent CLI for this repository</strong><p>PhaseAtlas keeps this preference outside source control. Credentials remain managed by the selected CLI.</p></div>
-      </section>
 
-      <label class="provider-settings-field">
-        <span>Provider CLI</span>
-        <select value={plannerRunnerId} onchange={(event) => selectProviderRunner(event.currentTarget.value)}>
-          {#each runners as runner}
-            <option value={runner.id} disabled={!runner.available}>{runner.name}{runner.available ? ` · ${runner.version ?? runner.provider}` : " · unavailable"}</option>
-          {/each}
-        </select>
-      </label>
-
-      <label class="provider-settings-field">
-        <span>Model</span>
-        <select value={plannerModel} onchange={(event) => selectProviderModel(event.currentTarget.value)} disabled={!selectedModels.length}>
-          {#if selectedModels.length}
-            {#each selectedModels as model}
-              <option value={model.id}>{model.displayName}{model.isDefault ? " · provider default" : ""}</option>
+    <div class="execution-layout">
+      <aside class="execution-history" aria-label="Agent run history">
+        <header>
+          <div><p class="eyebrow">Repository history</p><h3>{agentRuns.length} {agentRuns.length === 1 ? "run" : "runs"}</h3></div>
+          <button class="run-refresh-button" type="button" aria-label="Refresh run history" onclick={() => loadAgentRuns(selectedAgentRunId)}>
+            <svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M20 11a8 8 0 1 0-2.3 5.7M20 5v6h-6"/></svg>
+          </button>
+        </header>
+        {#if agentRuns.length}
+          <div class="execution-history-list">
+            {#each agentRuns as run}
+              <button class:active={run.runId === selectedAgentRunId} class="execution-history-row" type="button" onclick={() => selectAgentRun(run.runId)}>
+                <span class="run-status-orbit" data-status={run.status}><i></i></span>
+                <span class="execution-history-copy">
+                  <small>{run.taskKey} · {actionLabel(run.action)}</small>
+                  <strong>{run.status.replaceAll("_", " ")}</strong>
+                  <span>{formatRunTime(run.updatedAt)} · {run.runnerId}</span>
+                </span>
+                {#if run.freshness === "stale"}<span class="run-freshness-chip stale">stale</span>{/if}
+              </button>
             {/each}
-          {:else}
-            <option value="">No provider models available</option>
-          {/if}
-        </select>
-        <small>{selectedRunner?.modelDiscovery?.status === "available" ? `${selectedModels.length} models discovered from ${selectedRunner.name}.` : selectedRunner?.modelDiscovery?.unavailableReason ?? "Restart PhaseAtlas to load the provider model catalog."}</small>
-      </label>
-
-      {#if selectedRunner}
-        <section class:unavailable={!providerSelectionReady} class="provider-settings-status">
-          <span></span>
-          <div>
-            <strong>{providerSelectionReady ? "Ready for this repository" : "Provider setup required"}</strong>
-            <p>{providerSelectionReady ? `${selectedRunner.name} will use ${selectedModels.find((model) => model.id === plannerModel)?.displayName}.` : selectedRunner.modelDiscovery?.unavailableReason ?? selectedRunner.unavailableReason ?? "Restart PhaseAtlas to refresh provider discovery."}</p>
           </div>
-        </section>
-      {/if}
+        {:else}
+          <div class="execution-history-empty"><strong>No task runs yet</strong><p>Choose an available action to create the first durable attempt.</p></div>
+        {/if}
+      </aside>
+
+      <div class="execution-main">
+        {#if selectedTask}
+          <section class="execution-launchpad" aria-labelledby="execution-task-title">
+            <header>
+              <div><p class="eyebrow">Selected task</p><h3 id="execution-task-title">{selectedTask.key.taskId} · {selectedTask.title}</h3><p>{selectedTask.objective}</p></div>
+              <code>{selectedTask.revision.slice(0, 10)}</code>
+            </header>
+            <div class="execution-action-grid" aria-busy={executionActionsLoading}>
+              {#if executionActionsLoading}
+                <div class="execution-actions-loading"><span class="task-content-spinner"></span>Evaluating provider and task policy…</div>
+              {:else}
+                {#each executionActions as availability}
+                  <div class="execution-action-slot">
+                    <button
+                      class:write-action={availability.sandbox === "workspace-write"}
+                      class="execution-action"
+                      type="button"
+                      disabled={!availability.available || Boolean(executionStartingAction)}
+                      title={availability.blockingReasons.join(" ")}
+                      onclick={() => requestAgentAction(availability)}
+                    >
+                      <span class="execution-action-icon" aria-hidden="true"><svg class="icon" viewBox="0 0 24 24"><path d={availability.action === "implement" ? "M5 19 19 5M14 5h5v5M5 14v5h5" : availability.action === "review" ? "M4 5h16v14H4zM8 10l2 2 5-5" : availability.action === "plan" ? "M5 6h14M5 12h9M5 18h11" : "M4 12h16M12 4v16M7 7l10 10M17 7 7 17"}/></svg></span>
+                      <span><strong>{executionStartingAction === availability.action ? "Starting…" : actionLabel(availability.action)}</strong><small>{availability.sandbox === "workspace-write" ? "Isolated worktree" : "Read-only checkout"}</small></span>
+                      <i data-available={availability.available}></i>
+                    </button>
+                    {#if !availability.available && availability.blockingReasons.length}
+                      <p class="execution-action-reason"><strong>Blocked:</strong> {availability.blockingReasons[0]}</p>
+                    {/if}
+                  </div>
+                {/each}
+              {/if}
+            </div>
+          </section>
+        {/if}
+
+        {#if executionConfirmAction && selectedTask}
+          <div class="execution-confirm" role="alertdialog" aria-labelledby="execution-confirm-title" tabindex="-1" bind:this={executionConfirmElement}>
+            <header><span aria-hidden="true">!</span><div><p class="eyebrow">Write boundary</p><h3 id="execution-confirm-title">Confirm isolated implementation</h3></div></header>
+            <p>The provider will write only inside a PhaseAtlas-owned worktree. The canonical checkout and task state remain unchanged until a separate review.</p>
+            <dl>
+              <div><dt>Repository</dt><dd>{selectedRepository?.name}</dd></div>
+              <div><dt>Provider</dt><dd>{selectedRunner?.name} · {selectedProviderModel?.displayName}{plannerReasoningEffort ? ` · ${plannerReasoningEffort}` : " · default effort"}</dd></div>
+              <div><dt>Sandbox</dt><dd>{executionConfirmAction.sandbox}</dd></div>
+              <div><dt>Network</dt><dd>{selectedTask.scope.allowExternalNetwork ? "Allowed by task" : "Blocked"}</dd></div>
+            </dl>
+            <div class="execution-confirm-scope"><span>Writable scope</span>{#each selectedTask.scope.allowedPaths as allowedPath}<code>{allowedPath}</code>{/each}</div>
+            <label class="execution-confirm-check"><input type="checkbox" bind:checked={executionScopeConfirmed} /><span>I reviewed the task revision, provider, sandbox, and writable scope.</span></label>
+            <footer><button class="secondary-button" type="button" onclick={() => executionConfirmAction = null}>Back</button><button class="primary-button" type="button" disabled={!executionScopeConfirmed || Boolean(executionStartingAction)} onclick={() => executionConfirmAction && startAgentRun(executionConfirmAction)}>Start isolated run</button></footer>
+          </div>
+        {/if}
+
+        {#if executionError}<div class="execution-message error" role="alert"><strong>Execution needs attention</strong><span>{executionError}</span></div>{/if}
+        {#if executionNotice}<div class="execution-message" role="status"><span class="live-indicator"></span><span>{executionNotice}</span></div>{/if}
+
+        {#if selectedAgentRun}
+          <section class="execution-run" aria-labelledby="selected-run-title">
+            <header class="execution-run-header">
+              <div>
+                <div class="execution-run-kicker"><span class="run-status-orbit" data-status={selectedAgentRun.status}><i></i></span><span>{selectedAgentRun.status.replaceAll("_", " ")}</span><code>{selectedAgentRun.runId.slice(0, 8)}</code></div>
+                <h3 id="selected-run-title">{actionLabel(selectedAgentRun.action)} · {selectedAgentRun.taskKey}</h3>
+                <p>{selectedAgentRun.runnerId}{selectedAgentRun.model ? ` / ${selectedAgentRun.model}` : ""}{selectedAgentRun.reasoningEffort ? ` / ${selectedAgentRun.reasoningEffort} effort` : ""} · revision {selectedAgentRun.taskRevision.slice(0, 10)}</p>
+              </div>
+              <div class="execution-run-actions">
+                {#if isAgentRunActive(selectedAgentRun)}
+                  <button class="secondary-button danger-button" type="button" disabled={Boolean(cancellingAgentRunId)} onclick={() => cancelAgentRun(selectedAgentRun.runId)}>{cancellingAgentRunId ? "Stopping provider…" : "Cancel run"}</button>
+                {:else if selectedAgentRun.status === "interrupted"}
+                  <button class="secondary-button" type="button" disabled={Boolean(recoveringAgentRunId)} onclick={() => recoverAgentRun(selectedAgentRun.runId, "leave_interrupted")}>Keep as history</button>
+                  <button class="primary-button" type="button" disabled={Boolean(recoveringAgentRunId) || !providerSelectionReady} onclick={() => recoverAgentRun(selectedAgentRun.runId, "retry")}>Retry current task</button>
+                {/if}
+              </div>
+            </header>
+
+            <div class="execution-run-meta">
+              <span><small>Started</small>{formatRunTime(selectedAgentRun.createdAt)}</span>
+              <span><small>Sandbox</small>{selectedAgentRun.sandbox}</span>
+              <span><small>Events</small>{selectedAgentEvents.length}</span>
+              <span><small>Freshness</small>{selectedAgentRun.freshness ?? "pending"}</span>
+            </div>
+
+            <div class="execution-journal">
+              <section class="execution-narrative" aria-live={isAgentRunActive(selectedAgentRun) ? "polite" : "off"}>
+                <header class="execution-section-heading">
+                  <div><span class="narrative-mark" aria-hidden="true"></span><div><strong>Agent response</strong><p>Reasoning summaries and final guidance from {selectedAgentRun.runnerId}.</p></div></div>
+                  <span>{selectedNarrativeEvents.length}</span>
+                </header>
+                <div class="execution-timeline">
+              {#if selectedNarrativeEvents.length}
+                {#each selectedNarrativeEvents as event}
+                  <article class="execution-event" data-type={event.type}>
+                    <span class="execution-event-sequence">{String(event.sequence).padStart(2, "0")}</span>
+                    <div class="execution-event-content">
+                      <header><strong>{eventHeading(event)}</strong><time>{formatRunTime(event.timestamp)}</time></header>
+                      {#if eventBody(event)}
+                        <p>{eventBody(event)}</p>
+                      {/if}
+                    </div>
+                  </article>
+                {/each}
+              {:else}
+                <div class="execution-timeline-empty"><span class="run-waiting-signal" aria-hidden="true"><i></i><i></i><i></i></span><div><strong>{isAgentRunActive(selectedAgentRun) ? "Agent is working" : "No agent response"}</strong><p>{isAgentRunActive(selectedAgentRun) ? "Provider responses will appear here without terminal noise." : "This run did not persist a provider response."}</p></div></div>
+              {/if}
+                </div>
+              </section>
+
+              {#if selectedCommandCards.length}
+                <section class="execution-activity" aria-label="Command activity">
+                  <header class="execution-section-heading">
+                    <div><span class="activity-mark" aria-hidden="true"></span><div><strong>Command activity</strong><p>Output stays in SQLite until you request it.</p></div></div>
+                    <span>{selectedCommandCards.length}</span>
+                  </header>
+                  <div class="command-disclosures">
+                    {#each selectedCommandCards as command}
+                      {@const outputKey = commandOutputKey(selectedAgentRun.runId, command.commandId)}
+                      {@const expanded = expandedCommandKeys.has(outputKey)}
+                      {@const output = commandOutputs[outputKey]}
+                      <article class="command-disclosure" data-expanded={expanded} data-exit={command.exitCode ?? "running"}>
+                        <button type="button" aria-expanded={expanded} onclick={() => toggleCommandOutput(selectedAgentRun.runId, command.commandId)}>
+                          <span class="command-chevron" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="m9 6 6 6-6 6"/></svg></span>
+                          <span class="command-copy"><code>{command.command}</code><small>{command.exitCode === undefined ? "Running" : `Exit ${command.exitCode}`} · {formatCharacterCount(command.outputCharacters)}</small></span>
+                          <span class="command-fetch-label">{expanded ? "Close output" : "Fetch output"}</span>
+                        </button>
+                        {#if expanded}
+                          <div class="command-output-panel">
+                            {#if output?.loading && !output.text}
+                              <div class="command-output-loading"><span></span>Reading a bounded page from SQLite…</div>
+                            {:else if output?.error}
+                              <div class="command-output-error"><span>{output.error}</span><button type="button" onclick={() => loadCommandOutput(selectedAgentRun.runId, command.commandId, output.offset)}>Retry</button></div>
+                            {:else if output?.text}
+                              <pre>{output.text}</pre>
+                              <footer>
+                                <span>Showing {formatCharacterPosition(output.offset + 1)}–{formatCharacterPosition(output.nextOffset)} of {formatCharacterPosition(output.totalCharacters)} characters</span>
+                                <div class="command-page-actions">
+                                  {#if output.offset > 0}<button type="button" disabled={output.loading} onclick={() => loadCommandOutput(selectedAgentRun.runId, command.commandId, Math.max(0, output.offset - 20_000))}>Previous</button>{/if}
+                                  {#if output.hasMore}<button type="button" disabled={output.loading} onclick={() => loadCommandOutput(selectedAgentRun.runId, command.commandId, output.nextOffset)}>{output.loading ? "Loading…" : "Next 20k"}</button>{/if}
+                                  {#if command.exitCode === undefined}<button type="button" disabled={output.loading} onclick={() => loadCommandOutput(selectedAgentRun.runId, command.commandId, output.offset)}>Refresh</button>{/if}
+                                </div>
+                              </footer>
+                            {:else}
+                              <div class="command-output-empty"><span>No output has been persisted for this command.</span>{#if command.exitCode === undefined}<button type="button" onclick={() => loadCommandOutput(selectedAgentRun.runId, command.commandId, 0)}>Check again</button>{/if}</div>
+                            {/if}
+                          </div>
+                        {/if}
+                      </article>
+                    {/each}
+                  </div>
+                </section>
+              {/if}
+            </div>
+
+            {#if selectedAgentReview}
+              <section class="execution-result" data-freshness={selectedAgentReview.freshness}>
+                <header>
+                  <div><p class="eyebrow">Validated result</p><h3>{selectedAgentReview.persisted.validated.result.summary}</h3></div>
+                  <span class="result-freshness">{selectedAgentReview.freshness}</span>
+                </header>
+                {#if selectedAgentReview.reason}<p class="execution-result-warning">{selectedAgentReview.reason}</p>{/if}
+                <div class="execution-result-grid">
+                  <section><span>Outcome</span><strong>{selectedAgentReview.persisted.validated.result.outcome}</strong><small>{selectedAgentReview.promotable ? "Eligible for separate promotion review" : "Not promotable"}</small></section>
+                  <section><span>Next action</span><strong>{selectedAgentReview.persisted.validated.result.nextAction}</strong><small>{selectedAgentReview.persisted.validated.result.requiresHumanReview ? "Human review required" : "No review requested"}</small></section>
+                </div>
+                <div class="execution-result-columns">
+                  <section>
+                    <header><strong>Changed files</strong><span>{selectedAgentReview.persisted.validated.inspectedChanges.length}</span></header>
+                    {#if selectedAgentReview.persisted.validated.inspectedChanges.length}
+                      <ul class="execution-file-list">{#each selectedAgentReview.persisted.validated.inspectedChanges as change}<li><span data-change={change.changeType}>{change.changeType.slice(0, 1).toUpperCase()}</span><code>{change.path}</code>{#if change.policyViolations.length}<small>{change.policyViolations.join(" · ")}</small>{/if}</li>{/each}</ul>
+                    {:else}<p class="execution-result-empty">No Git-derived changes.</p>{/if}
+                  </section>
+                  <section>
+                    <header><strong>Verification</strong><span>{selectedAgentReview.persisted.validated.result.verification.length}</span></header>
+                    {#if selectedAgentReview.persisted.validated.result.verification.length}
+                      <ul class="execution-verification-list">{#each selectedAgentReview.persisted.validated.result.verification as check}<li><span data-status={check.status}></span><div><strong>{check.stepId}</strong><small>{check.details}</small></div></li>{/each}</ul>
+                    {:else}<p class="execution-result-empty">No verification records.</p>{/if}
+                  </section>
+                </div>
+                {#if selectedAgentReview.persisted.validated.result.producedEvidence.length}
+                  <div class="execution-evidence">
+                    <strong>Produced evidence</strong>
+                    <ul>
+                      {#each selectedAgentReview.persisted.validated.result.producedEvidence as evidence}
+                        <li><span>{evidence.type.replaceAll("_", " ")}</span><code>{evidence.reference}</code></li>
+                      {/each}
+                    </ul>
+                  </div>
+                {/if}
+                {#if selectedAgentReview.persisted.validated.result.blockers.length}<div class="execution-blockers"><strong>Blockers</strong>{#each selectedAgentReview.persisted.validated.result.blockers as blocker}<p>{blocker}</p>{/each}</div>{/if}
+              </section>
+            {/if}
+          </section>
+        {:else}
+          <div class="execution-run-empty"><span class="execution-header-mark" aria-hidden="true"><svg class="icon" viewBox="0 0 24 24"><path d="M5 4h14v16H5zM8 8h8M8 12h5M8 16h7"/></svg></span><h3>No run selected</h3><p>Start an action or choose a durable attempt from repository history.</p></div>
+        {/if}
+      </div>
     </div>
-    <footer>
-      <span>Saved automatically on this device</span>
-      <button class="primary-button" type="button" onclick={() => providerSettingsOpen = false} disabled={!providerSelectionReady}>Done</button>
-    </footer>
   </div>
 {/if}
 
@@ -1136,37 +2170,14 @@
 
     <div class="planner-body">
       <section class="planner-config">
-        <div class="planner-step-heading"><span>01</span><div><strong>Choose a runner</strong><small>Provider credentials stay inside the repository worker.</small></div></div>
-        <div class="runner-fields">
-          <label>
-            <span>Runner</span>
-            <select value={plannerRunnerId} onchange={(event) => selectProviderRunner(event.currentTarget.value)} disabled={planningActive}>
-              {#each runners as runner}
-                <option value={runner.id} disabled={!runner.available}>{runner.name}{runner.available ? ` · ${runner.version ?? runner.provider}` : " · unavailable"}</option>
-              {/each}
-            </select>
-          </label>
-          <label>
-            <span>Model</span>
-            <select value={plannerModel} onchange={(event) => selectProviderModel(event.currentTarget.value)} disabled={planningActive || !selectedModels.length}>
-              {#if selectedModels.length}
-                {#each selectedModels as model}
-                  <option value={model.id}>{model.displayName}{model.isDefault ? " · default" : ""}</option>
-                {/each}
-              {:else}
-                <option value="">Model catalog unavailable</option>
-              {/if}
-            </select>
-          </label>
-        </div>
-        {#if selectedRunner}
-          <div class:unavailable={!selectedRunner.available} class="runner-summary">
-            <span class="runner-status-dot"></span>
-            <div><strong>{selectedRunner.name}</strong><small>{selectedRunner.available ? selectedRunner.capabilities.join(" · ") : selectedRunner.unavailableReason}</small></div>
+        <div class="planner-step-heading"><span>01</span><div><strong>Active agent configuration</strong><small>Change CLI, model, or effort from the always-visible repository bar.</small></div></div>
+        <div class:unavailable={!providerSelectionReady} class="runner-summary">
+          <span class="runner-status-dot"></span>
+          <div>
+            <strong>{selectedRunner?.name ?? "No runner available"} · {selectedProviderModel?.displayName ?? "No model"}</strong>
+            <small>{plannerReasoningEffort ? `${plannerReasoningEffort} reasoning effort` : "Provider default reasoning effort"}</small>
           </div>
-        {:else}
-          <div class="runner-summary unavailable"><span class="runner-status-dot"></span><div><strong>No runner available</strong><small>Install or authenticate a supported CLI in the desktop environment.</small></div></div>
-        {/if}
+        </div>
 
         <div class="planner-step-heading request-heading"><span>02</span><div><strong>Describe the outcome</strong><small>The runner may inspect the repository but cannot write to it.</small></div></div>
         <div class="planning-target" data-target={plannerMode}>
@@ -1327,17 +2338,68 @@
   </div>
 {/if}
 
+{#if chatOpen && selectedCheckoutId && selectedRepository}
+  {#key selectedCheckoutId}
+    <RepositoryChatWorkspace
+      checkoutId={selectedCheckoutId}
+      repositoryName={selectedRepository.name}
+      {runners}
+      runnerId={plannerRunnerId}
+      modelId={plannerModel}
+      reasoningEffort={plannerReasoningEffort}
+      active={!editorOpen}
+      {terminalOpen}
+      {terminalHeight}
+      {terminalShortcutLabel}
+      onClose={() => chatOpen = false}
+      onOpenExplorer={() => {
+        openRepositoryEditor();
+      }}
+      onToggleTerminal={() => void toggleTerminal()}
+      onCreateTaskProposal={(request) => {
+        chatOpen = false;
+        plannerRequest = request;
+        openPlanner(selectedWorkspaceSlug ? "workspace" : "repository");
+      }}
+      onShowAgentConfiguration={() => {
+        void revealAgentConfiguration();
+      }}
+    />
+  {/key}
+{/if}
+
 {#if contentPanelTask}
   <TaskContentPanel
+    bind:this={taskContentPanel}
+    checkoutId={selectedCheckoutId}
     task={contentPanelTask}
     initializing={activeContentTaskKeys.has(canonicalTaskKey(contentPanelTask))}
     stream={contentLogs[canonicalTaskKey(contentPanelTask)] ?? ""}
     failure={contentFailures[canonicalTaskKey(contentPanelTask)] ?? ""}
     canInitialize={Boolean(plannerRunnerId)}
+    canRun={providerSelectionReady}
+    runCount={agentRuns.filter((run) => run.taskKey === canonicalTaskKey(contentPanelTask)).length}
     onClose={() => contentPanelTaskKey = ""}
     onEdit={editTaskContent}
     onInitialize={(task) => initializeTaskContent([canonicalTaskKey(task)])}
+    onRun={(task) => openExecutionWorkbench(task)}
   />
+{/if}
+
+{#if editorOpen && selectedCheckoutId}
+  <RepositoryWorkbench
+    bind:this={repositoryWorkbench}
+    checkoutId={selectedCheckoutId}
+    initialPath={editorInitialPath}
+    theme={theme === "dark" ? "dark" : "light"}
+    panelOpen={terminalOpen && Boolean(selectedRepository)}
+    panelHeight={terminalHeight}
+    panelMaximized={terminalMaximized}
+    terminalShortcutLabel={terminalShortcutLabel}
+    onClose={() => editorOpen = false}
+    onSaved={handleEditorSaved}
+    onToggleTerminal={() => void toggleTerminal()}
+  ></RepositoryWorkbench>
 {/if}
 
 {#if terminalOpen && selectedCheckoutId && selectedRepository}
@@ -1349,23 +2411,11 @@
       theme={theme === "dark" ? "dark" : "light"}
       height={terminalHeight}
       maximized={terminalMaximized}
+      repositoryWorkbench={editorOpen}
       shortcutLabel={terminalShortcutLabel}
-      onClose={() => {
-        terminalOpen = false;
-        terminalMaximized = false;
-      }}
+      onClose={() => void closeTerminal(editorOpen)}
       onHeightChange={updateTerminalHeight}
       onToggleMaximized={() => terminalMaximized = !terminalMaximized}
     />
   {/key}
-{/if}
-
-{#if editorOpen && selectedCheckoutId}
-  <RepositoryWorkbench
-    checkoutId={selectedCheckoutId}
-    initialPath={editorInitialPath}
-    theme={theme === "dark" ? "dark" : "light"}
-    onClose={() => editorOpen = false}
-    onSaved={handleEditorSaved}
-  />
 {/if}

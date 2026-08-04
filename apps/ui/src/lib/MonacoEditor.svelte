@@ -7,6 +7,7 @@
   export let theme: "light" | "dark" = "light";
   export let onChange: (value: string) => void = () => undefined;
   export let onSave: () => void = () => undefined;
+  export let onToggleTerminal: () => void = () => undefined;
 
   type MonacoApi = typeof import("monaco-editor");
 
@@ -94,6 +95,16 @@
     monacoApi.editor.setTheme(editorThemeName(activeTheme));
   }
 
+  function applyEditorLanguage(activeLanguage: string) {
+    const model = editor?.getModel();
+    if (!monacoApi || !model || model.getLanguageId() === activeLanguage) return;
+    monacoApi.editor.setModelLanguage(model, activeLanguage);
+  }
+
+  export function focus() {
+    editor?.focus();
+  }
+
   onMount(() => {
     let disposed = false;
     (window as typeof window & { MonacoEnvironment?: unknown }).MonacoEnvironment = {
@@ -128,6 +139,8 @@
       });
       editor = instance;
       instance.addCommand(monaco.KeyMod.CtrlCmd | monaco.KeyCode.KeyS, () => onSave());
+      instance.addCommand(monaco.KeyMod.CtrlCmd | monaco.KeyCode.Backquote, () => onToggleTerminal());
+      instance.addCommand(monaco.KeyMod.CtrlCmd | monaco.KeyCode.KeyJ, () => onToggleTerminal());
       instance.onDidChangeModelContent(() => {
         if (!applyingExternalValue) onChange(editor?.getValue() ?? "");
       });
@@ -145,6 +158,7 @@
     editor.setValue(value);
     applyingExternalValue = false;
   }
+  $: if (monacoApi && editor) applyEditorLanguage(language);
   $: if (monacoApi) applyEditorTheme(theme);
 </script>
 

@@ -1,0 +1,193 @@
+name: Release macOS
+
+on:
+  push:
+    tags:
+      - "v*.*.*"
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  validate:
+    name: Validate release contract
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - name: Check out the tagged revision
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          fetch-depth: 0
+
+      - name: Set up Node.js
+        uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version-file: .node-version
+
+      - name: Enable pinned pnpm
+        run: |
+          corepack enable
+          corepack install --global pnpm@11.9.0
+
+      - name: Require the release commit on main
+        shell: bash
+        run: |
+          set -euo pipefail
+          git fetch --no-tags origin main
+          if ! git merge-base --is-ancestor "$GITHUB_SHA" origin/main; then
+            echo "Release tags must point to a commit contained by main." >&2
+            exit 1
+          fi
+
+      - name: Install locked dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Validate version and changelog
+        run: node scripts/validate-release.mjs --tag "$GITHUB_REF_NAME"
+
+      - name: Check source
+        run: pnpm check
+
+      - name: Run tests
+        run: pnpm test
+
+  build:
+    name: Build macOS ${{ matrix.architecture }}
+    needs: validate
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 60
+    environment: production
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: macos-15
+            architecture: arm64
+          - runner: macos-15-intel
+            architecture: x64
+    steps:
+      - name: Check out the tagged revision
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+
+      - name: Set up Node.js
+        uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version-file: .node-version
+
+      - name: Enable pinned pnpm
+        run: |
+          corepack enable
+          corepack install --global pnpm@11.9.0
+
+      - name: Confirm runner architecture
+        shell: bash
+        run: |
+          set -euo pipefail
+          actual_architecture="$(node -p 'process.arch')"
+          test "$actual_architecture" = "${{ matrix.architecture }}"
+
+      - name: Install locked dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Build unsigned application
+        env:
+          PHASEATLAS_BUILD_NUMBER: ${{ github.run_number }}
+          PHASEATLAS_RELEASE_CHANNEL: release
+          PHASEATLAS_RELEASE_UNSIGNED: "1"
+        run: pnpm package:desktop
+
+      - name: Verify unsigned application
+        shell: bash
+        run: |
+          set -euo pipefail
+          pnpm verify:desktop
+          codesign --display --verbose=4 \
+            "artifacts/desktop/darwin-${{ matrix.architecture }}/PhaseAtlas.app" 2>&1 \
+            | grep -F "Signature=adhoc"
+
+      - name: Upload architecture artifact
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
+        with:
+          name: phaseatlas-darwin-${{ matrix.architecture }}
+          path: artifacts/desktop/darwin-${{ matrix.architecture }}/*.zip
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 14
+
+  publish:
+    name: Publish GitHub Release
+    needs: build
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    environment: production
+    permissions:
+      contents: write
+    steps:
+      - name: Check out the tagged revision
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+
+      - name: Set up Node.js
+        uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version-file: .node-version
+          package-manager-cache: false
+
+      - name: Download unsigned applications
+        uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7
+        with:
+          pattern: phaseatlas-darwin-*
+          path: release-assets
+          merge-multiple: true
+
+      - name: Prepare release notes and checksums
+        shell: bash
+        run: |
+          set -euo pipefail
+          node scripts/validate-release.mjs \
+            --tag "$GITHUB_REF_NAME" \
+            --notes-output "$RUNNER_TEMP/release-notes.md"
+
+          (
+            cd release-assets
+            sha256sum PhaseAtlas-*.zip > SHA256SUMS.txt
+          )
+
+      - name: Create or update GitHub Release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          version="${GITHUB_REF_NAME#v}"
+          release_options=()
+          if [[ "$version" == *-* ]]; then
+            release_options+=(--prerelease)
+          fi
+
+          if gh release view "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            gh release upload "$GITHUB_REF_NAME" release-assets/* --clobber --repo "$GITHUB_REPOSITORY"
+            gh release edit "$GITHUB_REF_NAME" \
+              --title "PhaseAtlas $version" \
+              --notes-file "$RUNNER_TEMP/release-notes.md" \
+              --repo "$GITHUB_REPOSITORY"
+          else
+            gh release create "$GITHUB_REF_NAME" release-assets/* \
+              --verify-tag \
+              --title "PhaseAtlas $version" \
+              --notes-file "$RUNNER_TEMP/release-notes.md" \
+              --repo "$GITHUB_REPOSITORY" \
+              "${release_options[@]}"
+          fi
+
+      - name: Retain the complete release set
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
+        with:
+          name: phaseatlas-release-${{ github.ref_name }}
+          path: release-assets
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 30

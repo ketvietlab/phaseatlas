@@ -28,9 +28,12 @@ mechanisms into the same normalized events and validated result. Provider succes
 shared validation or grant canonical task authority.
 
 Model selection follows provider discovery. The worker projects the installed CLI's current catalog
-into a small shared descriptor and the renderer offers only those values. Repository preferences are
-operational `{runnerId, modelId}` data keyed by checkout; they are neither credentials nor canonical
-repository configuration. The application does not offer arbitrary CLI paths or free-form model IDs.
+into a small shared descriptor and the renderer offers only those values. Reasoning effort is also
+selected from the chosen model's discovered catalog, validated again by the worker, and translated
+only inside the provider adapter. Repository preferences are operational
+`{runnerId, modelId, reasoningEffort?}` data keyed by checkout; they are neither credentials nor
+canonical repository configuration. The application does not offer arbitrary CLI paths, free-form
+model IDs, or free-form effort labels.
 
 ## Consequences
 

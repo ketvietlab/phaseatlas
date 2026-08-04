@@ -7,6 +7,7 @@
   "scripts": {
     "build": "tsup",
     "check": "tsc --noEmit",
+    "package": "node ../../scripts/package-desktop.mjs",
     "dev": "wait-on tcp:127.0.0.1:4177 && cross-env PHASEATLAS_UI_DEV_URL=http://127.0.0.1:4177 electron dist/main.js"
   },
   "dependencies": {

@@ -279,6 +279,7 @@ export interface PlanningStartInput {
   target: PlanningTarget;
   runnerId: string;
   model?: string;
+  reasoningEffort?: string;
   request: string;
 }
 
@@ -291,6 +292,7 @@ export interface TaskContentStartInput {
   taskKeys: string[];
   runnerId: string;
   model?: string;
+  reasoningEffort?: string;
 }
 
 export type TaskContentRunStatus = "starting" | "running" | "completed" | "failed" | "cancelled";
@@ -408,6 +410,48 @@ export interface AgentRunCreateInput {
   requestedSandbox?: AgentSandbox;
 }
 
+export interface AgentRunStartInput extends AgentRunCreateInput {
+  runnerId: string;
+  model?: string;
+  reasoningEffort?: string;
+}
+
+export interface AgentRunActionQuery {
+  taskKey: string;
+  runnerId: string;
+  model?: string;
+  reasoningEffort?: string;
+}
+
+export interface AgentRunActionAvailability {
+  action: AgentRunAction;
+  sandbox: AgentSandbox;
+  available: boolean;
+  blockingReasons: string[];
+}
+
+export type AgentRunRecoveryDecision = "leave_interrupted" | "retry";
+
+export interface AgentRunRecoveryInput {
+  runId: string;
+  decision: AgentRunRecoveryDecision;
+  runnerId?: string;
+  model?: string;
+  reasoningEffort?: string;
+}
+
+export interface AgentRunCancellationResult {
+  runId: string;
+  status: Extract<PersistedRunStatus, "completed" | "failed" | "cancelled" | "interrupted">;
+  disposition: "cancelled" | "already_terminal";
+}
+
+export interface AgentRunRecoveryResult {
+  originalRunId: string;
+  decision: AgentRunRecoveryDecision;
+  retryRunId?: string;
+}
+
 export interface AgentCheckoutIdentity {
   repositoryId: string;
   checkoutId: string;
@@ -478,6 +522,68 @@ export interface ValidatedAgentRunResult {
   policyViolations: string[];
 }
 
+export type AgentResultFreshness = "current" | "stale" | "unverifiable";
+
+export interface PersistedAgentRunResult {
+  runId: string;
+  taskKey: string;
+  taskRevision: string;
+  recordedAt: string;
+  validated: ValidatedAgentRunResult;
+}
+
+export interface AgentResultRevalidationRecord {
+  runId: string;
+  taskRevision: string;
+  outcome: "passed" | "failed";
+  reviewer: string;
+  recordedAt: string;
+}
+
+export interface AgentResultReview {
+  persisted: PersistedAgentRunResult;
+  freshness: AgentResultFreshness;
+  currentTaskRevision?: string;
+  revalidation?: AgentResultRevalidationRecord;
+  promotable: boolean;
+  reason?: string;
+}
+
+export interface AgentRunSummary {
+  runId: string;
+  taskKey: string;
+  taskRevision: string;
+  action: AgentRunAction;
+  sandbox: AgentSandbox;
+  runnerId: string;
+  model?: string;
+  reasoningEffort?: string;
+  status: PersistedRunStatus;
+  parentRunId?: string;
+  freshness?: AgentResultFreshness;
+  promotable?: boolean;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface PersistedRunEventPage {
+  runId: string;
+  events: PersistedRunEvent[];
+  afterSequence: number;
+  nextSequence: number;
+  hasMore: boolean;
+}
+
+export interface AgentRunCommandOutputPage {
+  runId: string;
+  commandId: string;
+  offset: number;
+  nextOffset: number;
+  totalCharacters: number;
+  hasMore: boolean;
+  text: string;
+}
+
 export type AgentEvent =
   | { sequence: number; type: "run.status"; status: AgentRunStatus }
   | { sequence: number; type: "agent.delta"; text: string }
@@ -514,6 +620,207 @@ export type TerminalEvent =
   | { type: "terminal.exited"; sessionId: string; exitCode: number; exitSignal?: number; timestamp: string }
   | { type: "terminal.closed"; sessionId: string; timestamp: string };
 
+export type RepositoryChatSessionState = "open" | "closed";
+export type RepositoryChatTurnStatus = "starting" | "running" | "completed" | "failed" | "cancelled" | "interrupted";
+export type RepositoryChatMessageRole = "user" | "assistant";
+
+export interface RepositoryChatPathAttachment {
+  type?: "repository";
+  path: string;
+}
+
+export type RepositoryChatImageMediaType = "image/png" | "image/jpeg" | "image/webp" | "image/gif";
+
+export interface RepositoryChatImageAttachment {
+  type: "image";
+  name: string;
+  mediaType: RepositoryChatImageMediaType;
+  data: string;
+}
+
+export type RepositoryChatAttachment = RepositoryChatPathAttachment | RepositoryChatImageAttachment;
+
+export interface RepositoryChatSession {
+  sessionId: string;
+  checkoutId: string;
+  runnerId: string;
+  model: string;
+  reasoningEffort?: string;
+  title: string;
+  state: RepositoryChatSessionState;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface RepositoryChatMessage {
+  messageId: string;
+  sessionId: string;
+  turnId?: string;
+  role: RepositoryChatMessageRole;
+  content: string;
+  attachments: RepositoryChatAttachment[];
+  sequence: number;
+  createdAt: string;
+}
+
+export interface RepositoryChatTurn {
+  turnId: string;
+  sessionId: string;
+  status: RepositoryChatTurnStatus;
+  runnerId: string;
+  model: string;
+  reasoningEffort?: string;
+  userMessageId: string;
+  assistantMessageId?: string;
+  parentTurnId?: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface RepositoryChatCreateInput {
+  runnerId: string;
+  model: string;
+  reasoningEffort?: string;
+  title?: string;
+}
+
+export interface RepositoryChatRenameInput {
+  sessionId: string;
+  title: string;
+}
+
+export interface RepositoryChatSendInput {
+  sessionId: string;
+  text: string;
+  attachments?: RepositoryChatAttachment[];
+}
+
+export interface RepositoryChatRetryInput {
+  turnId: string;
+}
+
+export interface RepositoryChatCancellationResult {
+  turnId: string;
+  status: Extract<RepositoryChatTurnStatus, "completed" | "failed" | "cancelled" | "interrupted">;
+  disposition: "cancelled" | "already_terminal";
+}
+
+export interface ChatEditScope {
+  allowedPaths: string[];
+  forbiddenPaths: string[];
+}
+
+export interface ChatEditPrepareInput {
+  sessionId: string;
+  prompt: string;
+  scope: ChatEditScope;
+}
+
+export interface ChatEditSpec {
+  readonly schemaVersion: "phaseatlas.chat-edit/v1";
+  readonly editId: string;
+  readonly sessionId: string;
+  readonly checkout: AgentCheckoutIdentity;
+  readonly baseRevision: string;
+  readonly runnerId: string;
+  readonly model: string;
+  readonly reasoningEffort?: string;
+  readonly prompt: string;
+  readonly scope: TaskScope;
+  readonly sandbox: "workspace-write";
+  readonly createdAt: string;
+  readonly confirmationDigest: string;
+}
+
+export interface ChatEditConfirmation {
+  editId: string;
+  repositoryId: string;
+  checkoutId: string;
+  repositoryName: string;
+  baseRevision: string;
+  runnerId: string;
+  model: string;
+  reasoningEffort?: string;
+  scope: TaskScope;
+  isolatedWorktree: true;
+  reviewRequired: true;
+  confirmationDigest: string;
+}
+
+export interface ChatEditStartInput {
+  editId: string;
+  confirmationDigest: string;
+}
+
+export type ChatEditDisposition = "pending_review" | "accepted" | "discarded" | "retained";
+
+export interface ChatEditResult {
+  editId: string;
+  status: "awaiting_confirmation" | "running" | "completed" | "failed" | "cancelled" | "interrupted";
+  disposition: ChatEditDisposition;
+  summary: string;
+  changedFiles: InspectedAgentChange[];
+  patch: string;
+  patchTruncated: boolean;
+  verification: Array<{ label: string; status: "passed" | "failed" | "not_run"; details: string }>;
+  blockers: string[];
+  nextAction: string;
+  runnerId: string;
+  model: string;
+  reasoningEffort?: string;
+  baseRevision: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface ChatEditCancellationResult {
+  editId: string;
+  disposition: "cancelled" | "already_terminal";
+}
+
+export interface ChatEditRecoveryInput {
+  editId: string;
+  decision: "resume_review" | "discard";
+}
+
+export type RepositoryChatAdapterEvent =
+  | { type: "chat.turn.status"; status: "running" }
+  | { type: "chat.assistant.delta"; text: string }
+  | { type: "chat.reasoning"; itemId?: string; summary: string; status?: "running" | "completed" }
+  | { type: "chat.tool.started"; toolCallId: string; tool: string; summary: string }
+  | {
+      type: "chat.tool.completed";
+      toolCallId: string;
+      status: "completed" | "failed";
+      outputBytes?: number;
+      outputHidden?: true;
+    }
+  | { type: "chat.file.reference"; path: string }
+  | { type: "chat.usage"; inputTokens?: number; outputTokens?: number };
+
+export type RepositoryChatEventType = RepositoryChatAdapterEvent["type"]
+  | "chat.tool.output"
+  | "chat.turn.completed"
+  | "chat.turn.failed"
+  | "chat.turn.cancelled"
+  | "chat.turn.interrupted";
+
+export interface PersistedRepositoryChatEvent {
+  turnId: string;
+  sequence: number;
+  type: RepositoryChatEventType;
+  timestamp: string;
+  payload: Record<string, unknown>;
+}
+
+export interface RepositoryChatEventPage {
+  turnId: string;
+  events: PersistedRepositoryChatEvent[];
+  afterSequence: number;
+  nextSequence: number;
+  hasMore: boolean;
+}
+
 export type RepositoryWorkerMethod =
   | "repository.describe"
   | "repository.refresh"
@@ -528,7 +835,15 @@ export type RepositoryWorkerMethod =
   | "task-content.save"
   | "run.list"
   | "run.events"
+  | "run.events-page"
   | "agent-run.prepare"
+  | "agent-run.actions"
+  | "agent-run.list"
+  | "agent-run.command-output"
+  | "agent-run.start"
+  | "agent-run.cancel"
+  | "agent-run.result"
+  | "agent-run.recover"
   | "agent-run.leases"
   | "agent-run.release"
   | "terminal.list"
@@ -536,6 +851,27 @@ export type RepositoryWorkerMethod =
   | "terminal.write"
   | "terminal.resize"
   | "terminal.close"
+  | "chat.session.create"
+  | "chat.session.list"
+  | "chat.session.get"
+  | "chat.session.rename"
+  | "chat.session.close"
+  | "chat.message.list"
+  | "chat.turn.list"
+  | "chat.turn.send"
+  | "chat.turn.events"
+  | "chat.turn.cancel"
+  | "chat.turn.retry"
+  | "chat.edit.prepare"
+  | "chat.edit.list"
+  | "chat.edit.start"
+  | "chat.edit.events"
+  | "chat.edit.result"
+  | "chat.edit.cancel"
+  | "chat.edit.accept"
+  | "chat.edit.discard"
+  | "chat.edit.retain"
+  | "chat.edit.recover"
   | "file.list"
   | "file.read"
   | "file.save"
@@ -552,7 +888,7 @@ export type WorkerResponse =
   | { requestId: string; error: { code: string; message: string } };
 
 export interface WorkerEvent {
-  type: "worker.ready" | "repository.changed" | "worker.warning" | "planning.event" | "task-content.event" | "terminal.event" | "lease.recovery";
+  type: "worker.ready" | "repository.changed" | "worker.warning" | "planning.event" | "task-content.event" | "agent-run.event" | "terminal.event" | "chat.turn.event" | "chat.edit.event" | "lease.recovery";
   payload: Record<string, unknown>;
 }
 
@@ -574,13 +910,41 @@ export interface TaskContentDesktopEvent {
   event: TaskContentEvent;
 }
 
+export interface AgentRunDesktopEvent {
+  type: "agent-run.event";
+  checkoutId: string;
+  runId: string;
+  event: PersistedRunEvent;
+}
+
 export interface TerminalDesktopEvent {
   type: "terminal.event";
   checkoutId: string;
   event: TerminalEvent;
 }
 
-export type PhaseAtlasDesktopEvent = RepositoryChangedEvent | PlanningDesktopEvent | TaskContentDesktopEvent | TerminalDesktopEvent;
+export interface RepositoryChatDesktopEvent {
+  type: "chat.turn.event";
+  checkoutId: string;
+  turnId: string;
+  event: PersistedRepositoryChatEvent;
+}
+
+export interface ChatEditDesktopEvent {
+  type: "chat.edit.event";
+  checkoutId: string;
+  editId: string;
+  event: PersistedRunEvent;
+}
+
+export type PhaseAtlasDesktopEvent =
+  | RepositoryChangedEvent
+  | PlanningDesktopEvent
+  | TaskContentDesktopEvent
+  | AgentRunDesktopEvent
+  | TerminalDesktopEvent
+  | RepositoryChatDesktopEvent
+  | ChatEditDesktopEvent;
 
 export interface PhaseAtlasDesktopApi {
   repositories: {
@@ -612,9 +976,15 @@ export interface PhaseAtlasDesktopApi {
     cancel(checkoutId: string, runId: string): Promise<void>;
     publish(checkoutId: string, input: PlanningPublishInput): Promise<TaskSnapshot>;
   };
-  runs: {
-    list(checkoutId: string): Promise<PersistedRunRecord[]>;
-    events(checkoutId: string, runId: string, afterSequence?: number): Promise<PersistedRunEvent[]>;
+  agentRuns: {
+    actions(checkoutId: string, input: AgentRunActionQuery): Promise<AgentRunActionAvailability[]>;
+    list(checkoutId: string, taskKey?: string): Promise<AgentRunSummary[]>;
+    start(checkoutId: string, input: AgentRunStartInput): Promise<{ runId: string }>;
+    cancel(checkoutId: string, runId: string): Promise<AgentRunCancellationResult>;
+    events(checkoutId: string, runId: string, afterSequence?: number, limit?: number): Promise<PersistedRunEventPage>;
+    commandOutput(checkoutId: string, runId: string, commandId: string, offset?: number, limit?: number): Promise<AgentRunCommandOutputPage>;
+    result(checkoutId: string, runId: string): Promise<AgentResultReview>;
+    recover(checkoutId: string, input: AgentRunRecoveryInput): Promise<AgentRunRecoveryResult>;
   };
   terminals: {
     list(checkoutId: string): Promise<TerminalSessionSnapshot[]>;
@@ -623,11 +993,35 @@ export interface PhaseAtlasDesktopApi {
     resize(checkoutId: string, sessionId: string, cols: number, rows: number): Promise<void>;
     close(checkoutId: string, sessionId: string): Promise<void>;
   };
+  chat: {
+    createSession(checkoutId: string, input: RepositoryChatCreateInput): Promise<RepositoryChatSession>;
+    listSessions(checkoutId: string): Promise<RepositoryChatSession[]>;
+    getSession(checkoutId: string, sessionId: string): Promise<RepositoryChatSession>;
+    renameSession(checkoutId: string, input: RepositoryChatRenameInput): Promise<RepositoryChatSession>;
+    closeSession(checkoutId: string, sessionId: string): Promise<RepositoryChatSession>;
+    listMessages(checkoutId: string, sessionId: string): Promise<RepositoryChatMessage[]>;
+    listTurns(checkoutId: string, sessionId: string): Promise<RepositoryChatTurn[]>;
+    send(checkoutId: string, input: RepositoryChatSendInput): Promise<{ turnId: string }>;
+    events(checkoutId: string, turnId: string, afterSequence?: number, limit?: number): Promise<RepositoryChatEventPage>;
+    cancel(checkoutId: string, turnId: string): Promise<RepositoryChatCancellationResult>;
+    retry(checkoutId: string, input: RepositoryChatRetryInput): Promise<{ turnId: string }>;
+    prepareEdit(checkoutId: string, input: ChatEditPrepareInput): Promise<ChatEditConfirmation>;
+    listEdits(checkoutId: string, sessionId?: string): Promise<ChatEditResult[]>;
+    startEdit(checkoutId: string, input: ChatEditStartInput): Promise<{ editId: string }>;
+    editEvents(checkoutId: string, editId: string, afterSequence?: number, limit?: number): Promise<PersistedRunEventPage>;
+    editResult(checkoutId: string, editId: string): Promise<ChatEditResult>;
+    cancelEdit(checkoutId: string, editId: string): Promise<ChatEditCancellationResult>;
+    acceptEdit(checkoutId: string, editId: string): Promise<ChatEditResult>;
+    discardEdit(checkoutId: string, editId: string): Promise<ChatEditResult>;
+    retainEdit(checkoutId: string, editId: string): Promise<ChatEditResult>;
+    recoverEdit(checkoutId: string, input: ChatEditRecoveryInput): Promise<ChatEditResult>;
+  };
   events: {
     subscribe(listener: (event: PhaseAtlasDesktopEvent) => void): () => void;
   };
   runtime: {
     platform(): Promise<string>;
+    onCloseSurface(listener: () => void): () => void;
   };
 }
 

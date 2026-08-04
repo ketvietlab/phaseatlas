@@ -1,0 +1,5 @@
+schemaVersion: phaseatlas.workspace/v1
+slug: repository-agent-chat
+name: Repository Agent Chat
+description: Task-independent repository conversations, durable agent sessions, desktop chat UX,
+  isolated edit mode, and optional conversion of conversation outcomes into canonical tasks.

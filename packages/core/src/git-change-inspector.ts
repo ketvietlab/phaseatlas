@@ -1,6 +1,7 @@
 import { execFile } from "node:child_process";
 import { createHash } from "node:crypto";
-import { access, lstat, readFile, readlink, realpath } from "node:fs/promises";
+import { createReadStream } from "node:fs";
+import { access, lstat, readlink, realpath } from "node:fs/promises";
 import path from "node:path";
 import { promisify } from "node:util";
 import type { AgentFileChangeType, InspectedAgentChange, TaskScope } from "@phaseatlas/contracts";
@@ -30,6 +31,15 @@ function policyViolations(filePath: string, scope: TaskScope): string[] {
   if (!scope.writable) violations.push("task_scope_read_only");
   if (!scope.allowedPaths.some((rule) => matchesRule(filePath, rule))) violations.push("outside_allowed_paths");
   if (scope.forbiddenPaths.some((rule) => matchesRule(filePath, rule))) violations.push("forbidden_path");
+  const baseName = path.posix.basename(filePath.toLowerCase());
+  if (!scope.allowDependencyChanges && new Set([
+    "package.json", "package-lock.json", "pnpm-lock.yaml", "yarn.lock", "bun.lock", "bun.lockb",
+    "cargo.toml", "cargo.lock", "go.mod", "go.sum", "pyproject.toml", "poetry.lock", "requirements.txt",
+    "gemfile", "gemfile.lock", "composer.json", "composer.lock",
+  ]).has(baseName)) violations.push("dependency_change_not_allowed");
+  if (!scope.allowDatabaseMigrations && /(^|\/)(?:migrations?|prisma\/migrations?)(\/|$)/i.test(filePath)) {
+    violations.push("database_migration_not_allowed");
+  }
   return violations;
 }
 
@@ -106,10 +116,18 @@ export async function captureGitState(input: { worktreePath: string; git?: GitCo
     const stat = await lstat(candidate);
     if (stat.isSymbolicLink()) {
       hash.update(await readlink(candidate));
+    } else if (stat.isDirectory()) {
+      const [nestedRoot, candidateRoot, nestedHead] = await Promise.all([
+        git(["rev-parse", "--show-toplevel"], candidate).then((value) => realpath(value.trim())),
+        realpath(candidate),
+        git(["rev-parse", "HEAD"], candidate),
+      ]);
+      if (nestedRoot !== candidateRoot) throw new Error(`Cannot fingerprint untracked directory ${filePath}.`);
+      hash.update(nestedHead);
+      hash.update(await captureGitState({ worktreePath: candidate, git }));
     } else {
       if (!stat.isFile()) throw new Error(`Cannot fingerprint non-regular untracked path ${filePath}.`);
-      if (stat.size > 10 * 1024 * 1024) throw new Error(`Cannot fingerprint oversized untracked file ${filePath}.`);
-      hash.update(await readFile(candidate));
+      for await (const chunk of createReadStream(candidate)) hash.update(chunk);
     }
   }
   return hash.digest("hex");

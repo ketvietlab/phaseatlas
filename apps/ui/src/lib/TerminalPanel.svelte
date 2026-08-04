@@ -12,12 +12,14 @@
   export let theme: "light" | "dark" = "light";
   export let height = 300;
   export let maximized = false;
+  export let repositoryWorkbench = false;
   export let shortcutLabel = "⌘`";
   export let onClose: () => void;
   export let onHeightChange: (height: number) => void;
   export let onToggleMaximized: () => void;
 
   let terminalHost: HTMLDivElement;
+  let terminalRoot: HTMLElement;
   let terminal: XTermInstance | null = null;
   let fitAddon: FitAddonInstance | null = null;
   let resizeObserver: ResizeObserver | null = null;
@@ -56,6 +58,17 @@
         scrollback: 10_000,
         tabStopWidth: 2,
       });
+      terminal.attachCustomKeyEventHandler((event) => {
+        const modifier = event.metaKey || event.ctrlKey;
+        const terminalShortcut = modifier && !event.shiftKey && !event.altKey && (
+          event.code === "Backquote" || event.key.toLowerCase() === "j"
+        );
+        if (event.type !== "keydown" || !terminalShortcut) return true;
+        event.preventDefault();
+        event.stopPropagation();
+        onClose();
+        return false;
+      });
       fitAddon = new FitAddon();
       terminal.loadAddon(fitAddon);
       applyTerminalTheme();
@@ -88,6 +101,19 @@
     terminal?.focus();
   }
 
+  export function hasFocus(): boolean {
+    return terminalRoot?.contains(document.activeElement) ?? false;
+  }
+
+  function activeSessionKey(): string {
+    return `phaseatlas.terminal.active-session.v1.${checkoutId}`;
+  }
+
+  function rememberActiveSession(sessionId: string): void {
+    if (sessionId) window.localStorage.setItem(activeSessionKey(), sessionId);
+    else window.localStorage.removeItem(activeSessionKey());
+  }
+
   async function loadSessions(): Promise<void> {
     if (!window.phaseatlas) return;
     loading = true;
@@ -99,9 +125,12 @@
       if (!sessions.length) {
         await createSession();
       } else {
-        activeSessionId = sessions.find((session) => session.status === "running")?.sessionId
+        const rememberedSessionId = window.localStorage.getItem(activeSessionKey()) ?? "";
+        activeSessionId = sessions.find((session) => session.sessionId === rememberedSessionId)?.sessionId
+          ?? sessions.find((session) => session.status === "running")?.sessionId
           ?? sessions.at(-1)?.sessionId
           ?? "";
+        rememberActiveSession(activeSessionId);
         await renderActiveSession();
       }
     } catch (error) {
@@ -125,6 +154,7 @@
       if (disposed) return;
       sessions = [...sessions, snapshot];
       activeSessionId = snapshot.sessionId;
+      rememberActiveSession(activeSessionId);
       await renderActiveSession();
     } catch (error) {
       showError(error);
@@ -139,6 +169,7 @@
       return;
     }
     activeSessionId = sessionId;
+    rememberActiveSession(activeSessionId);
     await renderActiveSession();
   }
 
@@ -160,6 +191,7 @@
     if (!wasActive) return;
     const nextIndex = Math.min(Math.max(formerIndex, 0), sessions.length - 1);
     activeSessionId = sessions[nextIndex]?.sessionId ?? "";
+    rememberActiveSession(activeSessionId);
     void renderActiveSession();
   }
 
@@ -269,7 +301,9 @@
 </script>
 
 <section
+  bind:this={terminalRoot}
   class:maximized
+  class:repository-workbench={repositoryWorkbench}
   class="terminal-panel"
   style={`height: ${maximized ? "calc(100vh - 52px)" : `${height}px`}`}
   aria-label={`Terminal for ${repositoryName}`}
@@ -338,8 +372,9 @@
 </section>
 
 <style>
-  .terminal-panel { position: fixed; z-index: 90; right: 0; bottom: 0; left: var(--sidebar-width); display: grid; min-height: 180px; grid-template-rows: 40px minmax(0,1fr) 24px; overflow: hidden; border-top: 1px solid var(--border); background: var(--surface); color: var(--text); box-shadow: 0 -10px 30px rgba(24,24,27,.08); }
-  .terminal-panel.maximized { z-index: 91; }
+  .terminal-panel { position: fixed; z-index: 140; right: 0; bottom: 0; left: var(--sidebar-width); display: grid; min-height: 180px; grid-template-rows: 40px minmax(0,1fr) 24px; overflow: hidden; border-top: 1px solid var(--border); background: var(--surface); color: var(--text); box-shadow: 0 -10px 30px rgba(24,24,27,.08); }
+  .terminal-panel.maximized { z-index: 141; }
+  .terminal-panel.repository-workbench { left: 264px; }
   .resize-handle { position: absolute; z-index: 3; top: -3px; right: 0; left: 0; height: 7px; border: 0; padding: 0; background: transparent; cursor: ns-resize; }
   .resize-handle:hover,.resize-handle:focus-visible { background: var(--brand-500); }
   .maximized .resize-handle { display: none; }
@@ -391,6 +426,8 @@
   :global(.terminal-host .xterm-viewport) { scrollbar-color: var(--border) transparent; scrollbar-width: thin; }
   :global(.terminal-host .xterm-screen) { font-variant-ligatures: none; }
   @keyframes spin { to { transform: rotate(360deg); } }
-  @media (max-width: 767.98px) { .terminal-panel { left: 0; }.terminal-identity { width: 112px; flex-basis: 112px; }.terminal-identity small { max-width: 62px; }.terminal-statusbar code { display: none; }.terminal-shortcut { margin-left: auto; } }
+  @media (max-width: 760px) { .terminal-panel.repository-workbench { left: 210px; } }
+  @media (max-width: 767.98px) { .terminal-panel:not(.repository-workbench) { left: 0; }.terminal-identity { width: 112px; flex-basis: 112px; }.terminal-identity small { max-width: 62px; }.terminal-statusbar code { display: none; }.terminal-shortcut { margin-left: auto; } }
+  @media (max-width: 520px) { .terminal-panel.repository-workbench { left: 168px; } }
   @media (max-width: 520px) { .terminal-identity { width: 42px; flex-basis: 42px; justify-content: center; padding: 0; }.terminal-identity > span { display: none; }.terminal-tab-wrap { min-width: 108px; }.terminal-actions button:nth-child(2) { display: none; }.terminal-shortcut { display: none !important; } }
 </style>
