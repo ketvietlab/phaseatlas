@@ -3,6 +3,7 @@ import { createHash, randomUUID } from "node:crypto";
 import { promisify } from "node:util";
 import type {
   ChatEditCancellationResult,
+  ChatEditAccessMode,
   ChatEditConfirmation,
   ChatEditPrepareInput,
   ChatEditResult,
@@ -17,15 +18,15 @@ import type {
 import {
   CheckoutOperationalStore,
   inspectGitChanges,
-  isSafeAgentPath,
   type WorktreeLeaseManager,
 } from "@phaseatlas/core";
 import { assertRunnerSelection } from "./runner-registry.js";
 import type { ChatEditAdapter } from "./chat-edit-adapter-registry.js";
+import { safeChatAttachments } from "./chat-attachment-policy.js";
 
 const execFileAsync = promisify(execFile);
 const MAX_PATCH = 500_000;
-const PROTECTED_PATHS = [".git", ".phaseatlas"];
+const ACCESS_MODES = new Set<ChatEditAccessMode>(["ask_for_approval", "full_access"]);
 
 type Git = (args: string[], cwd: string) => Promise<string>;
 const defaultGit: Git = async (args, cwd) => {
@@ -46,20 +47,6 @@ function safeId(value: string, field: string): string {
   const normalized = value.trim();
   if (!/^[A-Za-z0-9][A-Za-z0-9._-]{0,159}$/.test(normalized)) throw new Error(`${field} is invalid.`);
   return normalized;
-}
-
-function normalizePaths(paths: string[], field: string): string[] {
-  if (!Array.isArray(paths) || paths.length > 64) throw new Error(`${field} accepts at most 64 paths.`);
-  const normalized = new Set<string>();
-  for (const value of paths) {
-    if (typeof value !== "string") throw new Error(`${field} must contain repository-relative paths.`);
-    const candidate = value.replaceAll("\\", "/").replace(/^\.\//, "").replace(/\/$/, "");
-    if (!candidate || !isSafeAgentPath(candidate) || candidate === "." || PROTECTED_PATHS.some((item) => candidate === item || candidate.startsWith(`${item}/`))) {
-      throw new Error(`${field} contains an unsafe or protected path.`);
-    }
-    normalized.add(candidate);
-  }
-  return [...normalized].sort();
 }
 
 function parseSpec(event: PersistedRunEvent): ChatEditSpec {
@@ -103,9 +90,8 @@ export class ChatEditRuntime {
     if (session.state !== "open") throw new Error("Chat edit requires an open session.");
     const prompt = String(input.prompt ?? "").replaceAll("\0", "").trim();
     if (!prompt || prompt.length > 32_000) throw new Error("Chat edit prompt must contain 1 to 32000 characters.");
-    const allowedPaths = normalizePaths(input.scope?.allowedPaths ?? [], "allowedPaths");
-    if (!allowedPaths.length) throw new Error("Chat edit requires at least one allowed path.");
-    const forbiddenPaths = normalizePaths(input.scope?.forbiddenPaths ?? [], "forbiddenPaths");
+    if (!ACCESS_MODES.has(input.accessMode)) throw new Error("Chat edit access mode is invalid.");
+    const attachments = safeChatAttachments(input.attachments);
     const descriptor = (await this.runners.list()).find((candidate) => candidate.id === session.runnerId);
     if (!descriptor?.available) throw new Error("The selected provider is unavailable.");
     assertRunnerSelection(descriptor, session.model, session.reasoningEffort);
@@ -116,11 +102,11 @@ export class ChatEditRuntime {
     const editId = randomUUID();
     const createdAt = new Date().toISOString();
     const scope: TaskScope = {
-      allowedPaths,
-      forbiddenPaths,
+      allowedPaths: ["**"],
+      forbiddenPaths: [".git", ".phaseatlas"],
       writable: true,
-      allowDependencyChanges: false,
-      allowDatabaseMigrations: false,
+      allowDependencyChanges: true,
+      allowDatabaseMigrations: true,
       allowExternalNetwork: false,
     };
     const confirmationMaterial = JSON.stringify({
@@ -131,6 +117,8 @@ export class ChatEditRuntime {
       runnerId: session.runnerId,
       model: session.model,
       reasoningEffort: session.reasoningEffort,
+      accessMode: input.accessMode,
+      attachments,
       scope,
     });
     const confirmationDigest = createHash("sha256").update(confirmationMaterial).digest("hex");
@@ -144,6 +132,8 @@ export class ChatEditRuntime {
       model: session.model,
       ...(session.reasoningEffort ? { reasoningEffort: session.reasoningEffort } : {}),
       prompt,
+      accessMode: input.accessMode,
+      attachments,
       scope,
       sandbox: "workspace-write",
       createdAt,
@@ -161,6 +151,7 @@ export class ChatEditRuntime {
       runnerId: session.runnerId,
       model: session.model,
       ...(session.reasoningEffort ? { reasoningEffort: session.reasoningEffort } : {}),
+      accessMode: input.accessMode,
       scope,
       isolatedWorktree: true,
       reviewRequired: true,
@@ -383,6 +374,7 @@ export class ChatEditRuntime {
           runnerId: spec.runnerId,
           model: spec.model,
           ...(spec.reasoningEffort ? { reasoningEffort: spec.reasoningEffort } : {}),
+          accessMode: spec.accessMode,
           scope: spec.scope,
         },
       };

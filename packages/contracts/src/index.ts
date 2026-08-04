@@ -705,15 +705,14 @@ export interface RepositoryChatCancellationResult {
   disposition: "cancelled" | "already_terminal";
 }
 
-export interface ChatEditScope {
-  allowedPaths: string[];
-  forbiddenPaths: string[];
-}
+export const CHAT_EDIT_ACCESS_MODES = ["ask_for_approval", "full_access"] as const;
+export type ChatEditAccessMode = (typeof CHAT_EDIT_ACCESS_MODES)[number];
 
 export interface ChatEditPrepareInput {
   sessionId: string;
   prompt: string;
-  scope: ChatEditScope;
+  accessMode: ChatEditAccessMode;
+  attachments?: RepositoryChatAttachment[];
 }
 
 export interface ChatEditSpec {
@@ -726,6 +725,8 @@ export interface ChatEditSpec {
   readonly model: string;
   readonly reasoningEffort?: string;
   readonly prompt: string;
+  readonly accessMode: ChatEditAccessMode;
+  readonly attachments: RepositoryChatAttachment[];
   readonly scope: TaskScope;
   readonly sandbox: "workspace-write";
   readonly createdAt: string;
@@ -741,6 +742,7 @@ export interface ChatEditConfirmation {
   runnerId: string;
   model: string;
   reasoningEffort?: string;
+  accessMode: ChatEditAccessMode;
   scope: TaskScope;
   isolatedWorktree: true;
   reviewRequired: true;

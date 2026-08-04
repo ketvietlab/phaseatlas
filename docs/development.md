@@ -89,9 +89,10 @@ session state and durable events.
 
 ### Isolated chat editing
 
-Edit mode requires one or more comma-separated repository paths before it can show the confirmation.
-Verify the repository, provider, model, base revision, scope, and fixed no-network/no-dependency/no-database
-policy before confirming.
+Edit mode uses an application-wide access preference shared by every repository. `Ask for approval`
+shows a prepared request before the agent starts; `Full Access` starts it immediately. Both modes accept
+repository paths and image attachments, run in an isolated worktree, block network access, and require
+review before changes reach the canonical checkout.
 
 The review must list Git-derived files and a patch while the canonical checkout remains unchanged. Test
 Accept only with a clean, unchanged checkout; test Discard and Retain separately. After Retain, restart the

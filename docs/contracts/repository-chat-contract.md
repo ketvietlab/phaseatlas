@@ -33,7 +33,7 @@ reuses the original user message without mutating the interrupted attempt.
 ## Messages and attachments
 
 Messages are checkout-owned operational data with a durable, gap-free sequence per session. Public
-send requests contain bounded text and an optional bounded list of repository-relative references or
+send and edit preparation requests contain bounded text and an optional bounded list of repository-relative references or
 user-supplied images. The worker rejects traversal, `.git` targets, secret-like files, absolute paths,
 unknown fields, unsupported image media types, and images outside the per-file or aggregate limits.
 

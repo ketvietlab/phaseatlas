@@ -5,6 +5,7 @@
   import { markedMermaid, MermaidRenderer } from "@humanspeak/svelte-markdown/extensions";
   import type {
     ChatEditConfirmation,
+    ChatEditAccessMode,
     ChatEditResult,
     PersistedRepositoryChatEvent,
     RepositoryChatAttachment,
@@ -63,6 +64,7 @@
   const TERMINAL_EVENTS = new Set(["chat.turn.completed", "chat.turn.failed", "chat.turn.cancelled", "chat.turn.interrupted"]);
   const IMAGE_MEDIA_TYPES = new Set<RepositoryChatImageMediaType>(["image/png", "image/jpeg", "image/webp", "image/gif"]);
   const MAX_IMAGE_BYTES = 5 * 1024 * 1024;
+  const EDIT_ACCESS_MODE_STORAGE_KEY = "phaseatlas.chat.edit-access-mode.v1";
   const markdownExtensions = [markedMermaid()];
   interface ChatMarkdownRenderers extends Renderers { mermaid: RendererComponent }
   const markdownRenderers: Partial<ChatMarkdownRenderers> = { mermaid: MermaidRenderer };
@@ -99,7 +101,7 @@
   let clock = Date.now();
   let loadGeneration = 0;
   let chatMode: "ask" | "edit" = "ask";
-  let scopeDraft = "";
+  let editAccessMode: ChatEditAccessMode = "ask_for_approval";
   let preparedEdit: ChatEditConfirmation | null = null;
   let edits: ChatEditResult[] = [];
   let editBusy = false;
@@ -124,6 +126,15 @@
   $: if (mentionSelection >= mentionResults.length) mentionSelection = Math.max(mentionResults.length - 1, 0);
 
   onMount(() => {
+    const savedAccessMode = window.localStorage.getItem(EDIT_ACCESS_MODE_STORAGE_KEY);
+    if (savedAccessMode === "ask_for_approval" || savedAccessMode === "full_access") editAccessMode = savedAccessMode;
+    const syncAccessMode = (event: StorageEvent) => {
+      if (event.key === EDIT_ACCESS_MODE_STORAGE_KEY && (event.newValue === "ask_for_approval" || event.newValue === "full_access")) {
+        editAccessMode = event.newValue;
+        preparedEdit = null;
+      }
+    };
+    window.addEventListener("storage", syncAccessMode);
     const timer = window.setInterval(() => clock = Date.now(), 1_000);
     const unsubscribe = window.phaseatlas?.events.subscribe((event) => {
       if (event.type === "repository.changed" && event.checkoutId === checkoutId) {
@@ -149,6 +160,7 @@
       window.cancelAnimationFrame(tailFrame);
       window.clearTimeout(scrollPersistTimer);
       window.clearInterval(timer);
+      window.removeEventListener("storage", syncAccessMode);
       unsubscribe?.();
     };
   });
@@ -321,8 +333,12 @@
     }
   }
 
-  function editPaths() {
-    return [...new Set(scopeDraft.split(/[\n,]/).map((path) => path.trim().replaceAll("\\", "/").replace(/^\.\//, "").replace(/\/$/, "")).filter(Boolean))];
+  function changeEditAccessMode(event: Event) {
+    const mode = (event.currentTarget as HTMLSelectElement).value as ChatEditAccessMode;
+    if (mode !== "ask_for_approval" && mode !== "full_access") return;
+    editAccessMode = mode;
+    preparedEdit = null;
+    window.localStorage.setItem(EDIT_ACCESS_MODE_STORAGE_KEY, mode);
   }
 
   async function prepareEdit() {
@@ -330,11 +346,23 @@
     editBusy = true;
     errorMessage = "";
     try {
-      preparedEdit = await window.phaseatlas.chat.prepareEdit(checkoutId, {
+      const submittedAttachments = attachments;
+      const confirmation = await window.phaseatlas.chat.prepareEdit(checkoutId, {
         sessionId: selectedSession.sessionId,
         prompt: composer.trim(),
-        scope: { allowedPaths: editPaths(), forbiddenPaths: [] },
+        accessMode: editAccessMode,
+        ...(submittedAttachments.length ? { attachments: submittedAttachments } : {}),
       });
+      if (editAccessMode === "full_access") {
+        try {
+          await startPreparedEdit(confirmation);
+        } catch (error) {
+          preparedEdit = confirmation;
+          throw error;
+        }
+      } else {
+        preparedEdit = confirmation;
+      }
     } catch (error) {
       showError(error);
     } finally {
@@ -346,18 +374,24 @@
     if (!window.phaseatlas || !preparedEdit || editBusy) return;
     editBusy = true;
     try {
-      await window.phaseatlas.chat.startEdit(checkoutId, {
-        editId: preparedEdit.editId,
-        confirmationDigest: preparedEdit.confirmationDigest,
-      });
-      composer = "";
-      preparedEdit = null;
-      await refreshEdits();
+      await startPreparedEdit(preparedEdit);
     } catch (error) {
       showError(error);
     } finally {
       editBusy = false;
     }
+  }
+
+  async function startPreparedEdit(confirmation: ChatEditConfirmation) {
+    if (!window.phaseatlas) return;
+    await window.phaseatlas.chat.startEdit(checkoutId, {
+      editId: confirmation.editId,
+      confirmationDigest: confirmation.confirmationDigest,
+    });
+    composer = "";
+    attachments = [];
+    preparedEdit = null;
+    await refreshEdits();
   }
 
   async function reviewEdit(editId: string, action: "accept" | "discard" | "retain") {
@@ -557,15 +591,9 @@
     return true;
   }
 
-  function addEditScopePath(path: string) {
-    const paths = editPaths();
-    if (!paths.includes(path)) scopeDraft = [...paths, path].join(", ");
-  }
-
   async function chooseMention(entry: RepositoryFileEntry) {
     if (mentionStart < 0 || mentionEnd < mentionStart) return;
-    if (chatMode === "ask" && !attachRepositoryPath(entry.path)) return;
-    if (chatMode === "edit") addEditScopePath(entry.path);
+    if (!attachRepositoryPath(entry.path)) return;
     const renderedPath = `${entry.path}${entry.type === "directory" ? "/" : ""}`;
     const replacement = `@${renderedPath} `;
     const cursor = mentionStart + replacement.length;
@@ -604,8 +632,7 @@
       errorMessage = "Use a safe repository-relative file path.";
       return;
     }
-    if (chatMode === "ask") attachRepositoryPath(path);
-    else addEditScopePath(path);
+    attachRepositoryPath(path);
     attachmentDraft = "";
   }
 
@@ -644,10 +671,6 @@
     if (!files.length) return;
     if (!providerReady || selectedSession?.state !== "open") {
       errorMessage = "Open a conversation with an available provider before attaching images.";
-      return;
-    }
-    if (chatMode !== "ask") {
-      errorMessage = "Images can be attached in Ask mode.";
       return;
     }
     const currentImages = attachments.filter(isImageAttachment).length;
@@ -1157,8 +1180,8 @@
             {#if errorMessage}<div class="chat-error" role="alert"><span>!</span><p>{errorMessage}</p><button type="button" aria-label="Dismiss error" onclick={() => errorMessage = ""}>×</button></div>{/if}
             {#if preparedEdit}
               <section class="edit-confirmation" aria-label="Confirm isolated edit">
-                <header><span>Explicit confirmation</span><strong>Isolated edit #{preparedEdit.editId.slice(0, 6)}</strong></header>
-                <dl><div><dt>Repository</dt><dd>{preparedEdit.repositoryName} · {preparedEdit.baseRevision.slice(0, 8)}</dd></div><div><dt>Provider</dt><dd>{preparedEdit.runnerId} · {preparedEdit.model}{preparedEdit.reasoningEffort ? ` · ${preparedEdit.reasoningEffort}` : ""}</dd></div><div><dt>Writable scope</dt><dd>{preparedEdit.scope.allowedPaths.join(", ")}</dd></div><div><dt>Policy</dt><dd>Isolated worktree · no network · no dependency or database changes</dd></div></dl>
+                <header><span>Approval required</span><strong>Isolated edit #{preparedEdit.editId.slice(0, 6)}</strong></header>
+                <dl><div><dt>Repository</dt><dd>{preparedEdit.repositoryName} · {preparedEdit.baseRevision.slice(0, 8)}</dd></div><div><dt>Provider</dt><dd>{preparedEdit.runnerId} · {preparedEdit.model}{preparedEdit.reasoningEffort ? ` · ${preparedEdit.reasoningEffort}` : ""}</dd></div><div><dt>Repository access</dt><dd>Entire repository</dd></div><div><dt>Policy</dt><dd>Isolated worktree · network blocked · review before apply</dd></div></dl>
                 <p>Nothing reaches the canonical checkout until you review the Git-derived diff and explicitly accept it.</p>
                 <div><button type="button" onclick={() => preparedEdit = null}>Cancel</button><button class="confirm-edit" type="button" onclick={confirmEdit} disabled={editBusy}>{editBusy ? "Starting…" : "Confirm and start"}</button></div>
               </section>
@@ -1191,7 +1214,6 @@
                 {/each}
               </div>
             {/if}
-            {#if chatMode === "edit"}<label class="edit-scope"><span>Writable scope</span><input bind:value={scopeDraft} placeholder="apps/ui/src, packages/contracts/src" /><small>Comma-separated repository paths</small></label>{/if}
             <div class="composer-stack">
               {#if mentionOpen}
                 <section class="mention-menu" id="repository-mention-options" aria-label="Mention a repository file or folder">
@@ -1219,12 +1241,21 @@
                 </section>
               {/if}
               <div class="composer-card" class:disabled={!providerReady || selectedSession.state === "closed"}>
-                <textarea bind:this={composerElement} bind:value={composer} oninput={handleComposerInput} onkeydown={handleComposerKeydown} onkeyup={handleComposerCaret} onblur={handleComposerBlur} onclick={() => updateMentionFromComposer()} rows="2" maxlength="32000" aria-label="Chat message" aria-autocomplete="list" aria-controls={mentionOpen ? "repository-mention-options" : undefined} aria-activedescendant={mentionOpen && mentionResults.length ? `repository-mention-${mentionSelection}` : undefined} placeholder={selectedSession.state === "closed" ? "This conversation is archived" : providerReady ? chatMode === "edit" ? `Describe the bounded change for ${selectedRunner?.name}…` : `Ask ${selectedRunner?.name} about ${repositoryName}…` : "Select an available provider and discovered model in repository settings"} disabled={!providerReady || selectedSession.state === "closed"}></textarea>
+                <textarea bind:this={composerElement} bind:value={composer} oninput={handleComposerInput} onkeydown={handleComposerKeydown} onkeyup={handleComposerCaret} onblur={handleComposerBlur} onclick={() => updateMentionFromComposer()} rows="2" maxlength="32000" aria-label="Chat message" aria-autocomplete="list" aria-controls={mentionOpen ? "repository-mention-options" : undefined} aria-activedescendant={mentionOpen && mentionResults.length ? `repository-mention-${mentionSelection}` : undefined} placeholder={selectedSession.state === "closed" ? "This conversation is archived" : providerReady ? chatMode === "edit" ? `Describe the change for ${selectedRunner?.name}…` : `Ask ${selectedRunner?.name} about ${repositoryName}…` : "Select an available provider and discovered model in repository settings"} disabled={!providerReady || selectedSession.state === "closed"}></textarea>
                 <div class="composer-toolbar">
                   <form class="attachment-entry" onsubmit={(event) => { event.preventDefault(); addAttachment(); }}>
+                    {#if chatMode === "edit"}
+                      <label class="edit-access-select" data-mode={editAccessMode} title="Applies to Edit mode in every repository">
+                        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3 5 6v5c0 4.6 2.8 8.1 7 10 4.2-1.9 7-5.4 7-10V6z"/><path d="m9.5 12 1.7 1.7 3.7-4"/></svg>
+                        <select aria-label="Edit access mode" value={editAccessMode} onchange={changeEditAccessMode}>
+                          <option value="ask_for_approval">Ask for approval</option>
+                          <option value="full_access">Full Access</option>
+                        </select>
+                      </label>
+                    {/if}
                     <button class="mention-trigger" type="button" aria-label="Mention repository file or folder" aria-expanded={mentionOpen} title="Mention file or folder" onclick={openMentionPicker}><strong>@</strong><span>Files & folders</span></button>
                     <input class="image-input" bind:this={imageInput} type="file" accept="image/png,image/jpeg,image/webp,image/gif" multiple onchange={chooseImages} />
-                    <button class="image-trigger" type="button" aria-label="Attach images" title="Attach or paste images" onclick={() => imageInput?.click()} disabled={chatMode !== "ask" || !providerReady || selectedSession.state !== "open"}>
+                    <button class="image-trigger" type="button" aria-label="Attach images" title="Attach or paste images" onclick={() => imageInput?.click()} disabled={!providerReady || selectedSession.state !== "open"}>
                       <svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="4" width="18" height="16" rx="2"/><circle cx="9" cy="10" r="2"/><path d="m5 18 5-5 3 3 2-2 4 4"/></svg><span>Images</span>
                     </button>
                     <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m9 12 5-5a3 3 0 0 1 4 4l-7 7a5 5 0 0 1-7-7l7-7"/></svg>
@@ -1233,12 +1264,12 @@
                   </form>
                   <div class="composer-actions">
                     <span>{composer.length.toLocaleString()} / 32,000</span>
-                    {#if activeTurn}<button class="cancel-button" type="button" onclick={() => cancelTurn(activeTurn!.turnId)}><i></i>Stop</button>{:else if chatMode === "edit"}<button class="send-button" type="button" aria-label="Review edit scope" onclick={prepareEdit} disabled={!composer.trim() || !editPaths().length || editBusy || Boolean(activeEdit)}><span>Review scope</span><kbd>↵</kbd></button>{:else}<button class="send-button" type="button" aria-label="Send message" onclick={sendMessage} disabled={!canSend}><span>Send</span><kbd>↵</kbd></button>{/if}
+                    {#if activeTurn}<button class="cancel-button" type="button" onclick={() => cancelTurn(activeTurn!.turnId)}><i></i>Stop</button>{:else if chatMode === "edit"}<button class="send-button" type="button" aria-label={editAccessMode === "ask_for_approval" ? "Review edit request" : "Start full-access edit"} onclick={prepareEdit} disabled={!composer.trim() || editBusy || Boolean(activeEdit)}><span>{editAccessMode === "ask_for_approval" ? "Review request" : "Start edit"}</span><kbd>↵</kbd></button>{:else}<button class="send-button" type="button" aria-label="Send message" onclick={sendMessage} disabled={!canSend}><span>Send</span><kbd>↵</kbd></button>{/if}
                   </div>
                 </div>
               </div>
             </div>
-            <p class="composer-hint"><span><i></i>{chatMode === "edit" ? "Write only after confirmation · isolated worktree" : "Read-only repository access"}</span><span>{chatMode === "ask" ? "Attach or paste images · " : ""}Type @ for context · Enter to {chatMode === "edit" ? "review scope" : "send"}</span></p>
+            <p class="composer-hint"><span><i></i>{chatMode === "edit" ? editAccessMode === "ask_for_approval" ? "Approval before agent starts · isolated worktree" : "Full repository access · review before apply" : "Read-only repository access"}</span><span>Attach or paste images · Type @ for context · Enter to {chatMode === "edit" ? editAccessMode === "ask_for_approval" ? "review request" : "start edit" : "send"}</span></p>
           </footer>
         {:else}
           <section class="no-session">
@@ -1277,7 +1308,7 @@
   .composer-card { width: 100%; overflow: hidden; border: 1px solid var(--border); border-radius: var(--radius-lg); background: var(--surface); box-shadow: 0 4px 18px rgba(25,31,28,.07); }.composer-card:focus-within { border-color: var(--brand-400); box-shadow: 0 0 0 3px color-mix(in srgb,var(--brand-400) 14%,transparent); }.composer-card.disabled { opacity: .65; }.composer-card textarea { display: block; width: 100%; min-height: 58px; max-height: 180px; resize: vertical; border: 0; padding: 12px 14px 7px; outline: 0; background: transparent; color: var(--text); font: 14px/1.55 Inter,ui-sans-serif,system-ui,sans-serif; }.composer-card textarea::placeholder { color: var(--text-subtle); }
   .mention-menu { position: absolute; z-index: 5; right: 0; bottom: calc(100% + 7px); left: 0; overflow: hidden; border: 1px solid var(--border); border-radius: var(--radius-lg); background: var(--surface); box-shadow: 0 18px 48px rgba(16,22,19,.2); animation: mention-in .14s cubic-bezier(.2,.76,.2,1); }.mention-menu > header { display: grid; min-height: 48px; grid-template-columns: 30px minmax(0,1fr) auto; align-items: center; gap: 9px; border-bottom: 1px solid var(--border); padding: 7px 10px; background: var(--surface-soft); }.mention-mark { display: grid; width: 28px; height: 28px; place-items: center; border: 1px solid var(--brand-300); border-radius: var(--radius-sm); background: var(--active-surface); color: var(--active-text); font: 800 15px/1 "SFMono-Regular",Consolas,monospace; }.mention-menu > header div { min-width: 0; }.mention-menu > header strong,.mention-menu > header small { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }.mention-menu > header strong { font-size: 11px; }.mention-menu > header small { margin-top: 2px; color: var(--text-subtle); font-size: 10px; }.mention-menu > header > kbd { border: 1px solid var(--border); border-radius: var(--radius-xs); padding: 3px 5px; background: var(--surface); color: var(--text-subtle); font: 9px/1 "SFMono-Regular",Consolas,monospace; }.mention-options { max-height: min(330px,40vh); overflow: auto; padding: 5px; }.mention-options > button { display: grid; width: 100%; min-height: 45px; grid-template-columns: 30px minmax(0,1fr) auto; align-items: center; gap: 9px; border: 1px solid transparent; border-radius: var(--radius-sm); padding: 5px 8px; background: transparent; color: var(--text); text-align: left; }.mention-options > button:hover,.mention-options > button.active { border-color: var(--brand-200); background: var(--active-surface); }.mention-icon { display: grid; width: 28px; height: 28px; place-items: center; border: 1px solid var(--border); border-radius: var(--radius-xs); background: var(--surface-soft); color: var(--text-muted); }.mention-options > button.active .mention-icon { border-color: var(--brand-300); background: var(--surface); color: var(--active-text); }.mention-icon svg { width: 15px; height: 15px; fill: none; stroke: currentColor; stroke-linecap: round; stroke-linejoin: round; stroke-width: 1.7; }.mention-icon[data-type="directory"] svg { fill: color-mix(in srgb,var(--brand-400) 14%,transparent); }.mention-path { min-width: 0; }.mention-path strong,.mention-path small { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }.mention-path strong { font: 650 11px/1.35 "SFMono-Regular",Consolas,monospace; }.mention-path small { margin-top: 2px; color: var(--text-subtle); font-size: 9px; }.mention-kind { color: var(--text-subtle); font-size: 9px; font-weight: 750; text-transform: uppercase; }.mention-menu > footer { display: flex; min-height: 30px; align-items: center; gap: 14px; border-top: 1px solid var(--border-soft); padding: 4px 10px; background: var(--surface-soft); color: var(--text-subtle); font-size: 9px; }.mention-menu > footer span { display: flex; align-items: center; gap: 4px; }.mention-menu > footer kbd { min-width: 17px; border: 1px solid var(--border); border-radius: 3px; padding: 2px 3px; background: var(--surface); color: var(--text-muted); font: 9px/1 "SFMono-Regular",Consolas,monospace; text-align: center; }.mention-menu > footer .indexing-dot { margin-left: auto; color: var(--active-text); }.mention-state { display: grid; min-height: 92px; grid-template-columns: 28px minmax(0,1fr) auto; place-content: center stretch; align-items: center; gap: 10px; padding: 14px; color: var(--text-muted); }.mention-state > span { display: grid; width: 27px; height: 27px; place-items: center; border-radius: 50%; background: var(--surface-soft); color: var(--text-subtle); font-size: 11px; font-weight: 800; }.mention-state.loading > span { border: 2px solid var(--border); border-top-color: var(--brand-500); background: transparent; animation: spin .8s linear infinite; }.mention-state p { margin: 0; }.mention-state strong,.mention-state small { display: block; }.mention-state strong { color: var(--text); font-size: 11px; }.mention-state small { margin-top: 3px; color: var(--text-subtle); font-size: 10px; }.mention-state > button { border: 1px solid var(--border); border-radius: var(--radius-xs); padding: 5px 8px; background: var(--surface-soft); color: var(--text); font-size: 10px; }
   .composer-toolbar { display: flex; min-height: 38px; align-items: center; justify-content: space-between; gap: 10px; border-top: 1px solid var(--border-soft); padding: 4px 5px 4px 7px; }.attachment-entry { display: flex; min-width: 0; flex: 1; align-items: center; gap: 5px; }.attachment-entry svg { width: 14px; height: 14px; flex: 0 0 14px; fill: none; stroke: var(--text-subtle); stroke-linecap: round; stroke-linejoin: round; stroke-width: 1.7; }.attachment-entry input { width: min(210px,100%); border: 0; outline: 0; background: transparent; color: var(--text-muted); font: 11px/1.4 "SFMono-Regular",Consolas,monospace; }.attachment-entry input.image-input { display: none; }.attachment-entry button { border: 1px solid var(--border); border-radius: var(--radius-xs); padding: 3px 6px; background: var(--surface-soft); color: var(--text); font-size: 10px; }.attachment-entry .mention-trigger,.attachment-entry .image-trigger { display: inline-flex; min-height: 27px; flex: 0 0 auto; align-items: center; gap: 6px; border-color: var(--brand-200); padding: 0 8px; background: var(--active-surface); color: var(--active-text); font-weight: 750; }.mention-trigger strong { font: 850 13px/1 "SFMono-Regular",Consolas,monospace; }.attachment-entry .mention-trigger:hover,.attachment-entry .image-trigger:hover { border-color: var(--brand-400); background: color-mix(in srgb,var(--active-surface) 80%,var(--brand-100)); }.attachment-entry .image-trigger:disabled { cursor: default; opacity: .42; }.attachment-entry .image-trigger svg { stroke: currentColor; }.composer-actions { display: flex; flex: 0 0 auto; align-items: center; gap: 8px; }.composer-actions > span { color: var(--text-subtle); font-size: 10px; }.send-button,.cancel-button { display: flex; min-height: 29px; align-items: center; gap: 8px; border: 0; border-radius: var(--radius-sm); padding: 0 9px; background: var(--brand-600); color: white; font-size: 11px; font-weight: 800; }.send-button kbd { border-left: 1px solid rgba(255,255,255,.25); padding-left: 7px; font: inherit; }.send-button:disabled { opacity: .38; }.cancel-button { background: #b94040; }.cancel-button i { width: 7px; height: 7px; background: white; }.composer-hint { display: flex; width: min(850px,100%); justify-content: space-between; margin: 5px auto 0; color: var(--text-subtle); font-size: 10px; }.composer-hint span { display: flex; align-items: center; gap: 5px; }.composer-hint i { width: 5px; height: 5px; border-radius: 50%; background: var(--success-500); }.attachment-list { display: flex; width: min(850px,100%); flex-wrap: wrap; gap: 6px; margin: 0 auto 6px; }.attachment-list > span { display: flex; align-items: center; gap: 5px; border: 1px solid var(--brand-200); border-radius: var(--radius-full); padding: 4px 5px 4px 8px; background: var(--active-surface); }.attachment-list code { color: var(--active-text); font-size: 10px; }.attachment-list button { display: grid; width: 16px; height: 16px; place-items: center; border: 0; border-radius: 50%; background: var(--surface); color: var(--text-muted); font-size: 13px; }.image-draft { position: relative; display: grid; width: 190px; height: 62px; grid-template-columns: 62px minmax(0,1fr) 20px; align-items: center; gap: 7px; overflow: hidden; margin: 0; border: 1px solid var(--brand-200); border-radius: var(--radius); padding-right: 5px; background: var(--active-surface); }.image-draft img { width: 62px; height: 62px; object-fit: cover; background: var(--surface-soft); }.image-draft-copy { min-width: 0; }.image-draft strong,.image-draft small { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }.image-draft strong { color: var(--text); font-size: 10px; }.image-draft small { margin-top: 3px; color: var(--text-subtle); font-size: 9px; }.image-draft button { align-self: start; margin-top: 5px; }.chat-error { display: grid; width: min(850px,100%); grid-template-columns: 20px minmax(0,1fr) 20px; align-items: center; gap: 7px; margin: 0 auto 7px; border: 1px solid color-mix(in srgb,#c44242 40%,var(--border)); border-radius: var(--radius); padding: 6px; background: color-mix(in srgb,#c44242 7%,var(--surface)); }.chat-error > span { display: grid; width: 20px; height: 20px; place-items: center; border-radius: var(--radius-xs); background: #c44242; color: white; font-size: 11px; font-weight: 850; }.chat-error p { overflow: hidden; margin: 0; color: var(--text-muted); font-size: 11px; text-overflow: ellipsis; white-space: nowrap; }.chat-error button { border: 0; background: transparent; color: var(--text-muted); font-size: 16px; }
-  .edit-scope { display: grid; width: min(850px,100%); grid-template-columns: auto minmax(0,1fr) auto; align-items: center; gap: 8px; margin: 0 auto 7px; }.edit-scope span { color: var(--active-text); font-size: 11px; font-weight: 800; }.edit-scope input { min-width: 0; border: 1px solid var(--border); border-radius: var(--radius-sm); padding: 7px 9px; background: var(--surface); color: var(--text); font: 11px/1.4 "SFMono-Regular",Consolas,monospace; }.edit-scope small { color: var(--text-subtle); font-size: 10px; }.edit-confirmation,.edit-review,.edit-running { width: min(850px,100%); margin: 0 auto 8px; border: 1px solid var(--brand-300); border-radius: var(--radius); padding: 10px; background: var(--active-surface); }.edit-confirmation header { display: flex; align-items: center; justify-content: space-between; }.edit-confirmation header span { color: var(--active-text); font-size: 10px; font-weight: 850; letter-spacing: .08em; text-transform: uppercase; }.edit-confirmation header strong { font: 11px/1.2 "SFMono-Regular",Consolas,monospace; }.edit-confirmation dl { display: grid; grid-template-columns: 1fr 1fr; gap: 6px; margin: 9px 0; }.edit-confirmation dl div { min-width: 0; }.edit-confirmation dt { color: var(--text-subtle); font-size: 10px; text-transform: uppercase; }.edit-confirmation dd { overflow: hidden; margin: 2px 0 0; color: var(--text); font-size: 11px; text-overflow: ellipsis; white-space: nowrap; }.edit-confirmation p { margin: 7px 0; color: var(--text-muted); font-size: 11px; }.edit-confirmation > div:last-child,.review-actions { display: flex; justify-content: flex-end; gap: 6px; }.edit-confirmation button,.review-actions button { border: 1px solid var(--border); border-radius: var(--radius-sm); padding: 6px 9px; background: var(--surface); color: var(--text); font-size: 11px; font-weight: 750; }.edit-confirmation .confirm-edit,.review-actions .accept-edit { border-color: var(--brand-600); background: var(--brand-600); color: white; }.edit-running { display: grid; grid-template-columns: 20px minmax(0,1fr) auto; align-items: center; gap: 9px; }.edit-running > span { width: 18px; height: 18px; border: 2px solid var(--border); border-top-color: var(--brand-600); border-radius: 50%; animation: spin .8s linear infinite; }.edit-running p { margin: 0; }.edit-running strong,.edit-running small { display: block; }.edit-running strong { font-size: 11px; }.edit-running small { margin-top: 2px; color: var(--text-subtle); font-size: 10px; }.edit-running button { border: 0; border-radius: var(--radius-sm); padding: 6px 8px; background: #b94040; color: white; font-size: 10px; }.edit-review { background: var(--surface); }.edit-review summary { display: grid; grid-template-columns: auto 1fr auto; gap: 8px; cursor: pointer; list-style: none; }.edit-review summary span { color: var(--warning-text); font-size: 10px; font-weight: 850; text-transform: uppercase; }.edit-review summary strong { font-size: 11px; }.edit-review summary small { color: var(--text-subtle); font-size: 10px; }.edit-review > p { margin: 9px 0; color: var(--text-muted); font-size: 11px; }.edit-review ul { display: grid; gap: 3px; margin: 7px 0; padding: 0; list-style: none; }.edit-review li { display: flex; justify-content: space-between; gap: 8px; border-bottom: 1px solid var(--border-soft); padding: 4px; font-size: 10px; }.edit-review li code { color: var(--text); }.edit-review li span { color: var(--text-subtle); text-transform: uppercase; }.edit-review pre { max-height: 220px; overflow: auto; border-radius: var(--radius-sm); padding: 9px; background: #121916; color: #b9c6be; font: 10px/1.5 "SFMono-Regular",Consolas,monospace; white-space: pre; }.edit-blockers { display: grid; gap: 3px; margin: 6px 0; color: #b94040; font-size: 10px; }
+  .edit-access-select { display: inline-flex; min-height: 27px; flex: 0 0 auto; align-items: center; gap: 4px; border: 1px solid var(--brand-300); border-radius: var(--radius-xs); padding: 0 5px 0 7px; background: var(--active-surface); color: var(--active-text); }.edit-access-select[data-mode="full_access"] { border-color: color-mix(in srgb,var(--warning-500) 58%,var(--border)); background: var(--warning-surface); color: var(--warning-text); }.edit-access-select svg { stroke: currentColor; }.edit-access-select select { max-width: 132px; border: 0; outline: 0; background: transparent; color: inherit; font: 750 10px/1.2 Inter,ui-sans-serif,system-ui,sans-serif; cursor: pointer; }.edit-confirmation,.edit-review,.edit-running { width: min(850px,100%); margin: 0 auto 8px; border: 1px solid var(--brand-300); border-radius: var(--radius); padding: 10px; background: var(--active-surface); }.edit-confirmation header { display: flex; align-items: center; justify-content: space-between; }.edit-confirmation header span { color: var(--active-text); font-size: 10px; font-weight: 850; letter-spacing: .08em; text-transform: uppercase; }.edit-confirmation header strong { font: 11px/1.2 "SFMono-Regular",Consolas,monospace; }.edit-confirmation dl { display: grid; grid-template-columns: 1fr 1fr; gap: 6px; margin: 9px 0; }.edit-confirmation dl div { min-width: 0; }.edit-confirmation dt { color: var(--text-subtle); font-size: 10px; text-transform: uppercase; }.edit-confirmation dd { overflow: hidden; margin: 2px 0 0; color: var(--text); font-size: 11px; text-overflow: ellipsis; white-space: nowrap; }.edit-confirmation p { margin: 7px 0; color: var(--text-muted); font-size: 11px; }.edit-confirmation > div:last-child,.review-actions { display: flex; justify-content: flex-end; gap: 6px; }.edit-confirmation button,.review-actions button { border: 1px solid var(--border); border-radius: var(--radius-sm); padding: 6px 9px; background: var(--surface); color: var(--text); font-size: 11px; font-weight: 750; }.edit-confirmation .confirm-edit,.review-actions .accept-edit { border-color: var(--brand-600); background: var(--brand-600); color: white; }.edit-running { display: grid; grid-template-columns: 20px minmax(0,1fr) auto; align-items: center; gap: 9px; }.edit-running > span { width: 18px; height: 18px; border: 2px solid var(--border); border-top-color: var(--brand-600); border-radius: 50%; animation: spin .8s linear infinite; }.edit-running p { margin: 0; }.edit-running strong,.edit-running small { display: block; }.edit-running strong { font-size: 11px; }.edit-running small { margin-top: 2px; color: var(--text-subtle); font-size: 10px; }.edit-running button { border: 0; border-radius: var(--radius-sm); padding: 6px 8px; background: #b94040; color: white; font-size: 10px; }.edit-review { background: var(--surface); }.edit-review summary { display: grid; grid-template-columns: auto 1fr auto; gap: 8px; cursor: pointer; list-style: none; }.edit-review summary span { color: var(--warning-text); font-size: 10px; font-weight: 850; text-transform: uppercase; }.edit-review summary strong { font-size: 11px; }.edit-review summary small { color: var(--text-subtle); font-size: 10px; }.edit-review > p { margin: 9px 0; color: var(--text-muted); font-size: 11px; }.edit-review ul { display: grid; gap: 3px; margin: 7px 0; padding: 0; list-style: none; }.edit-review li { display: flex; justify-content: space-between; gap: 8px; border-bottom: 1px solid var(--border-soft); padding: 4px; font-size: 10px; }.edit-review li code { color: var(--text); }.edit-review li span { color: var(--text-subtle); text-transform: uppercase; }.edit-review pre { max-height: 220px; overflow: auto; border-radius: var(--radius-sm); padding: 9px; background: #121916; color: #b9c6be; font: 10px/1.5 "SFMono-Regular",Consolas,monospace; white-space: pre; }.edit-blockers { display: grid; gap: 3px; margin: 6px 0; color: #b94040; font-size: 10px; }
   .no-session { min-height: 100%; grid-row: 1 / -1; padding: 30px; }.no-session > button { min-height: 38px; border: 1px solid var(--brand-600); border-radius: var(--radius); padding: 0 13px; background: var(--brand-600); color: white; font-size: 12px; font-weight: 800; }.no-session > button:disabled { opacity: .45; }.no-session > small { margin-top: 8px; color: var(--warning-text); font-size: 11px; }.no-session > .settings-link { min-height: 30px; margin-top: 7px; border-color: var(--border); background: var(--surface); color: var(--active-text); }
   .edit-retained { display: flex; width: min(850px,100%); align-items: center; gap: 7px; margin: 0 auto 8px; border: 1px solid var(--warning-500); border-radius: var(--radius); padding: 8px 9px; background: var(--warning-surface); }.edit-retained p { min-width: 0; flex: 1; margin: 0; }.edit-retained strong,.edit-retained small { display: block; }.edit-retained strong { font-size: 11px; }.edit-retained small { margin-top: 2px; color: var(--text-muted); font-size: 10px; }.edit-retained button { border: 1px solid var(--border); border-radius: var(--radius-sm); padding: 6px 8px; background: var(--surface); color: var(--text); font-size: 10px; font-weight: 750; }.edit-retained .resume-edit { border-color: var(--brand-600); background: var(--brand-600); color: white; }
   .edit-verification { display: grid; grid-template-columns: 1fr 1fr; gap: 5px; margin: 7px 0; }.edit-verification > span { border-left: 3px solid var(--success-500); border-radius: var(--radius-xs); padding: 5px 7px; background: var(--surface-soft); }.edit-verification > span[data-status="failed"] { border-left-color: #c44242; }.edit-verification strong,.edit-verification small { display: block; }.edit-verification strong { font-size: 10px; }.edit-verification small { margin-top: 2px; color: var(--text-subtle); font-size: 10px; }

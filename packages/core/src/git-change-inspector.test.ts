@@ -74,3 +74,27 @@ test("fingerprints large untracked files and embedded repositories", async (cont
   const after = await captureGitState({ worktreePath: root });
   assert.notEqual(after, before);
 });
+
+test("allows repository-wide edits while preserving forbidden paths", async (context) => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "phaseatlas-wide-scope-"));
+  context.after(() => rm(root, { recursive: true, force: true }));
+  const git: GitCommand = async (args) => args[0] === "diff"
+    ? "M\0package.json\0M\0src/index.ts\0M\0.phaseatlas/state.json\0"
+    : "";
+  const changes = await inspectGitChanges({
+    worktreePath: root,
+    scope: {
+      allowedPaths: ["**"],
+      forbiddenPaths: [".git", ".phaseatlas"],
+      writable: true,
+      allowDependencyChanges: true,
+      allowDatabaseMigrations: true,
+      allowExternalNetwork: false,
+    },
+    git,
+  });
+  const byPath = new Map(changes.map((change) => [change.path, change.policyViolations]));
+  assert.deepEqual(byPath.get("package.json"), []);
+  assert.deepEqual(byPath.get("src/index.ts"), []);
+  assert.deepEqual(byPath.get(".phaseatlas/state.json"), ["forbidden_path"]);
+});
