@@ -2,6 +2,7 @@
   "name": "phaseatlas",
   "version": "0.1.0",
   "private": true,
+  "license": "MIT",
   "type": "module",
   "packageManager": "pnpm@11.9.0",
   "engines": {
@@ -12,6 +13,8 @@
     "build:runtime": "pnpm --filter @phaseatlas/contracts build && pnpm --filter @phaseatlas/core build && pnpm --filter @phaseatlas/repository-worker build && pnpm --filter @phaseatlas/desktop build",
     "package:desktop": "pnpm build && node scripts/package-desktop.mjs",
     "verify:desktop": "node scripts/verify-desktop-bundle.mjs",
+    "release:validate": "node scripts/validate-release.mjs",
+    "release:metadata": "node scripts/create-release-metadata.mjs",
     "check": "pnpm --filter @phaseatlas/contracts build && pnpm --filter @phaseatlas/core build && pnpm --filter @phaseatlas/contracts check && pnpm --filter @phaseatlas/core check && pnpm --filter @phaseatlas/repository-worker check && pnpm --filter @phaseatlas/ui check && pnpm --filter @phaseatlas/desktop check",
     "dev": "node scripts/dev.mjs",
     "postinstall": "node scripts/fix-node-pty-permissions.mjs",
