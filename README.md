@@ -1,41 +1,247 @@
-# PhaseAtlas
+<div align="center">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="apps/ui/static/assets/phaseatlas-logo-mark-dark.png">
+    <source media="(prefers-color-scheme: light)" srcset="apps/ui/static/assets/phaseatlas-logo-mark.png">
+    <img src="apps/ui/static/assets/phaseatlas-logo-mark.png" alt="PhaseAtlas logo" width="132" height="132">
+  </picture>
 
-PhaseAtlas is a local-first desktop control plane for turning repository-backed work into explicit,
-reviewable agent runs. One Electron application can open multiple repositories; each active checkout
-is isolated in its own utility process and can expose multiple workspaces.
+  # PhaseAtlas
 
-This repository currently contains the first vertical slice:
+  **A local-first desktop control plane for planning, running, and reviewing AI-assisted repository work.**
 
-- an Electron main process and a narrow preload bridge;
-- one lazy repository worker per active checkout;
-- a Svelte desktop renderer following KétViệt's staff/operational design language;
-- shared repository, workspace, task, run, and worker contracts;
-- a repository inspector for `.phaseatlas/` manifests;
-- provider-neutral read-only planning through Codex CLI and Claude Code adapters;
-- proposal review, policy validation, and canonical YAML publishing;
-- optional single-task or parallel batch initialization of Markdown task bodies after publish;
-- a repository explorer and Monaco-based multi-tab editor with explicit saves;
-- architecture decisions and contract documentation.
+  Turn a request into reviewable tasks, understand their dependencies on a map, and run coding agents
+  in isolated worktrees without handing control of your repository to a hosted orchestration service.
+</div>
+
+> [!IMPORTANT]
+> PhaseAtlas is pre-1.0 software. The maintained development and packaging target is currently macOS,
+> and contracts may evolve while the first public release is prepared.
+
+Read the [changelog](CHANGELOG.md), [roadmap](docs/roadmap.md), or
+[production release guide](docs/releasing.md).
+
+<p align="center">
+  Developed and maintained by <a href="https://ketviet.vn"><strong>KétViệt</strong></a>.
+</p>
+
+## Why PhaseAtlas?
+
+Coding agents are effective at individual prompts, but real repository work is larger than a chat
+session. Teams still need to decide what should be done, review the scope, understand dependencies,
+control write access, recover interrupted runs, and preserve evidence after the model process exits.
+
+PhaseAtlas makes that workflow explicit:
+
+1. **Plan** a repository or an existing workspace with an installed model CLI.
+2. **Review and publish** structured task outlines before they become canonical repository data.
+3. **Initialize detail on demand** for one task or a parallel batch, so planning does not spend tokens
+   on content nobody needs yet.
+4. **Navigate the work** as a dense list or a dependency map with clear ready, active, blocked, and
+   completed states.
+5. **Run agents safely** through read-only analysis, planning, implementation in isolated worktrees,
+   and review.
+6. **Inspect durable results** after a reload or restart without rendering an unbounded command log.
+
+The repository remains the authority. Agents may propose tasks, write in an isolated checkout, and
+produce evidence; they cannot silently publish contracts or declare canonical work complete.
+
+## Features
+
+### Repository and workspace control
+
+- Open multiple Git repositories in one desktop application.
+- Run one isolated repository worker per active checkout.
+- Organize dozens of logical workspaces inside each repository.
+- Watch `.phaseatlas/` and refresh task projections when canonical files change.
+- Persist the repository catalog and checkout identity across desktop restarts.
+
+### Structured planning
+
+- Plan a new workspace or add tasks to an existing workspace from natural language.
+- Use provider-discovered models instead of free-form model names.
+- Review, edit, validate, and publish proposals explicitly.
+- Publish lightweight outlines first, then initialize detailed Markdown bodies individually or in
+  batches of up to four concurrent model calls.
+- Keep generated content editable through the built-in repository editor.
+
+### Task workbench
+
+- Switch between compact list and dependency-map views.
+- Visualize task readiness, active work, blockers, and completion.
+- Open rendered Markdown task bodies from either view.
+- Render Mermaid diagrams inside task documentation.
+- Edit repository files in a Monaco-based multi-tab editor with a file explorer and explicit saves.
+
+### Durable agent execution
+
+- Run `analyze`, `plan`, `implement`, and `review` actions through a provider-neutral contract.
+- Derive permissions from the task and action instead of accepting arbitrary commands from the UI.
+- Execute write-capable work in a unique PhaseAtlas-owned Git worktree.
+- Stream normalized agent narration, tool activity, file changes, and lifecycle events.
+- Persist run specifications, events, results, retries, and terminal state in checkout-owned SQLite.
+- Fetch command output in bounded pages only when a user opens a command; collapsed output is not kept
+  in the renderer DOM.
+- Recover interrupted attempts explicitly and reject stale results after a canonical task changes.
+
+### Repository chat
+
+- Open free-form repository chat without creating or selecting a task.
+- Keep multiple durable conversations per repository.
+- Attach safe repository-relative file references.
+- Use read-only chat by default, with normalized reasoning and tool activity.
+- Request an isolated edit through a separate confirmation and review flow.
+- Accept, discard, retain, or resume a reviewed edit without giving chat canonical task authority.
+- Toggle chat with `Option+L` on macOS (`Alt+L` elsewhere).
+
+### Provider support
+
+PhaseAtlas currently includes adapters for:
+
+| Provider | Planning | Task content | Execution | Chat | Isolated chat edit |
+| --- | :---: | :---: | :---: | :---: | :---: |
+| Codex CLI | Yes | Yes | Yes | Yes | Yes |
+| Claude Code | Yes | Yes | Yes | Yes | Yes |
+
+Provider credentials and authentication remain owned by the installed CLI. PhaseAtlas receives a
+bounded capability and model projection; it does not expose executable paths, raw provider payloads,
+or credentials to the renderer.
 
 ## Requirements
 
-- Node.js `>=24` (the repository currently pins `24.14.0`)
-- pnpm `11.9` or newer
+- macOS for the currently verified desktop workflow
 - Git
+- Node.js `24.14.0` or a newer Node 24 release
+- pnpm `11.9.0` (pinned by the root `packageManager` field)
+- At least one installed and authenticated provider CLI for AI-assisted actions:
+  - Codex CLI, or the Codex binary bundled with the macOS ChatGPT application
+  - Claude Code
 
-## Start locally
+You can browse canonical repositories and edit files without a provider. Planning, chat, task-content
+initialization, and agent runs require an available CLI with a discoverable model catalog.
+
+## Quick start
+
+Clone the repository and select the pinned runtime:
+
+```bash
+git clone https://github.com/ketvietlab/phaseatlas.git
+cd phaseatlas
+nvm use
+```
+
+Install dependencies and start the desktop development environment:
 
 ```bash
 pnpm install
 pnpm dev
 ```
 
-The development command builds the shared runtime, starts the Svelte dev server on
-`http://127.0.0.1:4177`, then opens Electron. Renderer changes hot-reload in place. Contract, core,
-repository-worker, and Electron changes rebuild the runtime and restart the desktop window
-automatically.
+`pnpm dev` performs the following automatically:
 
-## Verify
+1. builds the shared contracts, core, repository worker, and Electron runtime;
+2. starts the Svelte renderer at `http://127.0.0.1:4177`;
+3. launches Electron; and
+4. hot-reloads renderer changes or rebuilds and restarts Electron when backend sources change.
+
+Only one PhaseAtlas development session can own port `4177`. Stop the existing session before starting
+another one.
+
+## First run
+
+1. Start PhaseAtlas and choose **Open repository**.
+2. Select a Git checkout. PhaseAtlas grants one worker access to that fixed checkout root.
+3. Choose an available CLI and one of the models discovered from that provider.
+4. If the repository is not configured, use **Plan workspace** to propose the first workspace and
+   starter tasks.
+5. Review the proposal, publish it, and initialize detailed task content only where it is useful.
+6. Open a task from List or Map view to read its Markdown body, edit it, or start an allowed run.
+
+PhaseAtlas stores canonical planning data in the repository:
+
+```text
+.phaseatlas/
+├── repository.yaml
+└── workspaces/
+    └── <workspace-slug>/
+        ├── workspace.yaml
+        └── tasks/
+            ├── <task-id>.yaml
+            └── <task-id>.md
+```
+
+YAML owns the task contract and dependency graph. The optional Markdown sidecar owns the detailed task
+body. Both are normal Git-tracked files that can be reviewed and changed outside PhaseAtlas.
+
+See the [task contract](docs/contracts/task-contract.md) and
+[planning contract](docs/contracts/planning-contract.md) before generating these files by hand.
+
+## How it works
+
+```mermaid
+flowchart LR
+  User["User"] --> UI["Sandboxed Svelte renderer"]
+  UI --> Bridge["Typed preload bridge"]
+  Bridge --> Main["Electron supervisor"]
+  Main --> WorkerA["Repository worker A"]
+  Main --> WorkerB["Repository worker B"]
+  WorkerA --> ContractsA["Git-tracked .phaseatlas contracts"]
+  WorkerA --> StoreA["Checkout SQLite"]
+  WorkerA --> AgentA["Provider CLI"]
+  AgentA --> ReadOnly["Read-only checkout"]
+  AgentA --> Worktree["Isolated write worktree"]
+```
+
+The renderer is treated as an untrusted web surface. It cannot import Node.js, start arbitrary
+commands, or choose working directories. Electron supervises application lifecycle and routes typed
+messages, while repository parsing and agent execution stay inside the checkout-bound worker.
+
+Workspaces are logical partitions, not extra processes. Opening two repositories creates two workers;
+opening ten workspaces in one repository still uses that repository's single worker.
+
+For a deeper tour, read the [architecture overview](docs/architecture/overview.md),
+[repository process model](docs/architecture/repository-process-model.md), and architectural decision
+records under [`docs/decisions`](docs/decisions).
+
+## Data ownership and security model
+
+PhaseAtlas separates durable repository truth from local operational state:
+
+| Data | Owner | Typical contents |
+| --- | --- | --- |
+| Canonical contracts | Git-tracked `.phaseatlas/` | repository, workspace, task, policy, promoted evidence |
+| Operational state | Application-support SQLite | runs, chat sessions, events, retries, leases, caches |
+| Provider authentication | Provider CLI or operating system | credentials, login sessions, private provider state |
+| UI preference | Local desktop storage | selected views and repository-scoped presentation choices |
+
+Important boundaries:
+
+- model output is untrusted until it passes shared validation;
+- renderer requests use repository, workspace, task, run, and session identifiers—not arbitrary paths
+  or process IDs;
+- implementation runs write only inside leased worktrees with task-derived scope;
+- Git independently derives changed files before a result can be reviewed;
+- an agent's proposed task state is advisory and never updates canonical YAML automatically; and
+- cancellation, retry, interruption, and terminal ordering are persisted rather than inferred from UI
+  state.
+
+Read [ADR 0002](docs/decisions/0002-storage-boundaries.md) and the
+[agent run contract](docs/contracts/agent-run-contract.md) for the complete authority model.
+
+## Development
+
+### Common commands
+
+```bash
+pnpm dev              # start Vite and Electron with runtime rebuilds
+pnpm check            # TypeScript and Svelte validation
+pnpm test             # core and repository-worker tests
+pnpm build            # production build for every workspace package
+pnpm package:desktop  # create an ad-hoc-signed macOS development bundle
+pnpm verify:desktop   # verify bundle layout, manifest, signature, renderer, and worker
+pnpm release:validate # validate package version and CHANGELOG.md
+```
+
+Run the main verification suite before submitting a change:
 
 ```bash
 pnpm check
@@ -43,18 +249,121 @@ pnpm test
 pnpm build
 ```
 
-## Repository layout
+### Repository layout
 
 ```text
-apps/desktop             Electron main process and preload bridge
-apps/repository-worker   Process-isolated repository backend
-apps/ui                  Svelte renderer
-packages/contracts       Shared messages and domain types
-packages/core            Repository inspection and normalization core
-docs                     Architecture, contracts, ADRs, and roadmap
-.phaseatlas              PhaseAtlas's own repository manifest and tasks
+apps/desktop             Electron main process and narrow preload bridge
+apps/repository-worker   Checkout-bound repository backend and provider adapters
+apps/ui                  Svelte 5 renderer and desktop workbench
+packages/contracts       Shared IPC, domain types, and model-output JSON schemas
+packages/core            Validation, persistence, Git inspection, and execution core
+scripts                  Development, packaging, and bundle-verification tooling
+docs/architecture        Runtime and editor architecture
+docs/contracts           Canonical planning, task, run, chat, edit, and terminal contracts
+docs/decisions           Architectural decision records
+.phaseatlas              PhaseAtlas's own workspaces and canonical task registry
 ```
 
-Start with [the architecture overview](docs/architecture/overview.md) and
-[the development guide](docs/development.md). The renderer's visual profile and asset provenance are
-recorded in [ADR 0003](docs/decisions/0003-ketviet-design-language.md).
+### Architectural rules for contributors
+
+- Keep Node.js and Electron imports out of the renderer.
+- Add shared request, response, and event types to `packages/contracts` before wiring IPC.
+- Keep repository parsing and provider execution out of the Electron main process.
+- Bind every repository worker to one canonical checkout root at startup.
+- Keep one canonical task per YAML file to reduce merge conflicts.
+- Update the corresponding contract or ADR when changing a trust or authority boundary.
+- Prefer fail-closed behavior for missing, invalid, stale, or ambiguous repository state.
+
+The complete local workflow is documented in the [development guide](docs/development.md).
+
+## Building and releasing the macOS application
+
+Create and verify a development artifact:
+
+```bash
+pnpm package:desktop
+pnpm verify:desktop
+```
+
+The output is written beneath:
+
+```text
+artifacts/desktop/darwin-<architecture>/
+├── PhaseAtlas.app
+└── PhaseAtlas-<version>-darwin-<architecture>.zip
+```
+
+Development artifacts are ad-hoc signed and have updates disabled. Release-mode packaging is
+fail-closed and requires explicit external signing, notarization, update metadata, and signature
+inputs. Private keys and provider credentials are never copied into the application bundle.
+
+See [Desktop distribution](docs/development.md#desktop-distribution) for release inputs, evidence,
+installation, update, and rollback procedures.
+
+Production releases use Semantic Versioning and Keep a Changelog. The root `package.json` is the
+application version authority, the Git tag must be exactly `v<version>`, and the matching changelog
+section becomes the GitHub Release notes. A tag on `main` starts `.github/workflows/release.yml`, which
+validates the repository, builds and notarizes both Apple Silicon and Intel artifacts, signs the update
+manifest, generates SHA-256 checksums, and uploads the complete set to GitHub Releases.
+
+Maintainers must configure the protected `production` environment and Apple/update-signing secrets
+before creating a release tag. The complete version policy, secret inventory, tag procedure, pipeline,
+and recovery process are in the [production release guide](docs/releasing.md).
+
+## Project status and roadmap
+
+PhaseAtlas is currently at version `0.1.0`. The core desktop boundary, canonical task registry,
+provider-neutral planning, task-content initialization, dependency workbench, repository editor,
+durable agent execution, repository chat, isolated chat editing, and macOS packaging path are present.
+
+Pre-1.0 priorities include hardening source adapters, promotion workflows, provider compatibility,
+cross-platform support, release hardening, and documentation. Track milestone status in the
+[project roadmap](docs/roadmap.md). The roadmap is directional; contracts and tests are the source of
+truth for implemented behavior.
+
+User-visible changes are maintained in [CHANGELOG.md](CHANGELOG.md).
+
+## Contributing
+
+Contributions are welcome while the public contribution policy is being finalized.
+
+1. Open an issue or discussion for a large behavioral or architectural change.
+2. Create a focused branch from `develop`.
+3. Keep changes inside the documented process, storage, and trust boundaries.
+4. Add or update tests and contract documentation where behavior changes.
+5. Add user-visible changes to the `Unreleased` section of `CHANGELOG.md`.
+6. Run `pnpm check`, `pnpm test`, and `pnpm build`.
+7. Open a pull request into `develop` with the motivation, user impact, and verification results.
+
+Please do not include repository secrets, provider credentials, private model payloads, generated
+application-support databases, or unrelated `.phaseatlas/` task-state edits in a pull request.
+
+A dedicated `CONTRIBUTING.md`, code of conduct, and security policy have not yet been published. For a
+security-sensitive report, avoid a public issue and contact the maintainers privately through GitHub.
+
+## License
+
+PhaseAtlas is released under the [MIT License](LICENSE). You may use, copy, modify, merge, publish,
+distribute, sublicense, and sell copies, including for commercial purposes, provided the copyright and
+license notice remain with copies or substantial portions of the software.
+
+## Developer
+
+<div align="center">
+  <a href="https://ketviet.vn" aria-label="Visit KétViệt">
+    <picture>
+      <source media="(prefers-color-scheme: dark)" srcset="apps/ui/static/assets/ketviet-logo-dark.png">
+      <source media="(prefers-color-scheme: light)" srcset="apps/ui/static/assets/ketviet-logo-light.png">
+      <img src="apps/ui/static/assets/ketviet-logo-light.png" alt="KétViệt — The Omnia Platform" width="250">
+    </picture>
+  </a>
+
+  <p>PhaseAtlas is developed and maintained by <a href="https://ketviet.vn"><strong>KétViệt</strong></a>.</p>
+</div>
+
+---
+
+<div align="center">
+  Built for repository work that needs more structure than a chat transcript and more control than an
+  unattended agent loop.
+</div>

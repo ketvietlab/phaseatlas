@@ -28,13 +28,16 @@ if (!/^\d+$/.test(buildNumber)) throw new Error("PHASEATLAS_BUILD_NUMBER must co
 const releaseInputs = channel === "release" ? {
   signingIdentity: process.env.PHASEATLAS_SIGN_IDENTITY,
   notarizationProfile: process.env.PHASEATLAS_NOTARIZATION_PROFILE,
+  notarizationKeychain: process.env.PHASEATLAS_NOTARIZATION_KEYCHAIN,
   updateFeedUrl: process.env.PHASEATLAS_UPDATE_FEED_URL,
   updatePublicKey: process.env.PHASEATLAS_UPDATE_PUBLIC_KEY_FILE,
   updateManifest: process.env.PHASEATLAS_UPDATE_MANIFEST_FILE,
   updateSignature: process.env.PHASEATLAS_UPDATE_SIGNATURE_FILE,
 } : null;
 if (releaseInputs) {
-  const missing = Object.entries(releaseInputs).filter(([, value]) => !value).map(([key]) => key);
+  const missing = Object.entries(releaseInputs)
+    .filter(([key, value]) => key !== "notarizationKeychain" && !value)
+    .map(([key]) => key);
   if (missing.length) throw new Error(`Release packaging requires explicit signing, notarization, and signed update inputs: ${missing.join(", ")}.`);
   if (!String(releaseInputs.updateFeedUrl).startsWith("https://")) throw new Error("Release update feed must use HTTPS.");
   await execFileAsync("openssl", ["dgst", "-sha256", "-verify", releaseInputs.updatePublicKey, "-signature", releaseInputs.updateSignature, releaseInputs.updateManifest]);
@@ -126,6 +129,7 @@ await cp(path.join(repositoryRoot, "apps", "desktop", "dist", "main.js"), path.j
 await cp(path.join(repositoryRoot, "apps", "desktop", "dist", "preload.cjs"), path.join(resourcesPath, "app", "desktop", "preload.cjs"));
 await cp(path.join(repositoryRoot, "apps", "repository-worker", "dist", "index.js"), path.join(resourcesPath, "repository-worker", "index.js"));
 await cp(path.join(repositoryRoot, "apps", "ui", "build"), path.join(resourcesPath, "ui", "build"), { recursive: true });
+await cp(path.join(repositoryRoot, "LICENSE"), path.join(resourcesPath, "LICENSE"));
 await cp(path.join(nodePtyPackage, "package.json"), path.join(packagedNodePty, "package.json"));
 await cp(path.join(nodePtyPackage, "LICENSE"), path.join(packagedNodePty, "LICENSE"));
 await cp(path.join(nodePtyPackage, "lib"), path.join(packagedNodePty, "lib"), { recursive: true, preserveTimestamps: true, verbatimSymlinks: true });
@@ -134,6 +138,7 @@ await writeFile(path.join(resourcesPath, "app", "package.json"), JSON.stringify(
   name: "phaseatlas-desktop",
   version: applicationVersion,
   private: true,
+  license: "MIT",
   type: "module",
   main: "desktop/main.js",
 }, null, 2));
@@ -163,7 +168,7 @@ if (releaseInputs) {
 }
 await writeFile(path.join(resourcesPath, "release-policy.json"), JSON.stringify(policy, null, 2));
 
-const manifestRoots = ["app", "repository-worker", "ui", "node_modules/node-pty", "release-policy.json", ...(releaseInputs ? ["update"] : [])];
+const manifestRoots = ["app", "repository-worker", "ui", "node_modules/node-pty", "LICENSE", "release-policy.json", ...(releaseInputs ? ["update"] : [])];
 const manifestFiles = {};
 for (const root of manifestRoots) {
   const absolute = path.join(resourcesPath, root);
@@ -190,7 +195,16 @@ await execFileAsync("codesign", ["--verify", "--deep", "--strict", applicationPa
 let archivePath = path.join(artifactRoot, `PhaseAtlas-${applicationVersion}-darwin-${process.arch}.zip`);
 await execFileAsync("ditto", ["-c", "-k", "--sequesterRsrc", "--keepParent", applicationPath, archivePath]);
 if (releaseInputs) {
-  await execFileAsync("xcrun", ["notarytool", "submit", archivePath, "--keychain-profile", releaseInputs.notarizationProfile, "--wait"], { maxBuffer: 8 * 1024 * 1024 });
+  const notarizationArguments = [
+    "notarytool",
+    "submit",
+    archivePath,
+    "--keychain-profile",
+    releaseInputs.notarizationProfile,
+    ...(releaseInputs.notarizationKeychain ? ["--keychain", releaseInputs.notarizationKeychain] : []),
+    "--wait",
+  ];
+  await execFileAsync("xcrun", notarizationArguments, { maxBuffer: 8 * 1024 * 1024 });
   await execFileAsync("xcrun", ["stapler", "staple", applicationPath]);
   await execFileAsync("codesign", ["--verify", "--deep", "--strict", applicationPath]);
   await rm(archivePath);
