@@ -715,6 +715,16 @@ export interface ChatEditPrepareInput {
   attachments?: RepositoryChatAttachment[];
 }
 
+export type ChatEditContextAttachment =
+  | { type: "repository"; path: string }
+  | { type: "image"; name: string; mediaType: RepositoryChatImageMediaType };
+
+export interface ChatEditContextMessage {
+  readonly role: RepositoryChatMessageRole;
+  readonly content: string;
+  readonly attachments: ChatEditContextAttachment[];
+}
+
 export interface ChatEditSpec {
   readonly schemaVersion: "phaseatlas.chat-edit/v1";
   readonly editId: string;
@@ -725,6 +735,7 @@ export interface ChatEditSpec {
   readonly model: string;
   readonly reasoningEffort?: string;
   readonly prompt: string;
+  readonly conversationContext?: ChatEditContextMessage[];
   readonly accessMode: ChatEditAccessMode;
   readonly attachments: RepositoryChatAttachment[];
   readonly scope: TaskScope;

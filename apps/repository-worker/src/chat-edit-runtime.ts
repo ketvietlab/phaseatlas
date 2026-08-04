@@ -4,6 +4,7 @@ import { promisify } from "node:util";
 import type {
   ChatEditCancellationResult,
   ChatEditAccessMode,
+  ChatEditContextMessage,
   ChatEditConfirmation,
   ChatEditPrepareInput,
   ChatEditResult,
@@ -13,6 +14,8 @@ import type {
   PersistedRunEventPage,
   TaskScope,
   RepositorySummary,
+  RepositoryChatAttachment,
+  RepositoryChatMessage,
   RunnerDescriptor,
 } from "@phaseatlas/contracts";
 import {
@@ -26,6 +29,8 @@ import { safeChatAttachments } from "./chat-attachment-policy.js";
 
 const execFileAsync = promisify(execFile);
 const MAX_PATCH = 500_000;
+const MAX_CONTEXT_MESSAGES = 50;
+const MAX_CONTEXT_CHARACTERS = 64_000;
 const ACCESS_MODES = new Set<ChatEditAccessMode>(["ask_for_approval", "full_access"]);
 
 type Git = (args: string[], cwd: string) => Promise<string>;
@@ -69,6 +74,44 @@ function failureText(error: unknown): string {
     .slice(0, 2_000);
 }
 
+function conversationContext(messages: RepositoryChatMessage[]): ChatEditContextMessage[] {
+  const selected: ChatEditContextMessage[] = [];
+  let remaining = MAX_CONTEXT_CHARACTERS;
+  for (let index = messages.length - 1; index >= 0 && selected.length < MAX_CONTEXT_MESSAGES && remaining > 0; index -= 1) {
+    const message = messages[index];
+    if (!message) continue;
+    const content = message.content.slice(0, remaining);
+    if (!content) continue;
+    selected.unshift({
+      role: message.role,
+      content,
+      attachments: message.attachments.map((attachment) => attachment.type === "image"
+        ? { type: "image", name: attachment.name, mediaType: attachment.mediaType }
+        : { type: "repository", path: attachment.path }),
+    });
+    remaining -= content.length;
+  }
+  return selected;
+}
+
+function contextualAttachments(messages: RepositoryChatMessage[], explicit: RepositoryChatAttachment[]): RepositoryChatAttachment[] {
+  let selected = explicit;
+  for (let messageIndex = messages.length - 1; messageIndex >= 0 && selected.length < 12; messageIndex -= 1) {
+    const message = messages[messageIndex];
+    if (!message) continue;
+    for (let attachmentIndex = message.attachments.length - 1; attachmentIndex >= 0 && selected.length < 12; attachmentIndex -= 1) {
+      const attachment = message.attachments[attachmentIndex];
+      if (!attachment) continue;
+      try {
+        selected = safeChatAttachments([...selected, attachment]);
+      } catch {
+        // Explicit attachments take priority when historical images exceed current limits.
+      }
+    }
+  }
+  return selected;
+}
+
 export class ChatEditRuntime {
   private readonly active = new Map<string, ActiveEdit>();
 
@@ -91,7 +134,9 @@ export class ChatEditRuntime {
     const prompt = String(input.prompt ?? "").replaceAll("\0", "").trim();
     if (!prompt || prompt.length > 32_000) throw new Error("Chat edit prompt must contain 1 to 32000 characters.");
     if (!ACCESS_MODES.has(input.accessMode)) throw new Error("Chat edit access mode is invalid.");
-    const attachments = safeChatAttachments(input.attachments);
+    const messages = this.store.listChatMessages(sessionId);
+    const context = conversationContext(messages);
+    const attachments = contextualAttachments(messages, safeChatAttachments(input.attachments));
     const descriptor = (await this.runners.list()).find((candidate) => candidate.id === session.runnerId);
     if (!descriptor?.available) throw new Error("The selected provider is unavailable.");
     assertRunnerSelection(descriptor, session.model, session.reasoningEffort);
@@ -118,6 +163,7 @@ export class ChatEditRuntime {
       model: session.model,
       reasoningEffort: session.reasoningEffort,
       accessMode: input.accessMode,
+      conversationContext: context,
       attachments,
       scope,
     });
@@ -132,6 +178,7 @@ export class ChatEditRuntime {
       model: session.model,
       ...(session.reasoningEffort ? { reasoningEffort: session.reasoningEffort } : {}),
       prompt,
+      conversationContext: context,
       accessMode: input.accessMode,
       attachments,
       scope,

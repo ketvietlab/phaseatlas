@@ -49,6 +49,45 @@ test("requires confirmation, isolates edits, derives review evidence, and applie
     createdAt: now,
     updatedAt: now,
   });
+  store.createChatTurn({
+    turn: {
+      turnId: "context-turn",
+      sessionId: "session-one",
+      status: "starting",
+      runnerId: "codex-cli",
+      model: "gpt-fixture",
+      reasoningEffort: "high",
+      userMessageId: "context-user",
+      createdAt: now,
+      updatedAt: now,
+    },
+    userMessage: {
+      messageId: "context-user",
+      sessionId: "session-one",
+      turnId: "context-turn",
+      role: "user",
+      content: "Design a settings card based on the attached reference.",
+      attachments: [
+        { path: "README.md" },
+        { type: "image", name: "history.png", mediaType: "image/png", data: "aGlzdG9yeQ==" },
+      ],
+      sequence: 1,
+      createdAt: now,
+    },
+  });
+  store.completeChatTurn({
+    turnId: "context-turn",
+    assistantMessage: {
+      messageId: "context-assistant",
+      sessionId: "session-one",
+      turnId: "context-turn",
+      role: "assistant",
+      content: "Use a compact select beside the attachment controls.",
+      attachments: [],
+      sequence: 2,
+      createdAt: now,
+    },
+  });
   const repository: RepositorySummary = {
     id: "fixture-repository",
     checkoutId,
@@ -70,12 +109,14 @@ test("requires confirmation, isolates edits, derives review evidence, and applie
   let editNumber = 0;
   let observedAccessMode = "";
   let observedAttachmentCount = 0;
+  let observedConversation = "";
   const adapter: ChatEditAdapter = {
     runnerId: "codex-cli",
     async execute(context) {
       editNumber += 1;
       observedAccessMode = context.spec.accessMode;
       observedAttachmentCount = context.spec.attachments.length;
+      observedConversation = JSON.stringify(context.spec.conversationContext);
       await writeFile(path.join(context.workingDirectory, "README.md"), `# Edited in isolation ${editNumber}\n`, "utf8");
       await writeFile(path.join(context.workingDirectory, "NEW.md"), "new file\n", "utf8");
       context.emit("chat.edit.delta", { text: "Edited the fixture." });
@@ -117,7 +158,9 @@ test("requires confirmation, isolates edits, derives review evidence, and applie
   await runtime.start({ editId: prepared.editId, confirmationDigest: prepared.confirmationDigest });
   await waitFor(() => runtime.result(prepared.editId).status === "completed");
   assert.equal(observedAccessMode, "ask_for_approval");
-  assert.equal(observedAttachmentCount, 2);
+  assert.equal(observedAttachmentCount, 3);
+  assert.match(observedConversation, /Design a settings card/);
+  assert.match(observedConversation, /compact select/);
   const review = runtime.result(prepared.editId);
   assert.equal(review.reasoningEffort, "high");
   assert.deepEqual(review.changedFiles.map((change) => change.path), ["NEW.md", "README.md"]);
@@ -163,6 +206,11 @@ test("projects image and repository attachments into edit providers", async () =
     runnerId: "codex-cli",
     model: "model-one",
     prompt: "Follow the visual reference.",
+    conversationContext: [{
+      role: "user",
+      content: "Build the repository settings experience we discussed.",
+      attachments: [{ type: "repository", path: "apps/ui/src" }],
+    }],
     accessMode: "full_access",
     attachments: [
       { path: "apps/ui/src" },
@@ -188,6 +236,8 @@ test("projects image and repository attachments into edit providers", async () =
   });
   await codexRegistry.get("codex-cli").execute({ spec, workingDirectory: "/private/worktree", signal: new AbortController().signal, emit: () => undefined });
   assert.match(codexInput, /apps\/ui\/src/);
+  assert.match(codexInput, /Build the repository settings experience/);
+  assert.match(codexInput, /Current edit request/);
   await assert.rejects(stat(codexImagePath));
 
   let claudeInput = "";
