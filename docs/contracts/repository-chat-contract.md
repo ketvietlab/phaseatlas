@@ -79,7 +79,7 @@ not cursor authority. Terminal events are unique, and output after terminalizati
 Raw command and repository-tool output is adapter-private and must never be published to the
 renderer or persisted in chat events. `chat.tool.completed` may carry only bounded metadata such as
 status, output byte count, and an `outputHidden` marker. The renderer has no API for retrieving this
-content. Schema version 3 scrubs legacy `chat.tool.output` payloads while retaining the event position
+content. Schema version 4 scrubs legacy `chat.tool.output` payloads while retaining the event position
 for replay compatibility.
 
 ## Replay, cancellation, and recovery

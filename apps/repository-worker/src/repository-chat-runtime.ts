@@ -16,7 +16,7 @@ import {
   CheckoutOperationalStore,
   isSafeAgentPath,
 } from "@phaseatlas/core";
-import { assertRunnerModel, type RunnerRegistry } from "./runner-registry.js";
+import { assertRunnerSelection, type RunnerRegistry } from "./runner-registry.js";
 import { RepositoryChatAdapterRegistry } from "./chat-adapter-registry.js";
 
 const TERMINAL_CHAT_STATUSES = new Set(["completed", "failed", "cancelled", "interrupted"]);
@@ -121,7 +121,10 @@ export class RepositoryChatRuntime {
   async createSession(input: RepositoryChatCreateInput): Promise<RepositoryChatSession> {
     const runnerId = boundedId(input.runnerId, "runnerId");
     const model = boundedId(input.model, "model");
-    await this.validateProvider(runnerId, model);
+    const reasoningEffort = input.reasoningEffort
+      ? boundedId(input.reasoningEffort, "reasoningEffort")
+      : undefined;
+    await this.validateProvider(runnerId, model, reasoningEffort);
     this.adapters.get(runnerId);
     const timestamp = new Date().toISOString();
     return this.store.createChatSession({
@@ -129,6 +132,7 @@ export class RepositoryChatRuntime {
       checkoutId: this.checkoutId,
       runnerId,
       model,
+      ...(reasoningEffort ? { reasoningEffort } : {}),
       title: input.title ? publicText(input.title, 120) : "New repository chat",
       state: "open",
       createdAt: timestamp,
@@ -170,7 +174,7 @@ export class RepositoryChatRuntime {
   async send(input: RepositoryChatSendInput): Promise<{ turnId: string }> {
     const session = this.store.getChatSession(boundedId(input.sessionId, "sessionId"));
     if (session.state !== "open") throw new Error("Chat session is closed.");
-    await this.validateProvider(session.runnerId, session.model);
+    await this.validateProvider(session.runnerId, session.model, session.reasoningEffort);
     const adapter = this.adapters.get(session.runnerId);
     const attachments = safeAttachments(input.attachments);
     const text = input.text.trim()
@@ -195,6 +199,7 @@ export class RepositoryChatRuntime {
       status: "starting",
       runnerId: session.runnerId,
       model: session.model,
+      ...(session.reasoningEffort ? { reasoningEffort: session.reasoningEffort } : {}),
       userMessageId: messageId,
       createdAt: timestamp,
       updatedAt: timestamp,
@@ -209,7 +214,7 @@ export class RepositoryChatRuntime {
     if (previous.status !== "interrupted") throw new Error("Only an interrupted chat turn can be retried.");
     const session = this.store.getChatSession(previous.sessionId);
     if (session.state !== "open") throw new Error("Chat session is closed.");
-    await this.validateProvider(session.runnerId, session.model);
+    await this.validateProvider(session.runnerId, session.model, session.reasoningEffort);
     const adapter = this.adapters.get(session.runnerId);
     const timestamp = new Date().toISOString();
     const turnId = randomUUID();
@@ -220,6 +225,7 @@ export class RepositoryChatRuntime {
         status: "starting",
         runnerId: session.runnerId,
         model: session.model,
+        ...(session.reasoningEffort ? { reasoningEffort: session.reasoningEffort } : {}),
         userMessageId: previous.userMessageId,
         parentTurnId: previous.turnId,
         createdAt: timestamp,
@@ -293,6 +299,7 @@ export class RepositoryChatRuntime {
       const answer = await adapter.execute({
         repositoryRoot: this.repositoryRoot,
         model: turn.model,
+        ...(turn.reasoningEffort ? { reasoningEffort: turn.reasoningEffort } : {}),
         messages: this.store.listChatMessages(turn.sessionId),
         signal,
         emit: (event) => {
@@ -341,9 +348,9 @@ export class RepositoryChatRuntime {
     }
   }
 
-  private async validateProvider(runnerId: string, model: string): Promise<void> {
+  private async validateProvider(runnerId: string, model: string, reasoningEffort?: string): Promise<void> {
     const descriptor = await this.runners.get(runnerId).describe();
     if (!descriptor.available) throw new Error(descriptor.unavailableReason || `${descriptor.name} is unavailable.`);
-    assertRunnerModel(descriptor, model);
+    assertRunnerSelection(descriptor, model, reasoningEffort);
   }
 }

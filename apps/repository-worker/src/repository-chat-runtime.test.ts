@@ -102,7 +102,8 @@ test("persists provider-neutral chat sessions, messages, replay, and cancellatio
       id: "gpt-fixture",
       displayName: "GPT Fixture",
       isDefault: true,
-      reasoningEfforts: [],
+      reasoningEfforts: ["low", "high"],
+      defaultReasoningEffort: "high",
     }],
   };
   const events: PersistedRepositoryChatEvent[] = [];
@@ -115,15 +116,25 @@ test("persists provider-neutral chat sessions, messages, replay, and cancellatio
     (event) => events.push(event),
   );
 
-  const first = await runtime.createSession({ runnerId: "codex-cli", model: "gpt-fixture", title: "Architecture" });
+  const first = await runtime.createSession({
+    runnerId: "codex-cli",
+    model: "gpt-fixture",
+    reasoningEffort: "high",
+    title: "Architecture",
+  });
   const second = await runtime.createSession({ runnerId: "codex-cli", model: "gpt-fixture" });
   assert.equal(runtime.listSessions().length, 2);
   assert.equal("taskKey" in first, false);
   assert.equal("workspaceSlug" in first, false);
+  assert.equal(first.reasoningEffort, "high");
   assert.equal(runtime.renameSession({ sessionId: second.sessionId, title: "Second thread" }).title, "Second thread");
   await assert.rejects(
     runtime.createSession({ runnerId: "codex-cli", model: "manually-entered" }),
     /selected model is not present/,
+  );
+  await assert.rejects(
+    runtime.createSession({ runnerId: "codex-cli", model: "gpt-fixture", reasoningEffort: "ultra" }),
+    /reasoning effort is not supported/,
   );
 
   const started = await runtime.send({
@@ -181,8 +192,10 @@ test("persists provider-neutral chat sessions, messages, replay, and cancellatio
   store.close();
   const reopened = new CheckoutOperationalStore(databasePath, checkoutId);
   assert.equal(reopened.listChatSessions().length, 2);
+  assert.equal(reopened.getChatSession(first.sessionId).reasoningEffort, "high");
   assert.equal(reopened.listChatMessages(first.sessionId).length, 4);
   assert.equal(reopened.getChatTurn(blocked.turnId).status, "cancelled");
+  assert.equal(reopened.getChatTurn(blocked.turnId).reasoningEffort, "high");
   reopened.close();
   await rm(root, { recursive: true, force: true });
   await rm(supportRoot, { recursive: true, force: true });
@@ -282,6 +295,7 @@ test("normalizes Codex and Claude chat fixtures behind the same read-only bounda
     const answer = await registry.get(runnerId).execute({
       repositoryRoot: "/private/repository",
       model: "fixture-model",
+      ...(runnerId === "codex-cli" ? { reasoningEffort: "high" } : {}),
       messages,
       signal: new AbortController().signal,
       emit: (event) => {
@@ -329,6 +343,7 @@ test("normalizes Codex and Claude chat fixtures behind the same read-only bounda
   assert.equal(codexThreadParams.approvalPolicy, "never");
   const codexTurnParams = (codexTurnStart?.params as Record<string, unknown> | undefined) ?? {};
   assert.equal("environments" in codexTurnParams, false);
+  assert.equal(codexTurnParams.effort, "high");
   assert.equal(codexTurnParams.summary, "concise");
   const codexInput = (codexTurnStart?.params as { input?: Array<Record<string, unknown>> } | undefined)?.input ?? [];
   assert.equal(String(codexInput[0]?.text).includes(ONE_PIXEL_PNG), false);

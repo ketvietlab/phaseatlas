@@ -292,6 +292,112 @@ test("scrubs legacy chat command output and rejects new output content", async (
   verified.close();
 });
 
+test("migrates version two provider selections to durable reasoning effort", async (context) => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "phaseatlas-effort-migration-"));
+  context.after(() => rm(root, { recursive: true, force: true }));
+  const databasePath = path.join(root, "operations.sqlite");
+  const database = new DatabaseSync(databasePath);
+  database.exec(`
+    CREATE TABLE store_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+    INSERT INTO store_meta (key, value) VALUES ('schema_version', '2'), ('checkout_id', '${CHECKOUT_A}');
+    CREATE TABLE runs (
+      run_id TEXT PRIMARY KEY,
+      kind TEXT NOT NULL,
+      status TEXT NOT NULL,
+      task_keys_json TEXT NOT NULL,
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL
+    );
+    CREATE TABLE agent_run_specs (
+      run_id TEXT PRIMARY KEY REFERENCES runs(run_id) ON DELETE CASCADE,
+      task_key TEXT NOT NULL,
+      task_revision TEXT NOT NULL,
+      action TEXT NOT NULL,
+      sandbox TEXT NOT NULL,
+      checkout_id TEXT NOT NULL,
+      runner_id TEXT NOT NULL,
+      model_id TEXT,
+      created_at TEXT NOT NULL
+    );
+    CREATE TABLE chat_sessions (
+      session_id TEXT PRIMARY KEY,
+      checkout_id TEXT NOT NULL,
+      runner_id TEXT NOT NULL,
+      model_id TEXT NOT NULL,
+      title TEXT NOT NULL,
+      state TEXT NOT NULL,
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL
+    );
+    CREATE TABLE chat_turns (
+      turn_id TEXT PRIMARY KEY,
+      session_id TEXT NOT NULL REFERENCES chat_sessions(session_id) ON DELETE CASCADE,
+      status TEXT NOT NULL,
+      runner_id TEXT NOT NULL,
+      model_id TEXT NOT NULL,
+      user_message_id TEXT NOT NULL REFERENCES chat_messages(message_id),
+      assistant_message_id TEXT REFERENCES chat_messages(message_id),
+      parent_turn_id TEXT REFERENCES chat_turns(turn_id),
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL
+    );
+  `);
+  database.close();
+
+  const migrated = new CheckoutOperationalStore(databasePath, CHECKOUT_A);
+  migrated.recordRun({ runId: "run-effort", kind: "agent", taskKeys: ["core/PHA-001"] });
+  migrated.recordAgentSpec({
+    runId: "run-effort",
+    taskKey: "core/PHA-001",
+    taskRevision: "a".repeat(64),
+    action: "review",
+    sandbox: "read-only",
+    checkoutId: CHECKOUT_A,
+    runnerId: "codex-cli",
+    model: "gpt-safe",
+    reasoningEffort: "high",
+    createdAt: "2026-08-04T00:00:00.000Z",
+  });
+  migrated.createChatSession({
+    sessionId: "session-effort",
+    checkoutId: CHECKOUT_A,
+    runnerId: "codex-cli",
+    model: "gpt-safe",
+    reasoningEffort: "high",
+    title: "Effort migration",
+    state: "open",
+    createdAt: "2026-08-04T00:00:00.000Z",
+    updatedAt: "2026-08-04T00:00:00.000Z",
+  });
+  migrated.createChatTurn({
+    turn: {
+      turnId: "turn-effort",
+      sessionId: "session-effort",
+      status: "starting",
+      runnerId: "codex-cli",
+      model: "gpt-safe",
+      reasoningEffort: "high",
+      userMessageId: "message-effort",
+      createdAt: "2026-08-04T00:00:00.000Z",
+      updatedAt: "2026-08-04T00:00:00.000Z",
+    },
+    userMessage: {
+      messageId: "message-effort",
+      sessionId: "session-effort",
+      turnId: "turn-effort",
+      role: "user",
+      content: "Verify migrated effort.",
+      attachments: [],
+      sequence: 1,
+      createdAt: "2026-08-04T00:00:00.000Z",
+    },
+  });
+  assert.equal(migrated.getAgentSpec("run-effort")?.reasoningEffort, "high");
+  assert.equal(migrated.getChatSession("session-effort").reasoningEffort, "high");
+  assert.equal(migrated.getChatTurn("turn-effort").reasoningEffort, "high");
+  migrated.close();
+});
+
 test("persists agent specs, results, revalidation, and retry linkage", async (context) => {
   const root = await mkdtemp(path.join(os.tmpdir(), "phaseatlas-agent-result-"));
   context.after(() => rm(root, { recursive: true, force: true }));
@@ -307,6 +413,7 @@ test("persists agent specs, results, revalidation, and retry linkage", async (co
     checkoutId: CHECKOUT_A,
     runnerId: "codex-cli",
     model: "gpt-safe",
+    reasoningEffort: "high",
     createdAt: "2026-08-03T00:00:00.000Z",
   });
   store.recordAgentResult({
@@ -343,6 +450,7 @@ test("persists agent specs, results, revalidation, and retry linkage", async (co
 
   const reopened = new CheckoutOperationalStore(databasePath, CHECKOUT_A);
   assert.equal(reopened.getAgentSpec("run-original")?.model, "gpt-safe");
+  assert.equal(reopened.getAgentSpec("run-original")?.reasoningEffort, "high");
   assert.equal(reopened.getAgentResult("run-original")?.validated.result.summary, "Reviewed.");
   assert.equal(reopened.latestResultRevalidation("run-original")?.taskRevision, "b".repeat(64));
   assert.equal(reopened.parentRunId("run-retry"), "run-original");

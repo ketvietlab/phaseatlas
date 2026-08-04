@@ -1,5 +1,6 @@
 import type { ChatEditSpec } from "@phaseatlas/contracts";
 import {
+  codexReasoningEffortArguments,
   resolveCodexExecutable,
   runChildProcess,
   type ProviderProcessRunner,
@@ -103,7 +104,8 @@ class CodexChatEditAdapter implements ChatEditAdapter {
       executable,
       args: [
         "exec", "--sandbox", "workspace-write", "--ephemeral", "--ignore-user-config", "--ignore-rules",
-        "--color", "never", "--json", "--cd", context.workingDirectory, "--model", context.spec.model, "-",
+        "--color", "never", "--json", "--cd", context.workingDirectory, "--model", context.spec.model,
+        ...codexReasoningEffortArguments(context.spec.reasoningEffort), "-",
       ],
       cwd: context.workingDirectory,
       stdin: editPrompt(context.spec),

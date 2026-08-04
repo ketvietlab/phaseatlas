@@ -41,6 +41,7 @@ export async function verifyBundleLayout(candidate = applicationPath) {
     "node_modules/node-pty/package.json",
     "node_modules/node-pty/lib/index.js",
     `node_modules/node-pty/prebuilds/${process.platform}-${process.arch}/pty.node`,
+    "LICENSE",
     "release-policy.json",
     "bundle-manifest.json",
   ];

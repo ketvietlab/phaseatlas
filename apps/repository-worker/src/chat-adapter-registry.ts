@@ -12,6 +12,7 @@ import {
 export interface RepositoryChatAdapterContext {
   repositoryRoot: string;
   model: string;
+  reasoningEffort?: string;
   messages: RepositoryChatMessage[];
   signal: AbortSignal;
   emit(event: RepositoryChatAdapterEvent): void;
@@ -230,6 +231,7 @@ class CodexChatAdapter implements RepositoryChatAdapter {
             ],
             approvalPolicy: "never",
             model: context.model,
+            ...(context.reasoningEffort ? { effort: context.reasoningEffort } : {}),
             summary: "concise",
           },
         });

@@ -21,6 +21,7 @@ pnpm test      # core contract tests
 pnpm build     # production builds for every workspace
 pnpm package:desktop # build an ad-hoc-signed macOS development artifact
 pnpm verify:desktop  # verify its layout, manifest, signature, renderer, and worker
+pnpm release:validate # validate the root SemVer and matching changelog entry
 ```
 
 The Svelte renderer uses Vite hot reload. Changes under contracts, core, repository worker, or
@@ -119,6 +120,8 @@ following outside the repository:
 - `PHASEATLAS_BUILD_NUMBER`: a decimal macOS bundle build number; defaults to `1` only for local builds.
 - `PHASEATLAS_SIGN_IDENTITY`: a Developer ID Application signing identity.
 - `PHASEATLAS_NOTARIZATION_PROFILE`: an existing `notarytool` keychain profile.
+- `PHASEATLAS_NOTARIZATION_KEYCHAIN`: an optional explicit keychain path containing that profile,
+  used by an isolated CI runner.
 - `PHASEATLAS_UPDATE_FEED_URL`: an HTTPS location for manually initiated updates.
 - `PHASEATLAS_UPDATE_PUBLIC_KEY_FILE`: the public verification key.
 - `PHASEATLAS_UPDATE_MANIFEST_FILE`: the release metadata to verify and bundle.
@@ -128,6 +131,11 @@ The public key and signed metadata are verified offline before signing. Missing 
 or an invalid signature stop the build. Private keys, provider credentials, environment files, and
 notarization credentials are never copied into the application. This milestone records update policy
 but deliberately provides no background update check or automatic installer.
+
+Production tags use the protected workflow in `.github/workflows/release.yml` to perform these steps
+for Apple Silicon and Intel, then publish the notarized ZIPs, signed update manifest, public key, and
+checksums to GitHub Releases. See the [release guide](releasing.md) for the SemVer, changelog, secrets,
+tagging, and recovery contract.
 
 ### Installation and release evidence
 
