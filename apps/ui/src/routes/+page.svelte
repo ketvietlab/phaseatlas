@@ -31,15 +31,19 @@
   const PROVIDER_SETTINGS_STORAGE_KEY = "phaseatlas.repository-provider-settings.v1";
   const SELECTED_AGENT_RUN_STORAGE_KEY = "phaseatlas.selected-agent-run.v1";
   const TERMINAL_HEIGHT_STORAGE_KEY = "phaseatlas.terminal-height.v1";
-  const WORKBENCH_STATE_STORAGE_KEY = "phaseatlas.workbench-state.v1";
+  const LEGACY_WORKBENCH_STATE_STORAGE_KEY = "phaseatlas.workbench-state.v1";
+  const WORKBENCH_STATE_STORAGE_KEY = "phaseatlas.workbench-state.v2";
 
   type RepositoryProviderSettings = Record<string, { runnerId: string; modelId: string }>;
-  type PersistedWorkbenchState = {
-    selectedCheckoutId: string;
+  type PersistedWorkbenchSurfaceState = {
     chatOpen: boolean;
     editorOpen: boolean;
     terminalOpen: boolean;
     terminalMaximized: boolean;
+  };
+  type PersistedWorkbenchState = {
+    selectedCheckoutId: string;
+    repositories: Record<string, PersistedWorkbenchSurfaceState>;
   };
   type CommandCard = {
     commandId: string;
@@ -185,8 +189,7 @@
   $: terminalShortcutLabel = platform === "darwin" ? "⌘`" : "Ctrl+`";
   $: chatShortcutLabel = platform === "darwin" ? "⌥L" : "Alt+L";
   $: if (workbenchStateReady && selectedCheckoutId) {
-    persistWorkbenchState({
-      selectedCheckoutId,
+    persistWorkbenchState(selectedCheckoutId, {
       chatOpen,
       editorOpen,
       terminalOpen,
@@ -250,7 +253,6 @@
       const savedRepository = repositories.find((repository) => repository.checkoutId === savedWorkbenchState?.selectedCheckoutId);
       const initialRepository = savedRepository ?? repositories[0];
       if (initialRepository) await selectRepository(initialRepository.checkoutId);
-      if (savedRepository && savedWorkbenchState) restoreWorkbenchState(savedWorkbenchState);
       workbenchStateReady = true;
     } catch (error) {
       errorMessage = error instanceof Error ? error.message : "PhaseAtlas could not be initialized.";
@@ -261,27 +263,50 @@
 
   function readWorkbenchState(): PersistedWorkbenchState | null {
     try {
-      const value = JSON.parse(window.localStorage.getItem(WORKBENCH_STATE_STORAGE_KEY) ?? "null") as unknown;
+      const persisted = window.localStorage.getItem(WORKBENCH_STATE_STORAGE_KEY);
+      const value = JSON.parse(persisted ?? window.localStorage.getItem(LEGACY_WORKBENCH_STATE_STORAGE_KEY) ?? "null") as unknown;
       if (!value || typeof value !== "object" || Array.isArray(value)) return null;
       const state = value as Record<string, unknown>;
       if (typeof state.selectedCheckoutId !== "string") return null;
+      const parseSurface = (candidate: unknown): PersistedWorkbenchSurfaceState | null => {
+        if (!candidate || typeof candidate !== "object" || Array.isArray(candidate)) return null;
+        const surface = candidate as Record<string, unknown>;
+        return {
+          chatOpen: surface.chatOpen === true,
+          editorOpen: surface.editorOpen === true,
+          terminalOpen: surface.terminalOpen === true,
+          terminalMaximized: surface.terminalOpen === true && surface.terminalMaximized === true,
+        };
+      };
+      if (state.repositories && typeof state.repositories === "object" && !Array.isArray(state.repositories)) {
+        const repositories = Object.fromEntries(Object.entries(state.repositories as Record<string, unknown>)
+          .map(([checkoutId, candidate]) => [checkoutId, parseSurface(candidate)] as const)
+          .filter((entry): entry is [string, PersistedWorkbenchSurfaceState] => Boolean(entry[1])));
+        return { selectedCheckoutId: state.selectedCheckoutId, repositories };
+      }
+      const legacySurface = parseSurface(state);
+      if (!legacySurface) return null;
       return {
         selectedCheckoutId: state.selectedCheckoutId,
-        chatOpen: state.chatOpen === true,
-        editorOpen: state.editorOpen === true,
-        terminalOpen: state.terminalOpen === true,
-        terminalMaximized: state.terminalOpen === true && state.terminalMaximized === true,
+        repositories: { [state.selectedCheckoutId]: legacySurface },
       };
     } catch {
       return null;
     }
   }
 
-  function persistWorkbenchState(state: PersistedWorkbenchState) {
+  function persistWorkbenchState(checkoutId: string, surface: PersistedWorkbenchSurfaceState) {
+    const existing = readWorkbenchState();
+    const state: PersistedWorkbenchState = {
+      selectedCheckoutId: checkoutId,
+      repositories: { ...existing?.repositories, [checkoutId]: surface },
+    };
     window.localStorage.setItem(WORKBENCH_STATE_STORAGE_KEY, JSON.stringify(state));
+    window.localStorage.removeItem(LEGACY_WORKBENCH_STATE_STORAGE_KEY);
   }
 
-  function restoreWorkbenchState(state: PersistedWorkbenchState) {
+  function restoreWorkbenchState(state: PersistedWorkbenchSurfaceState | undefined) {
+    if (!state) return;
     chatOpen = state.chatOpen;
     editorOpen = state.editorOpen;
     terminalOpen = state.terminalOpen;
@@ -290,6 +315,23 @@
 
   function clearWorkbenchState() {
     window.localStorage.removeItem(WORKBENCH_STATE_STORAGE_KEY);
+    window.localStorage.removeItem(LEGACY_WORKBENCH_STATE_STORAGE_KEY);
+  }
+
+  function removeRepositoryWorkbenchState(checkoutId: string) {
+    const existing = readWorkbenchState();
+    if (!existing) return;
+    const repositories = { ...existing.repositories };
+    delete repositories[checkoutId];
+    if (!Object.keys(repositories).length) {
+      clearWorkbenchState();
+      return;
+    }
+    const selectedCheckoutId = existing.selectedCheckoutId === checkoutId
+      ? Object.keys(repositories)[0] ?? ""
+      : existing.selectedCheckoutId;
+    window.localStorage.setItem(WORKBENCH_STATE_STORAGE_KEY, JSON.stringify({ selectedCheckoutId, repositories }));
+    window.localStorage.removeItem(LEGACY_WORKBENCH_STATE_STORAGE_KEY);
   }
 
   async function openRepository() {
@@ -313,6 +355,15 @@
 
   async function selectRepository(checkoutId: string) {
     if (!window.phaseatlas) return;
+    if (workbenchStateReady && selectedCheckoutId) {
+      persistWorkbenchState(selectedCheckoutId, {
+        chatOpen,
+        editorOpen,
+        terminalOpen,
+        terminalMaximized,
+      });
+    }
+    const savedSurface = readWorkbenchState()?.repositories[checkoutId];
     const requestId = ++repositoryLoadRequest;
     repositoryLoading = true;
     selectedCheckoutId = checkoutId;
@@ -322,6 +373,9 @@
     selectedWorkspaceSlug = "";
     selectedTaskKey = "";
     editorOpen = false;
+    editorInitialPath = "";
+    terminalOpen = false;
+    terminalMaximized = false;
     contentPanelTaskKey = "";
     contentRuns = {};
     contentTaskStatuses = {};
@@ -331,6 +385,7 @@
     openEditorAfterTask = {};
     executionOpen = false;
     chatOpen = false;
+    restoreWorkbenchState(savedSurface);
     executionActions = [];
     executionError = "";
     executionNotice = "";
@@ -1282,6 +1337,7 @@
     if (!window.phaseatlas) return;
     await window.phaseatlas.repositories.close(checkoutId);
     repositories = repositories.filter((repository) => repository.checkoutId !== checkoutId);
+    removeRepositoryWorkbenchState(checkoutId);
     if (selectedCheckoutId === checkoutId) {
       repositoryLoadRequest += 1;
       repositoryLoading = false;

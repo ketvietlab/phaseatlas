@@ -17,9 +17,9 @@ and a runner/model pair from the repository's current provider discovery. Codex 
 remain behind one provider-neutral adapter boundary.
 
 Persist chat history in the checkout operational store, never under `.phaseatlas/`. Keep the public
-API free of workspace and task identifiers. Chat runs read-only, accepts only safe repository-relative
-attachment references, and has no authority to modify files, publish planning output, transition
-canonical tasks, or promote evidence.
+API free of workspace and task identifiers. Chat runs read-only, accepts safe repository-relative
+attachment references and bounded user-supplied images as untrusted context, and has no authority to
+modify files, publish planning output, transition canonical tasks, or promote evidence.
 
 Provider continuation state is private adapter state. This first implementation uses ephemeral
 provider invocations with a bounded PhaseAtlas transcript, so restart and provider switching behavior
@@ -29,6 +29,8 @@ do not depend on an opaque provider session identifier.
 
 - Multiple conversations can survive application restart independently of workspace and task state.
 - Renderer code can consume one event vocabulary for supported providers.
+- Provider adapters validate and translate image attachments without exposing a generic local-file
+  or arbitrary provider-payload channel to the renderer.
 - Task execution remains strict: a chat response cannot be mistaken for a validated `AgentRunResult`.
 - Longer conversations require bounded transcript projection until a private continuation or
   summarization strategy is introduced.

@@ -618,9 +618,21 @@ export type RepositoryChatSessionState = "open" | "closed";
 export type RepositoryChatTurnStatus = "starting" | "running" | "completed" | "failed" | "cancelled" | "interrupted";
 export type RepositoryChatMessageRole = "user" | "assistant";
 
-export interface RepositoryChatAttachment {
+export interface RepositoryChatPathAttachment {
+  type?: "repository";
   path: string;
 }
+
+export type RepositoryChatImageMediaType = "image/png" | "image/jpeg" | "image/webp" | "image/gif";
+
+export interface RepositoryChatImageAttachment {
+  type: "image";
+  name: string;
+  mediaType: RepositoryChatImageMediaType;
+  data: string;
+}
+
+export type RepositoryChatAttachment = RepositoryChatPathAttachment | RepositoryChatImageAttachment;
 
 export interface RepositoryChatSession {
   sessionId: string;

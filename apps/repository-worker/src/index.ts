@@ -21,6 +21,7 @@ import type {
   ChatEditStartInput,
   PersistedRunEventPage,
   RepositoryChatCreateInput,
+  RepositoryChatImageMediaType,
   RepositoryChatRenameInput,
   RepositoryChatRetryInput,
   RepositoryChatSendInput,
@@ -206,8 +207,19 @@ function chatSendInput(value: unknown): RepositoryChatSendInput {
   }
   if (value.attachments !== undefined && !Array.isArray(value.attachments)) throw new Error("attachments must be an array.");
   const attachments = (value.attachments ?? []).map((attachment) => {
-    if (!isRecord(attachment) || Object.keys(attachment).some((field) => field !== "path") || typeof attachment.path !== "string") {
+    if (!isRecord(attachment)) {
       throw new Error("Chat attachment is invalid.");
+    }
+    if (attachment.type === "image") {
+      if (Object.keys(attachment).some((field) => !["type", "name", "mediaType", "data"].includes(field)) ||
+          typeof attachment.name !== "string" || typeof attachment.mediaType !== "string" || typeof attachment.data !== "string") {
+        throw new Error("Chat image attachment is invalid.");
+      }
+      return { type: "image" as const, name: attachment.name, mediaType: attachment.mediaType as RepositoryChatImageMediaType, data: attachment.data };
+    }
+    if (Object.keys(attachment).some((field) => !["type", "path"].includes(field)) || typeof attachment.path !== "string" ||
+        (attachment.type !== undefined && attachment.type !== "repository")) {
+      throw new Error("Chat repository attachment is invalid.");
     }
     return { path: attachment.path };
   });

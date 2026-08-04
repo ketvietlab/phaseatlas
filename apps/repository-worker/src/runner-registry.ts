@@ -413,6 +413,7 @@ export interface ProviderProcessOptions {
   args: string[];
   cwd: string;
   stdin?: string;
+  onStdinReady?: (stdin: { write(data: string): void; end(): void }) => void;
   signal: AbortSignal;
   onStdout: (chunk: string) => void;
   onStderr?: (chunk: string) => void;
@@ -497,7 +498,27 @@ export function runChildProcess(options: ProviderProcessOptions): Promise<{ stdo
       exitFallback = setTimeout(() => finish(code, childSignal), 250);
       exitFallback.unref();
     });
-    if (options.stdin) child.stdin.end(options.stdin);
+    if (options.onStdinReady) {
+      try {
+        options.onStdinReady({
+          write: (data) => {
+            if (!child.stdin.destroyed && child.stdin.writable) child.stdin.write(data);
+          },
+          end: () => {
+            if (!child.stdin.destroyed && child.stdin.writable) child.stdin.end();
+          },
+        });
+      } catch (error) {
+        if (settled) return;
+        settled = true;
+        if (exitFallback) clearTimeout(exitFallback);
+        if (forceTermination) clearTimeout(forceTermination);
+        options.signal.removeEventListener("abort", abort);
+        child.stdin.end();
+        terminate("SIGTERM");
+        reject(error);
+      }
+    } else if (options.stdin) child.stdin.end(options.stdin);
     else child.stdin.end();
   });
 }

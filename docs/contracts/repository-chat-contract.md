@@ -33,13 +33,16 @@ reuses the original user message without mutating the interrupted attempt.
 ## Messages and attachments
 
 Messages are checkout-owned operational data with a durable, gap-free sequence per session. Public
-send requests contain bounded text and an optional bounded list of repository-relative attachment
-references. The worker rejects traversal, `.git` targets, secret-like files, absolute paths, and
-unknown fields.
+send requests contain bounded text and an optional bounded list of repository-relative references or
+user-supplied images. The worker rejects traversal, `.git` targets, secret-like files, absolute paths,
+unknown fields, unsupported image media types, and images outside the per-file or aggregate limits.
 
-Attachments are references for provider context, not a generic local-file API. The provider receives
-only safe paths beneath the worker's fixed repository root. Credential-shaped message content is
-redacted before persistence, and raw environments or provider payloads are never stored.
+Repository attachments are references for provider context, not a generic local-file API. The
+provider receives only safe paths beneath the worker's fixed repository root. Image attachments are
+explicit user-provided visual context encoded in the typed chat request; they are treated as
+untrusted content, validated before persistence, and projected only into providers that support the
+declared media type. Credential-shaped message content is redacted before persistence, and raw
+environments or provider payloads are never stored.
 
 ## Read-only execution
 
@@ -54,7 +57,9 @@ response into a canonical task result.
 
 ## Normalized event stream
 
-Provider-specific output is projected into shared activity:
+Provider-specific output is projected incrementally into shared activity. An assistant delta is
+persisted and published as it arrives; the renderer does not wait for provider completion before
+showing readable content:
 
 ```text
 chat.turn.status

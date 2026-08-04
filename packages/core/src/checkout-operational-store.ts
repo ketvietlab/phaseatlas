@@ -68,7 +68,14 @@ function parsePayload(value: unknown): Record<string, unknown> {
 function parseAttachments(value: unknown): RepositoryChatAttachment[] {
   if (typeof value !== "string") throw new Error("Operational store contains invalid chat attachments.");
   const parsed = JSON.parse(value) as unknown;
-  if (!Array.isArray(parsed) || parsed.some((item) => !item || typeof item !== "object" || Array.isArray(item) || typeof (item as { path?: unknown }).path !== "string")) {
+  if (!Array.isArray(parsed) || parsed.some((item) => {
+    if (!item || typeof item !== "object" || Array.isArray(item)) return true;
+    const attachment = item as Record<string, unknown>;
+    if (attachment.type === "image") {
+      return typeof attachment.name !== "string" || typeof attachment.mediaType !== "string" || typeof attachment.data !== "string";
+    }
+    return (attachment.type !== undefined && attachment.type !== "repository") || typeof attachment.path !== "string";
+  })) {
     throw new Error("Operational store contains invalid chat attachments.");
   }
   return parsed as RepositoryChatAttachment[];
