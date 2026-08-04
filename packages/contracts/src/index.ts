@@ -279,6 +279,7 @@ export interface PlanningStartInput {
   target: PlanningTarget;
   runnerId: string;
   model?: string;
+  reasoningEffort?: string;
   request: string;
 }
 
@@ -291,6 +292,7 @@ export interface TaskContentStartInput {
   taskKeys: string[];
   runnerId: string;
   model?: string;
+  reasoningEffort?: string;
 }
 
 export type TaskContentRunStatus = "starting" | "running" | "completed" | "failed" | "cancelled";
@@ -411,12 +413,14 @@ export interface AgentRunCreateInput {
 export interface AgentRunStartInput extends AgentRunCreateInput {
   runnerId: string;
   model?: string;
+  reasoningEffort?: string;
 }
 
 export interface AgentRunActionQuery {
   taskKey: string;
   runnerId: string;
   model?: string;
+  reasoningEffort?: string;
 }
 
 export interface AgentRunActionAvailability {
@@ -433,6 +437,7 @@ export interface AgentRunRecoveryInput {
   decision: AgentRunRecoveryDecision;
   runnerId?: string;
   model?: string;
+  reasoningEffort?: string;
 }
 
 export interface AgentRunCancellationResult {
@@ -552,6 +557,7 @@ export interface AgentRunSummary {
   sandbox: AgentSandbox;
   runnerId: string;
   model?: string;
+  reasoningEffort?: string;
   status: PersistedRunStatus;
   parentRunId?: string;
   freshness?: AgentResultFreshness;
@@ -627,6 +633,7 @@ export interface RepositoryChatSession {
   checkoutId: string;
   runnerId: string;
   model: string;
+  reasoningEffort?: string;
   title: string;
   state: RepositoryChatSessionState;
   createdAt: string;
@@ -650,6 +657,7 @@ export interface RepositoryChatTurn {
   status: RepositoryChatTurnStatus;
   runnerId: string;
   model: string;
+  reasoningEffort?: string;
   userMessageId: string;
   assistantMessageId?: string;
   parentTurnId?: string;
@@ -660,6 +668,7 @@ export interface RepositoryChatTurn {
 export interface RepositoryChatCreateInput {
   runnerId: string;
   model: string;
+  reasoningEffort?: string;
   title?: string;
 }
 
@@ -703,6 +712,7 @@ export interface ChatEditSpec {
   readonly baseRevision: string;
   readonly runnerId: string;
   readonly model: string;
+  readonly reasoningEffort?: string;
   readonly prompt: string;
   readonly scope: TaskScope;
   readonly sandbox: "workspace-write";
@@ -718,6 +728,7 @@ export interface ChatEditConfirmation {
   baseRevision: string;
   runnerId: string;
   model: string;
+  reasoningEffort?: string;
   scope: TaskScope;
   isolatedWorktree: true;
   reviewRequired: true;
@@ -744,6 +755,7 @@ export interface ChatEditResult {
   nextAction: string;
   runnerId: string;
   model: string;
+  reasoningEffort?: string;
   baseRevision: string;
   createdAt: string;
   updatedAt: string;

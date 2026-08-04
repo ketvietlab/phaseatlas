@@ -46,7 +46,7 @@ import {
   WorktreeLeaseManager,
 } from "@phaseatlas/core";
 import { watch, type FSWatcher } from "chokidar";
-import { assertRunnerModel, RunnerRegistry } from "./runner-registry.js";
+import { assertRunnerSelection, RunnerRegistry } from "./runner-registry.js";
 import { TerminalSessionManager } from "./terminal-session-manager.js";
 import { RepositoryChatAdapterRegistry } from "./chat-adapter-registry.js";
 import { RepositoryChatRuntime } from "./repository-chat-runtime.js";
@@ -174,15 +174,19 @@ function terminalCreateInput(value: unknown): Partial<TerminalCreateInput> {
 
 function chatCreateInput(value: unknown): RepositoryChatCreateInput {
   if (!isRecord(value)) throw new Error("Chat session input is required.");
-  const allowed = new Set(["runnerId", "model", "title"]);
+  const allowed = new Set(["runnerId", "model", "reasoningEffort", "title"]);
   if (Object.keys(value).some((field) => !allowed.has(field))) throw new Error("Chat session input contains unsupported fields.");
   if (typeof value.runnerId !== "string" || typeof value.model !== "string") {
     throw new Error("runnerId and model are required.");
   }
   if (value.title !== undefined && typeof value.title !== "string") throw new Error("title must be a string.");
+  if (value.reasoningEffort !== undefined && (typeof value.reasoningEffort !== "string" || !value.reasoningEffort.trim())) {
+    throw new Error("reasoningEffort must be a non-empty string.");
+  }
   return {
     runnerId: value.runnerId,
     model: value.model,
+    ...(typeof value.reasoningEffort === "string" ? { reasoningEffort: value.reasoningEffort.trim() } : {}),
     ...(typeof value.title === "string" ? { title: value.title } : {}),
   };
 }
@@ -265,6 +269,9 @@ function planningInput(value: unknown): PlanningStartInput {
   if (input.model !== undefined && typeof input.model !== "string") {
     throw new Error("model must be a string.");
   }
+  if (input.reasoningEffort !== undefined && (typeof input.reasoningEffort !== "string" || !input.reasoningEffort.trim())) {
+    throw new Error("reasoningEffort must be a non-empty string.");
+  }
   if (!input.target || typeof input.target !== "object") throw new Error("target is required.");
   const targetValue = input.target as Record<string, unknown>;
   let target: PlanningTarget;
@@ -284,6 +291,7 @@ function planningInput(value: unknown): PlanningStartInput {
     runnerId: (input.runnerId as string).trim(),
     request: (input.request as string).trim(),
     ...(typeof input.model === "string" && input.model.trim() ? { model: input.model.trim() } : {}),
+    ...(typeof input.reasoningEffort === "string" ? { reasoningEffort: input.reasoningEffort.trim() } : {}),
   };
 }
 
@@ -318,7 +326,7 @@ function agentRunInput(value: unknown): AgentRunCreateInput {
 function agentRunStartInput(value: unknown): AgentRunStartInput {
   if (!isRecord(value)) throw new Error("Agent run start input is required.");
   const allowedFields = new Set([
-    "taskKey", "expectedTaskRevision", "expectedCheckoutId", "action", "requestedSandbox", "runnerId", "model",
+    "taskKey", "expectedTaskRevision", "expectedCheckoutId", "action", "requestedSandbox", "runnerId", "model", "reasoningEffort",
   ]);
   if (Object.keys(value).some((field) => !allowedFields.has(field))) {
     throw new Error("Agent run start input contains unsupported fields.");
@@ -327,19 +335,23 @@ function agentRunStartInput(value: unknown): AgentRunStartInput {
   if (value.model !== undefined && (typeof value.model !== "string" || !value.model.trim())) {
     throw new Error("model must be a non-empty string.");
   }
+  if (value.reasoningEffort !== undefined && (typeof value.reasoningEffort !== "string" || !value.reasoningEffort.trim())) {
+    throw new Error("reasoningEffort must be a non-empty string.");
+  }
   const request = agentRunInput(Object.fromEntries(
-    Object.entries(value).filter(([field]) => field !== "runnerId" && field !== "model"),
+    Object.entries(value).filter(([field]) => !["runnerId", "model", "reasoningEffort"].includes(field)),
   ));
   return {
     ...request,
     runnerId: value.runnerId.trim(),
     ...(typeof value.model === "string" ? { model: value.model.trim() } : {}),
+    ...(typeof value.reasoningEffort === "string" ? { reasoningEffort: value.reasoningEffort.trim() } : {}),
   };
 }
 
 function agentRunActionQuery(value: unknown): AgentRunActionQuery {
   if (!isRecord(value)) throw new Error("Agent run action query is required.");
-  const allowedFields = new Set(["taskKey", "runnerId", "model"]);
+  const allowedFields = new Set(["taskKey", "runnerId", "model", "reasoningEffort"]);
   if (Object.keys(value).some((field) => !allowedFields.has(field))) {
     throw new Error("Agent run action query contains unsupported fields.");
   }
@@ -348,16 +360,20 @@ function agentRunActionQuery(value: unknown): AgentRunActionQuery {
   if (value.model !== undefined && (typeof value.model !== "string" || !value.model.trim())) {
     throw new Error("model must be a non-empty string.");
   }
+  if (value.reasoningEffort !== undefined && (typeof value.reasoningEffort !== "string" || !value.reasoningEffort.trim())) {
+    throw new Error("reasoningEffort must be a non-empty string.");
+  }
   return {
     taskKey: value.taskKey.trim(),
     runnerId: value.runnerId.trim(),
     ...(typeof value.model === "string" ? { model: value.model.trim() } : {}),
+    ...(typeof value.reasoningEffort === "string" ? { reasoningEffort: value.reasoningEffort.trim() } : {}),
   };
 }
 
 function agentRunRecoveryInput(value: unknown): AgentRunRecoveryInput {
   if (!isRecord(value)) throw new Error("Agent run recovery input is required.");
-  const allowedFields = new Set(["runId", "decision", "runnerId", "model"]);
+  const allowedFields = new Set(["runId", "decision", "runnerId", "model", "reasoningEffort"]);
   if (Object.keys(value).some((field) => !allowedFields.has(field))) {
     throw new Error("Agent run recovery input contains unsupported fields.");
   }
@@ -369,11 +385,15 @@ function agentRunRecoveryInput(value: unknown): AgentRunRecoveryInput {
   if (value.model !== undefined && (typeof value.model !== "string" || !value.model.trim())) {
     throw new Error("model must be a non-empty string.");
   }
+  if (value.reasoningEffort !== undefined && (typeof value.reasoningEffort !== "string" || !value.reasoningEffort.trim())) {
+    throw new Error("reasoningEffort must be a non-empty string.");
+  }
   return {
     runId: value.runId,
     decision: value.decision,
     ...(typeof value.runnerId === "string" ? { runnerId: value.runnerId.trim() } : {}),
     ...(typeof value.model === "string" ? { model: value.model.trim() } : {}),
+    ...(typeof value.reasoningEffort === "string" ? { reasoningEffort: value.reasoningEffort.trim() } : {}),
   };
 }
 
@@ -481,7 +501,7 @@ function startPlanning(input: PlanningStartInput): { runId: string } {
         queueDelta(`PhaseAtlas · Checking runner · ${input.runnerId}\n`);
         const descriptor = await runner.describe();
         if (!descriptor.available) throw new Error(descriptor.unavailableReason || `${descriptor.name} is unavailable.`);
-        assertRunnerModel(descriptor, input.model);
+        assertRunnerSelection(descriptor, input.model, input.reasoningEffort);
 
         status("running");
         heartbeatStage = `${descriptor.name} active`;
@@ -543,10 +563,14 @@ function taskContentInput(value: unknown): TaskContentStartInput {
     throw new Error("runnerId must be a non-empty string.");
   }
   if (value.model !== undefined && typeof value.model !== "string") throw new Error("model must be a string.");
+  if (value.reasoningEffort !== undefined && (typeof value.reasoningEffort !== "string" || !value.reasoningEffort.trim())) {
+    throw new Error("reasoningEffort must be a non-empty string.");
+  }
   return {
     taskKeys: [...new Set((value.taskKeys as string[]).map((taskKey) => taskKey.trim()))],
     runnerId: value.runnerId.trim(),
     ...(typeof value.model === "string" && value.model.trim() ? { model: value.model.trim() } : {}),
+    ...(typeof value.reasoningEffort === "string" ? { reasoningEffort: value.reasoningEffort.trim() } : {}),
   };
 }
 
@@ -620,7 +644,7 @@ function startTaskContent(input: TaskContentStartInput): { runId: string } {
         const runner = runners.get(input.runnerId);
         const descriptor = await runner.describe();
         if (!descriptor.available) throw new Error(descriptor.unavailableReason || `${descriptor.name} is unavailable.`);
-        assertRunnerModel(descriptor, input.model);
+        assertRunnerSelection(descriptor, input.model, input.reasoningEffort);
         status("running");
         await mapConcurrent(tasks, 4, async (task) => {
           const taskKey = `${task.key.workspaceSlug}/${task.key.taskId}`;
@@ -642,6 +666,7 @@ function startTaskContent(input: TaskContentStartInput): { runId: string } {
                   runnerId: input.runnerId,
                   request: `Initialize the approved body for canonical task ${taskKey}.`,
                   ...(input.model ? { model: input.model } : {}),
+                  ...(input.reasoningEffort ? { reasoningEffort: input.reasoningEffort } : {}),
                 },
                 canonicalTasks: snapshot.tasks,
                 workspaces,
@@ -731,7 +756,7 @@ async function agentRunActions(
   }
   if (!descriptor.available) commonReasons.push(descriptor.unavailableReason || `${descriptor.name} is unavailable.`);
   try {
-    assertRunnerModel(descriptor, input.model);
+    assertRunnerSelection(descriptor, input.model, input.reasoningEffort);
   } catch (error) {
     commonReasons.push(error instanceof Error ? error.message : "The selected model is unavailable.");
   }
@@ -802,6 +827,7 @@ async function listAgentRuns(taskKey?: string): Promise<AgentRunSummary[]> {
       sandbox: spec.sandbox,
       runnerId: spec.runnerId,
       ...(spec.model ? { model: spec.model } : {}),
+      ...(spec.reasoningEffort ? { reasoningEffort: spec.reasoningEffort } : {}),
       status: run.status,
       ...(parentRunId ? { parentRunId } : {}),
       ...(review ? { freshness: review.freshness, promotable: review.promotable } : {}),
@@ -821,6 +847,7 @@ async function startAgentRun(input: AgentRunStartInput, parentRunId?: string): P
       taskKey,
       runnerId: input.runnerId,
       ...(input.model ? { model: input.model } : {}),
+      ...(input.reasoningEffort ? { reasoningEffort: input.reasoningEffort } : {}),
     }, { ignoreStartingTaskKey: taskKey, snapshot })).find((candidate) => candidate.action === input.action);
     if (!availability?.available) {
       throw new Error(availability?.blockingReasons.join(" ") || `Action ${input.action} is unavailable.`);
@@ -828,7 +855,7 @@ async function startAgentRun(input: AgentRunStartInput, parentRunId?: string): P
     const runner = runners.get(input.runnerId);
     const descriptor = await runner.describe();
     if (!descriptor.available) throw new Error(descriptor.unavailableReason || `${descriptor.name} is unavailable.`);
-    assertRunnerModel(descriptor, input.model);
+    assertRunnerSelection(descriptor, input.model, input.reasoningEffort);
     const expectedSandbox: AgentSandbox = input.action === "implement" ? "workspace-write" : "read-only";
     const adapter = runners.getExecution(input.runnerId, input.action, expectedSandbox);
     const request: AgentRunCreateInput = {
@@ -841,6 +868,7 @@ async function startAgentRun(input: AgentRunStartInput, parentRunId?: string): P
     const prepared = await executionScheduler.prepare(request, {
       runnerId: input.runnerId,
       ...(input.model ? { model: input.model } : {}),
+      ...(input.reasoningEffort ? { reasoningEffort: input.reasoningEffort } : {}),
     });
     if (parentRunId) operationalStore.linkRunAttempt(prepared.spec.runId, parentRunId);
     const controller = new AbortController();
@@ -855,6 +883,7 @@ async function startAgentRun(input: AgentRunStartInput, parentRunId?: string): P
       controller.signal,
       (event) => send({ type: "agent-run.event", payload: { runId: prepared.spec.runId, event } }),
       input.model,
+      input.reasoningEffort,
     ).then(() => undefined).finally(() => {
       if (activeAgentRuns.get(prepared.spec.runId) === entry) activeAgentRuns.delete(prepared.spec.runId);
     });
@@ -911,6 +940,7 @@ async function recoverAgentRun(input: AgentRunRecoveryInput): Promise<AgentRunRe
     expectedCheckoutId: initialRepository.checkoutId,
     runnerId: input.runnerId,
     ...(input.model ? { model: input.model } : {}),
+    ...(input.reasoningEffort ? { reasoningEffort: input.reasoningEffort } : {}),
   }, input.runId);
   return { originalRunId: input.runId, decision: input.decision, retryRunId: retry.runId };
 }

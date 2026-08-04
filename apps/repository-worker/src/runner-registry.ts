@@ -169,6 +169,26 @@ export function assertRunnerModel(descriptor: RunnerDescriptor, model?: string):
   }
 }
 
+export function assertRunnerSelection(
+  descriptor: RunnerDescriptor,
+  model?: string,
+  reasoningEffort?: string,
+): void {
+  assertRunnerModel(descriptor, model);
+  if (!reasoningEffort) return;
+  if (!model) throw new Error("A model must be selected before choosing reasoning effort.");
+  const selectedModel = descriptor.models.find((candidate) => candidate.id === model);
+  if (!selectedModel?.reasoningEfforts.includes(reasoningEffort)) {
+    throw new Error(`The selected reasoning effort is not supported by ${selectedModel?.displayName ?? model}.`);
+  }
+}
+
+export function codexReasoningEffortArguments(reasoningEffort?: string): string[] {
+  return reasoningEffort
+    ? ["--config", `model_reasoning_effort=${JSON.stringify(reasoningEffort)}`]
+    : [];
+}
+
 export function parseCodexModelCatalog(value: string): RunnerModelDescriptor[] {
   let catalog: unknown;
   try {
@@ -594,6 +614,7 @@ class CodexExecutionAdapter implements ProviderExecutionAdapter {
     spec: AgentRunSpec;
     workingDirectory: string;
     modelId?: string;
+    reasoningEffort?: string;
     signal: AbortSignal;
     emit(event: AgentEventWithoutSequence): void;
   }): Promise<AgentRunResult> {
@@ -621,6 +642,7 @@ class CodexExecutionAdapter implements ProviderExecutionAdapter {
       spec: AgentRunSpec;
       workingDirectory: string;
       modelId?: string;
+      reasoningEffort?: string;
       signal: AbortSignal;
       emit(event: AgentEventWithoutSequence): void;
     },
@@ -641,6 +663,7 @@ class CodexExecutionAdapter implements ProviderExecutionAdapter {
       "--cd", context.workingDirectory,
     ];
     if (context.modelId) args.push("--model", context.modelId);
+    args.push(...codexReasoningEffortArguments(context.reasoningEffort));
     args.push("-");
     let lineBuffer = "";
     let providerFailure = "";
@@ -752,6 +775,7 @@ class ClaudeExecutionAdapter implements ProviderExecutionAdapter {
     spec: AgentRunSpec;
     workingDirectory: string;
     modelId?: string;
+    reasoningEffort?: string;
     signal: AbortSignal;
     emit(event: AgentEventWithoutSequence): void;
   }): Promise<AgentRunResult> {
@@ -944,6 +968,7 @@ class CodexPlanningAdapter implements PlanningRunnerAdapter {
       "--cd", context.repositoryRoot,
     ];
     if (context.input.model?.trim()) args.push("--model", context.input.model.trim());
+    args.push(...codexReasoningEffortArguments(context.input.reasoningEffort?.trim()));
     args.push("-");
     let lineBuffer = "";
     const consumeLine = (line: string): void => {

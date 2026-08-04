@@ -26,6 +26,7 @@ export interface AgentExecutionAdapter {
     spec: AgentRunSpec;
     workingDirectory: string;
     modelId?: string;
+    reasoningEffort?: string;
     signal: AbortSignal;
     emit(event: AgentEventWithoutSequence): void;
   }): Promise<unknown>;
@@ -46,7 +47,7 @@ export class AgentExecutionScheduler {
 
   async prepare(
     request: AgentRunCreateInput,
-    provider: { runnerId: string; model?: string } = { runnerId: "unassigned" },
+    provider: { runnerId: string; model?: string; reasoningEffort?: string } = { runnerId: "unassigned" },
   ): Promise<PreparedAgentRun> {
     const [repository, snapshot] = await Promise.all([this.inspector.describe(), this.inspector.taskSnapshot()]);
     const task = resolveAgentRunTask(request, snapshot);
@@ -70,6 +71,7 @@ export class AgentExecutionScheduler {
         checkoutId: spec.checkout.checkoutId,
         runnerId: provider.runnerId,
         ...(provider.model ? { model: provider.model } : {}),
+        ...(provider.reasoningEffort ? { reasoningEffort: provider.reasoningEffort } : {}),
         createdAt: spec.createdAt,
       });
       this.store.appendEvent({
@@ -116,6 +118,7 @@ export class AgentExecutionScheduler {
     signal: AbortSignal,
     onEvent: (event: PersistedRunEvent) => void = () => undefined,
     modelId?: string,
+    reasoningEffort?: string,
   ): Promise<ValidatedAgentRunResult> {
     const { spec } = prepared;
     if (!adapter.supportedSandboxes.includes(spec.sandbox)) {
@@ -165,6 +168,7 @@ export class AgentExecutionScheduler {
         spec,
         workingDirectory: spec.executionDirectory,
         ...(modelId ? { modelId } : {}),
+        ...(reasoningEffort ? { reasoningEffort } : {}),
         signal,
         emit,
       });

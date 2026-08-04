@@ -32,7 +32,11 @@
   const SELECTED_AGENT_RUN_STORAGE_KEY = "phaseatlas.selected-agent-run.v1";
   const TERMINAL_HEIGHT_STORAGE_KEY = "phaseatlas.terminal-height.v1";
 
-  type RepositoryProviderSettings = Record<string, { runnerId: string; modelId: string }>;
+  type RepositoryProviderSettings = Record<string, {
+    runnerId: string;
+    modelId: string;
+    reasoningEffort?: string;
+  }>;
   type CommandCard = {
     commandId: string;
     command: string;
@@ -69,10 +73,10 @@
   let errorMessage = "";
   let refreshTimer = 0;
   let plannerOpen = false;
-  let providerSettingsOpen = false;
   let plannerRequest = "";
   let plannerRunnerId = "";
   let plannerModel = "";
+  let plannerReasoningEffort = "";
   let planningRunId = "";
   let planningStatus: PlanningStatus | "idle" = "idle";
   let planningLog = "";
@@ -118,6 +122,7 @@
   const reconcilingAgentRuns = new Set<string>();
   let executionPanelElement: HTMLElement;
   let executionConfirmElement: HTMLElement;
+  let agentConfigurationElement: HTMLElement;
   let executionReturnFocus: HTMLElement | null = null;
   let executionActionRequest = 0;
   let agentRunListRequest = 0;
@@ -145,8 +150,12 @@
   $: availableRunners = runners.filter((runner) => runner.available);
   $: selectedRunner = runners.find((runner) => runner.id === plannerRunnerId);
   $: selectedModels = selectedRunner?.models ?? [];
+  $: selectedProviderModel = selectedModels.find((model) => model.id === plannerModel);
+  $: selectedReasoningEfforts = selectedProviderModel?.reasoningEfforts ?? [];
+  $: selectedModelEffortValue = modelEffortValue(plannerModel, plannerReasoningEffort);
   $: providerSelectionReady = Boolean(
-    selectedRunner?.available && selectedModels.some((model) => model.id === plannerModel),
+    selectedRunner?.available && selectedProviderModel &&
+    (!plannerReasoningEffort || selectedReasoningEfforts.includes(plannerReasoningEffort)),
   );
   $: planningActive = planningStatus === "starting" || planningStatus === "running";
   $: normalizedPlanningLog = normalizePlanningLog(planningLog);
@@ -355,6 +364,13 @@
     return runner?.models?.find((model) => model.isDefault)?.id ?? runner?.models?.[0]?.id ?? "";
   }
 
+  function defaultReasoningEffort(modelId: string, runnerId = plannerRunnerId): string {
+    const model = runners.find((runner) => runner.id === runnerId)?.models.find((candidate) => candidate.id === modelId);
+    return model?.defaultReasoningEffort && model.reasoningEfforts.includes(model.defaultReasoningEffort)
+      ? model.defaultReasoningEffort
+      : "";
+  }
+
   function applyRepositoryProviderSettings(checkoutId: string) {
     const saved = readRepositoryProviderSettings()[checkoutId];
     const runner = runners.find((candidate) => candidate.available && candidate.id === saved?.runnerId)
@@ -364,28 +380,56 @@
     plannerModel = runner?.models?.some((model) => model.id === saved?.modelId)
       ? saved.modelId
       : defaultModelId(runner);
+    const selectedModel = runner?.models.find((model) => model.id === plannerModel);
+    plannerReasoningEffort = saved?.reasoningEffort && selectedModel?.reasoningEfforts.includes(saved.reasoningEffort)
+      ? saved.reasoningEffort
+      : selectedModel?.defaultReasoningEffort && selectedModel.reasoningEfforts.includes(selectedModel.defaultReasoningEffort)
+        ? selectedModel.defaultReasoningEffort
+        : "";
     if (plannerRunnerId && plannerModel) persistRepositoryProviderSettings();
   }
 
   function persistRepositoryProviderSettings() {
     if (!selectedCheckoutId || !plannerRunnerId || !plannerModel) return;
     const settings = readRepositoryProviderSettings();
-    settings[selectedCheckoutId] = { runnerId: plannerRunnerId, modelId: plannerModel };
+    settings[selectedCheckoutId] = {
+      runnerId: plannerRunnerId,
+      modelId: plannerModel,
+      ...(plannerReasoningEffort ? { reasoningEffort: plannerReasoningEffort } : {}),
+    };
     window.localStorage.setItem(PROVIDER_SETTINGS_STORAGE_KEY, JSON.stringify(settings));
   }
 
   function selectProviderRunner(runnerId: string) {
     plannerRunnerId = runnerId;
     plannerModel = defaultModelId(runners.find((runner) => runner.id === runnerId));
+    plannerReasoningEffort = defaultReasoningEffort(plannerModel, runnerId);
     persistRepositoryProviderSettings();
     if (executionOpen && selectedTask) void loadExecutionActions(selectedTask);
   }
 
-  function selectProviderModel(modelId: string) {
-    if (!selectedModels.some((model) => model.id === modelId)) return;
+  function modelEffortValue(modelId: string, reasoningEffort: string): string {
+    return `${encodeURIComponent(modelId)}|${encodeURIComponent(reasoningEffort)}`;
+  }
+
+  function selectProviderModelEffort(value: string) {
+    const separator = value.indexOf("|");
+    if (separator < 0) return;
+    const modelId = decodeURIComponent(value.slice(0, separator));
+    const reasoningEffort = decodeURIComponent(value.slice(separator + 1));
+    const model = selectedModels.find((candidate) => candidate.id === modelId);
+    if (!model || reasoningEffort && !model.reasoningEfforts.includes(reasoningEffort)) return;
     plannerModel = modelId;
+    plannerReasoningEffort = reasoningEffort;
     persistRepositoryProviderSettings();
     if (executionOpen && selectedTask) void loadExecutionActions(selectedTask);
+  }
+
+  async function revealAgentConfiguration() {
+    chatOpen = false;
+    await tick();
+    agentConfigurationElement?.scrollIntoView({ behavior: "smooth", block: "center" });
+    agentConfigurationElement?.querySelector<HTMLSelectElement>("select")?.focus({ preventScroll: true });
   }
 
   async function refreshRepository(checkoutId: string) {
@@ -495,7 +539,7 @@
   async function initializeTaskContent(taskKeys: string[], openAfter = false) {
     if (!window.phaseatlas || !taskKeys.length) return;
     if (!providerSelectionReady) {
-      errorMessage = "Choose a provider model from Repository settings before initializing task content.";
+      errorMessage = "Choose an available CLI and model from Agent configuration before initializing task content.";
       return;
     }
     const requestedTaskKeys = [...new Set(taskKeys)].filter((taskKey) => !activeContentTaskKeys.has(taskKey));
@@ -519,6 +563,7 @@
         taskKeys: requestedTaskKeys,
         runnerId: plannerRunnerId,
         ...(plannerModel.trim() ? { model: plannerModel.trim() } : {}),
+        ...(plannerReasoningEffort ? { reasoningEffort: plannerReasoningEffort } : {}),
       });
       contentRuns = {
         ...contentRuns,
@@ -609,7 +654,7 @@
         action,
         sandbox: action === "implement" ? "workspace-write" : "read-only",
         available: false,
-        blockingReasons: ["Choose an available provider model in Repository settings."],
+        blockingReasons: ["Choose an available CLI and model from Agent configuration."],
       }));
       executionActionsLoading = false;
       return;
@@ -619,6 +664,7 @@
         taskKey: canonicalTaskKey(task),
         runnerId: plannerRunnerId,
         ...(plannerModel ? { model: plannerModel } : {}),
+        ...(plannerReasoningEffort ? { reasoningEffort: plannerReasoningEffort } : {}),
       });
       if (requestId === executionActionRequest && checkoutId === selectedCheckoutId) executionActions = nextActions;
     } catch (error) {
@@ -679,6 +725,7 @@
         requestedSandbox: availability.sandbox,
         runnerId: plannerRunnerId,
         ...(plannerModel ? { model: plannerModel } : {}),
+        ...(plannerReasoningEffort ? { reasoningEffort: plannerReasoningEffort } : {}),
       });
       executionConfirmAction = null;
       executionScopeConfirmed = false;
@@ -833,6 +880,7 @@
         ...(decision === "retry" ? {
           runnerId: plannerRunnerId,
           ...(plannerModel ? { model: plannerModel } : {}),
+          ...(plannerReasoningEffort ? { reasoningEffort: plannerReasoningEffort } : {}),
         } : {}),
       });
       executionNotice = decision === "retry" ? "A linked retry was created from the current task revision." : "Interrupted attempt retained as history.";
@@ -1146,6 +1194,7 @@
         runnerId: plannerRunnerId,
         request: plannerRequest.trim(),
         ...(plannerModel.trim() ? { model: plannerModel.trim() } : {}),
+        ...(plannerReasoningEffort ? { reasoningEffort: plannerReasoningEffort } : {}),
       });
       if (!planningRunId) planningRunId = result.runId;
     } catch (error) {
@@ -1247,8 +1296,6 @@
       repositoryWorkbench?.closeActiveSurface();
     } else if (chatOpen) {
       chatOpen = false;
-    } else if (providerSettingsOpen) {
-      providerSettingsOpen = false;
     } else if (executionConfirmAction) {
       executionConfirmAction = null;
       executionScopeConfirmed = false;
@@ -1285,7 +1332,7 @@
     }
     const chatShortcut = event.altKey && !event.metaKey && !event.ctrlKey && !event.shiftKey && event.key.toLowerCase() === "l";
     if (chatShortcut && !event.repeat && selectedCheckoutId) {
-      if (chatOpen || (!executionOpen && !plannerOpen && !providerSettingsOpen && !editorOpen && !contentPanelTask)) {
+      if (chatOpen || (!executionOpen && !plannerOpen && !editorOpen && !contentPanelTask)) {
         event.preventDefault();
         chatOpen = !chatOpen;
       }
@@ -1308,7 +1355,6 @@
         !chatOpen &&
         !executionOpen &&
         !plannerOpen &&
-        !providerSettingsOpen &&
         !contentPanelTask
       ) openRepositoryEditor();
       return;
@@ -1316,7 +1362,7 @@
     const terminalShortcut = modifier && !event.shiftKey && !event.altKey && (
       event.code === "Backquote" || event.key.toLowerCase() === "j"
     );
-    if (terminalShortcut && !event.repeat && !chatOpen && !executionOpen && !plannerOpen && !providerSettingsOpen && !editorOpen && !contentPanelTask) {
+    if (terminalShortcut && !event.repeat && !chatOpen && !executionOpen && !plannerOpen && !editorOpen && !contentPanelTask) {
       event.preventDefault();
       void toggleTerminal();
       return;
@@ -1485,10 +1531,30 @@
               <svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M5 4h14v16H5zM8 8h8M8 12h5M8 16h7"/><path d="m15 11 4 2.5-4 2.5z"/></svg>
               Runs
             </button>
-            <button class="secondary-button" type="button" onclick={() => providerSettingsOpen = true}>
-              <svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.7 1.7 0 0 0 .3 1.9l.1.1-2.8 2.8-.1-.1a1.7 1.7 0 0 0-1.9-.3 1.7 1.7 0 0 0-1 1.5V21h-4v-.1a1.7 1.7 0 0 0-1-1.5 1.7 1.7 0 0 0-1.9.3l-.1.1L4.2 17l.1-.1a1.7 1.7 0 0 0 .3-1.9A1.7 1.7 0 0 0 3.1 14H3v-4h.1a1.7 1.7 0 0 0 1.5-1 1.7 1.7 0 0 0-.3-1.9L4.2 7 7 4.2l.1.1a1.7 1.7 0 0 0 1.9.3A1.7 1.7 0 0 0 10 3.1V3h4v.1a1.7 1.7 0 0 0 1 1.5 1.7 1.7 0 0 0 1.9-.3l.1-.1L19.8 7l-.1.1a1.7 1.7 0 0 0-.3 1.9 1.7 1.7 0 0 0 1.5 1h.1v4h-.1a1.7 1.7 0 0 0-1.5 1z"/></svg>
-              Provider settings
-            </button>
+            <div class:unavailable={!providerSelectionReady} class="provider-quick-controls" bind:this={agentConfigurationElement}>
+              <span class="provider-quick-status" aria-hidden="true"></span>
+              <label>
+                <span class="sr-only">Agent CLI</span>
+                <select value={plannerRunnerId} onchange={(event) => selectProviderRunner(event.currentTarget.value)} aria-label="Agent CLI" title="Agent CLI">
+                  {#each runners as runner}
+                    <option value={runner.id} disabled={!runner.available}>{runner.name}</option>
+                  {/each}
+                </select>
+              </label>
+              <label>
+                <span class="sr-only">Model and reasoning effort</span>
+                <select value={selectedModelEffortValue} onchange={(event) => selectProviderModelEffort(event.currentTarget.value)} disabled={!selectedModels.length} aria-label="Model and reasoning effort" title="Model and reasoning effort">
+                  {#each selectedModels as model}
+                    <optgroup label={model.displayName}>
+                      <option value={modelEffortValue(model.id, "")}>{model.displayName} · Provider default</option>
+                      {#each model.reasoningEfforts as effort}
+                        <option value={modelEffortValue(model.id, effort)}>{model.displayName} · {effort} effort{effort === model.defaultReasoningEffort ? " · default" : ""}</option>
+                      {/each}
+                    </optgroup>
+                  {/each}
+                </select>
+              </label>
+            </div>
             <button class="secondary-button" type="button" onclick={() => openPlanner("repository")}>
               <svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="4" width="7" height="7" rx="1"/><rect x="14" y="4" width="7" height="7" rx="1"/><rect x="3" y="15" width="7" height="6" rx="1"/><path d="M14 18h7M17.5 14.5v7"/></svg>
               Plan workspace
@@ -1711,65 +1777,6 @@
   </main>
 </div>
 
-{#if providerSettingsOpen}
-  <button class="provider-settings-backdrop" type="button" aria-label="Close repository provider settings" onclick={() => providerSettingsOpen = false}></button>
-  <div class="provider-settings-panel" role="dialog" aria-modal="true" aria-labelledby="provider-settings-title">
-    <header>
-      <div>
-        <p class="eyebrow">Repository preferences</p>
-        <h2 id="provider-settings-title">Provider settings</h2>
-        <p>{selectedRepository?.name} · applies to planning and task content</p>
-      </div>
-      <button class="icon-button" type="button" aria-label="Close repository provider settings" onclick={() => providerSettingsOpen = false}>
-        <svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="m7 7 10 10M17 7 7 17"/></svg>
-      </button>
-    </header>
-    <div class="provider-settings-body">
-      <section class="provider-settings-intro">
-        <span class="provider-settings-icon" aria-hidden="true"><svg class="icon" viewBox="0 0 24 24"><path d="M5 5h14v14H5zM9 9h6M9 13h4"/></svg></span>
-        <div><strong>Choose the agent CLI for this repository</strong><p>PhaseAtlas keeps this preference outside source control. Credentials remain managed by the selected CLI.</p></div>
-      </section>
-
-      <label class="provider-settings-field">
-        <span>Provider CLI</span>
-        <select value={plannerRunnerId} onchange={(event) => selectProviderRunner(event.currentTarget.value)}>
-          {#each runners as runner}
-            <option value={runner.id} disabled={!runner.available}>{runner.name}{runner.available ? ` · ${runner.version ?? runner.provider}` : " · unavailable"}</option>
-          {/each}
-        </select>
-      </label>
-
-      <label class="provider-settings-field">
-        <span>Model</span>
-        <select value={plannerModel} onchange={(event) => selectProviderModel(event.currentTarget.value)} disabled={!selectedModels.length}>
-          {#if selectedModels.length}
-            {#each selectedModels as model}
-              <option value={model.id}>{model.displayName}{model.isDefault ? " · provider default" : ""}</option>
-            {/each}
-          {:else}
-            <option value="">No provider models available</option>
-          {/if}
-        </select>
-        <small>{selectedRunner?.modelDiscovery?.status === "available" ? `${selectedModels.length} models discovered from ${selectedRunner.name}.` : selectedRunner?.modelDiscovery?.unavailableReason ?? "Restart PhaseAtlas to load the provider model catalog."}</small>
-      </label>
-
-      {#if selectedRunner}
-        <section class:unavailable={!providerSelectionReady} class="provider-settings-status">
-          <span></span>
-          <div>
-            <strong>{providerSelectionReady ? "Ready for this repository" : "Provider setup required"}</strong>
-            <p>{providerSelectionReady ? `${selectedRunner.name} will use ${selectedModels.find((model) => model.id === plannerModel)?.displayName}.` : selectedRunner.modelDiscovery?.unavailableReason ?? selectedRunner.unavailableReason ?? "Restart PhaseAtlas to refresh provider discovery."}</p>
-          </div>
-        </section>
-      {/if}
-    </div>
-    <footer>
-      <span>Saved automatically on this device</span>
-      <button class="primary-button" type="button" onclick={() => providerSettingsOpen = false} disabled={!providerSelectionReady}>Done</button>
-    </footer>
-  </div>
-{/if}
-
 {#if executionOpen}
   <button class="execution-backdrop" type="button" aria-label="Close execution workbench" onclick={closeExecutionWorkbench}></button>
   <div class="execution-panel" role="dialog" aria-modal="true" aria-labelledby="execution-title" tabindex="-1" bind:this={executionPanelElement}>
@@ -1853,7 +1860,7 @@
             <p>The provider will write only inside a PhaseAtlas-owned worktree. The canonical checkout and task state remain unchanged until a separate review.</p>
             <dl>
               <div><dt>Repository</dt><dd>{selectedRepository?.name}</dd></div>
-              <div><dt>Provider</dt><dd>{selectedRunner?.name} · {selectedModels.find((model) => model.id === plannerModel)?.displayName}</dd></div>
+              <div><dt>Provider</dt><dd>{selectedRunner?.name} · {selectedProviderModel?.displayName}{plannerReasoningEffort ? ` · ${plannerReasoningEffort}` : " · default effort"}</dd></div>
               <div><dt>Sandbox</dt><dd>{executionConfirmAction.sandbox}</dd></div>
               <div><dt>Network</dt><dd>{selectedTask.scope.allowExternalNetwork ? "Allowed by task" : "Blocked"}</dd></div>
             </dl>
@@ -1872,7 +1879,7 @@
               <div>
                 <div class="execution-run-kicker"><span class="run-status-orbit" data-status={selectedAgentRun.status}><i></i></span><span>{selectedAgentRun.status.replaceAll("_", " ")}</span><code>{selectedAgentRun.runId.slice(0, 8)}</code></div>
                 <h3 id="selected-run-title">{actionLabel(selectedAgentRun.action)} · {selectedAgentRun.taskKey}</h3>
-                <p>{selectedAgentRun.runnerId}{selectedAgentRun.model ? ` / ${selectedAgentRun.model}` : ""} · revision {selectedAgentRun.taskRevision.slice(0, 10)}</p>
+                <p>{selectedAgentRun.runnerId}{selectedAgentRun.model ? ` / ${selectedAgentRun.model}` : ""}{selectedAgentRun.reasoningEffort ? ` / ${selectedAgentRun.reasoningEffort} effort` : ""} · revision {selectedAgentRun.taskRevision.slice(0, 10)}</p>
               </div>
               <div class="execution-run-actions">
                 {#if isAgentRunActive(selectedAgentRun)}
@@ -2024,37 +2031,14 @@
 
     <div class="planner-body">
       <section class="planner-config">
-        <div class="planner-step-heading"><span>01</span><div><strong>Choose a runner</strong><small>Provider credentials stay inside the repository worker.</small></div></div>
-        <div class="runner-fields">
-          <label>
-            <span>Runner</span>
-            <select value={plannerRunnerId} onchange={(event) => selectProviderRunner(event.currentTarget.value)} disabled={planningActive}>
-              {#each runners as runner}
-                <option value={runner.id} disabled={!runner.available}>{runner.name}{runner.available ? ` · ${runner.version ?? runner.provider}` : " · unavailable"}</option>
-              {/each}
-            </select>
-          </label>
-          <label>
-            <span>Model</span>
-            <select value={plannerModel} onchange={(event) => selectProviderModel(event.currentTarget.value)} disabled={planningActive || !selectedModels.length}>
-              {#if selectedModels.length}
-                {#each selectedModels as model}
-                  <option value={model.id}>{model.displayName}{model.isDefault ? " · default" : ""}</option>
-                {/each}
-              {:else}
-                <option value="">Model catalog unavailable</option>
-              {/if}
-            </select>
-          </label>
-        </div>
-        {#if selectedRunner}
-          <div class:unavailable={!selectedRunner.available} class="runner-summary">
-            <span class="runner-status-dot"></span>
-            <div><strong>{selectedRunner.name}</strong><small>{selectedRunner.available ? selectedRunner.capabilities.join(" · ") : selectedRunner.unavailableReason}</small></div>
+        <div class="planner-step-heading"><span>01</span><div><strong>Active agent configuration</strong><small>Change CLI, model, or effort from the always-visible repository bar.</small></div></div>
+        <div class:unavailable={!providerSelectionReady} class="runner-summary">
+          <span class="runner-status-dot"></span>
+          <div>
+            <strong>{selectedRunner?.name ?? "No runner available"} · {selectedProviderModel?.displayName ?? "No model"}</strong>
+            <small>{plannerReasoningEffort ? `${plannerReasoningEffort} reasoning effort` : "Provider default reasoning effort"}</small>
           </div>
-        {:else}
-          <div class="runner-summary unavailable"><span class="runner-status-dot"></span><div><strong>No runner available</strong><small>Install or authenticate a supported CLI in the desktop environment.</small></div></div>
-        {/if}
+        </div>
 
         <div class="planner-step-heading request-heading"><span>02</span><div><strong>Describe the outcome</strong><small>The runner may inspect the repository but cannot write to it.</small></div></div>
         <div class="planning-target" data-target={plannerMode}>
@@ -2223,6 +2207,7 @@
       {runners}
       runnerId={plannerRunnerId}
       modelId={plannerModel}
+      reasoningEffort={plannerReasoningEffort}
       onClose={() => chatOpen = false}
       onOpenExplorer={() => {
         chatOpen = false;
@@ -2233,9 +2218,8 @@
         plannerRequest = request;
         openPlanner(selectedWorkspaceSlug ? "workspace" : "repository");
       }}
-      onOpenProviderSettings={() => {
-        chatOpen = false;
-        providerSettingsOpen = true;
+      onShowAgentConfiguration={() => {
+        void revealAgentConfiguration();
       }}
     />
   {/key}

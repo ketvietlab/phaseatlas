@@ -20,7 +20,7 @@ import {
   isSafeAgentPath,
   type WorktreeLeaseManager,
 } from "@phaseatlas/core";
-import { assertRunnerModel } from "./runner-registry.js";
+import { assertRunnerSelection } from "./runner-registry.js";
 import type { ChatEditAdapter } from "./chat-edit-adapter-registry.js";
 
 const execFileAsync = promisify(execFile);
@@ -108,7 +108,7 @@ export class ChatEditRuntime {
     const forbiddenPaths = normalizePaths(input.scope?.forbiddenPaths ?? [], "forbiddenPaths");
     const descriptor = (await this.runners.list()).find((candidate) => candidate.id === session.runnerId);
     if (!descriptor?.available) throw new Error("The selected provider is unavailable.");
-    assertRunnerModel(descriptor, session.model);
+    assertRunnerSelection(descriptor, session.model, session.reasoningEffort);
     this.adapters.get(session.runnerId);
     const repository = await this.inspector.describe();
     if (repository.checkoutId !== this.checkoutId) throw new Error("Repository checkout identity changed.");
@@ -123,7 +123,16 @@ export class ChatEditRuntime {
       allowDatabaseMigrations: false,
       allowExternalNetwork: false,
     };
-    const confirmationMaterial = JSON.stringify({ editId, sessionId, checkoutId: this.checkoutId, baseRevision, runnerId: session.runnerId, model: session.model, scope });
+    const confirmationMaterial = JSON.stringify({
+      editId,
+      sessionId,
+      checkoutId: this.checkoutId,
+      baseRevision,
+      runnerId: session.runnerId,
+      model: session.model,
+      reasoningEffort: session.reasoningEffort,
+      scope,
+    });
     const confirmationDigest = createHash("sha256").update(confirmationMaterial).digest("hex");
     const spec: ChatEditSpec = {
       schemaVersion: "phaseatlas.chat-edit/v1",
@@ -133,6 +142,7 @@ export class ChatEditRuntime {
       baseRevision,
       runnerId: session.runnerId,
       model: session.model,
+      ...(session.reasoningEffort ? { reasoningEffort: session.reasoningEffort } : {}),
       prompt,
       scope,
       sandbox: "workspace-write",
@@ -150,6 +160,7 @@ export class ChatEditRuntime {
       baseRevision,
       runnerId: session.runnerId,
       model: session.model,
+      ...(session.reasoningEffort ? { reasoningEffort: session.reasoningEffort } : {}),
       scope,
       isolatedWorktree: true,
       reviewRequired: true,
@@ -174,7 +185,7 @@ export class ChatEditRuntime {
     if (currentBase !== spec.baseRevision) throw new Error("Repository base changed; prepare and review the edit scope again.");
     const descriptor = (await this.runners.list()).find((candidate) => candidate.id === spec.runnerId);
     if (!descriptor?.available) throw new Error("The confirmed provider is unavailable.");
-    assertRunnerModel(descriptor, spec.model);
+    assertRunnerSelection(descriptor, spec.model, spec.reasoningEffort);
     const adapter = this.adapters.get(spec.runnerId);
     const controller = new AbortController();
     const completion = this.execute(spec, adapter, controller);
@@ -212,6 +223,7 @@ export class ChatEditRuntime {
       nextAction: typeof completed?.nextAction === "string" ? completed.nextAction : "Confirm the bounded edit attempt.",
       runnerId: spec.runnerId,
       model: spec.model,
+      ...(spec.reasoningEffort ? { reasoningEffort: spec.reasoningEffort } : {}),
       baseRevision: spec.baseRevision,
       createdAt: spec.createdAt,
       updatedAt: run.updatedAt,
@@ -370,6 +382,7 @@ export class ChatEditRuntime {
           baseRevision: spec.baseRevision,
           runnerId: spec.runnerId,
           model: spec.model,
+          ...(spec.reasoningEffort ? { reasoningEffort: spec.reasoningEffort } : {}),
           scope: spec.scope,
         },
       };
