@@ -1,10 +1,48 @@
 import { fileURLToPath } from "node:url";
+import { readFileSync } from "node:fs";
 import path from "node:path";
 import { app, BrowserWindow, dialog, ipcMain, shell } from "electron";
 import { RepositoryProcessManager } from "./repository-process-manager.js";
 
 app.setName("PhaseAtlas");
-app.setPath("userData", path.join(app.getPath("appData"), app.name));
+app.setPath("userData", process.env.PHASEATLAS_USER_DATA_PATH || path.join(app.getPath("appData"), app.name));
+
+interface ReleasePolicy {
+  schemaVersion: "phaseatlas.release/v1";
+  channel: "development" | "release";
+  updateMode: "disabled" | "manual";
+  signedMetadata: boolean;
+}
+
+function releasePolicy(): ReleasePolicy {
+  if (!app.isPackaged) {
+    return { schemaVersion: "phaseatlas.release/v1", channel: "development", updateMode: "disabled", signedMetadata: false };
+  }
+  const policyPath = path.join(process.resourcesPath, "release-policy.json");
+  let policy: unknown;
+  try {
+    policy = JSON.parse(readFileSync(policyPath, "utf8")) as unknown;
+  } catch {
+    throw new Error("Packaged PhaseAtlas requires a valid release policy.");
+  }
+  if (!policy || typeof policy !== "object") throw new Error("Packaged release policy is invalid.");
+  const candidate = policy as Record<string, unknown>;
+  if (
+    candidate.schemaVersion !== "phaseatlas.release/v1" ||
+    !["development", "release"].includes(String(candidate.channel)) ||
+    !["disabled", "manual"].includes(String(candidate.updateMode)) ||
+    typeof candidate.signedMetadata !== "boolean"
+  ) throw new Error("Packaged release policy is invalid.");
+  if (candidate.channel === "development" && (candidate.updateMode !== "disabled" || candidate.signedMetadata)) {
+    throw new Error("Development artifacts must disable update activity.");
+  }
+  if (candidate.channel === "release" && (candidate.updateMode !== "manual" || !candidate.signedMetadata)) {
+    throw new Error("Release artifacts require manually initiated signed updates.");
+  }
+  return candidate as unknown as ReleasePolicy;
+}
+
+const packagedReleasePolicy = releasePolicy();
 
 const currentDirectory = path.dirname(fileURLToPath(import.meta.url));
 const workerEntry = process.env.PHASEATLAS_WORKER_ENTRY ||
@@ -175,9 +213,34 @@ function registerIpc(): void {
   ipcMain.handle("phaseatlas:chat:edits:recover", (_event, checkoutId: string, input) => repositories.recoverChatEdit(checkoutId, input));
 }
 
-app.whenReady().then(() => {
+app.whenReady().then(async () => {
   registerIpc();
-  createWindow();
+  const window = createWindow();
+
+  const smokeRepository = process.env.PHASEATLAS_RELEASE_SMOKE_REPOSITORY;
+  if (process.env.PHASEATLAS_RELEASE_SMOKE === "1" && smokeRepository && !process.env.PHASEATLAS_UI_DEV_URL) {
+    try {
+      await new Promise<void>((resolve, reject) => {
+        window.webContents.once("did-finish-load", () => resolve());
+        window.webContents.once("did-fail-load", (_event, code, description) => reject(new Error(`${code}: ${description}`)));
+      });
+      const repository = await repositories.open(smokeRepository, window.webContents.id);
+      const [workspaces, snapshot] = await Promise.all([
+        repositories.listWorkspaces(repository.checkoutId),
+        repositories.taskSnapshot(repository.checkoutId),
+      ]);
+      process.stdout.write(`PHASEATLAS_RELEASE_SMOKE_OK ${JSON.stringify({
+        channel: packagedReleasePolicy.channel,
+        repository: repository.name,
+        workspaces: workspaces.length,
+        tasks: snapshot.tasks.length,
+      })}\n`);
+      app.quit();
+    } catch (error) {
+      process.stderr.write(`PHASEATLAS_RELEASE_SMOKE_FAILED ${error instanceof Error ? error.message : String(error)}\n`);
+      app.exit(1);
+    }
+  }
 
   app.on("activate", () => {
     if (BrowserWindow.getAllWindows().length === 0) createWindow();

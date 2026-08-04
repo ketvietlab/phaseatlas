@@ -6,6 +6,7 @@ export default defineConfig({
   platform: "node",
   target: "node24",
   external: ["node:sqlite", "node-pty"],
+  noExternal: [/.*/],
   clean: true,
   esbuildOptions(options) {
     options.supported = { ...options.supported, "node-colon-prefix-import": true };

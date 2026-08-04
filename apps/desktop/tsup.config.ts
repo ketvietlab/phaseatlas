@@ -7,6 +7,7 @@ export default defineConfig([
     platform: "node",
     target: "node24",
     external: ["electron", "node:sqlite"],
+    noExternal: [/.*/],
     esbuildOptions(options) {
       options.supported = { ...options.supported, "node-colon-prefix-import": true };
     },
@@ -18,6 +19,7 @@ export default defineConfig([
     platform: "node",
     target: "node24",
     external: ["electron"],
+    noExternal: [/.*/],
     clean: false,
     outExtension: () => ({ js: ".cjs" }),
   },
