@@ -36,6 +36,9 @@ may contain a documented breaking change.
 
 ### Security
 
+- The first macOS artifacts are ad-hoc signed and not notarized. Verify the ZIP against
+  `SHA256SUMS.txt` before running `xattr -dr com.apple.quarantine /Applications/PhaseAtlas.app` when
+  Gatekeeper blocks the application.
 - Provider credentials, executable paths, raw payloads, worktree paths, process identifiers, and
   arbitrary commands remain outside the renderer contract.
 - Model output cannot directly publish canonical task contracts, promote evidence, or mark a task
