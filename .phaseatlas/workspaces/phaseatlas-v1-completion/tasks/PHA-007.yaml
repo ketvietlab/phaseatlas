@@ -3,7 +3,7 @@ id: PHA-007
 title: Build the execution history and run workbench
 kind: code
 phase: execution-experience
-state: in_review
+state: done
 priority: high
 objective: Users can start permitted task actions, inspect durable run history and live normalized
   events, review commands and changed files, cancel active runs, and recognize interrupted or stale

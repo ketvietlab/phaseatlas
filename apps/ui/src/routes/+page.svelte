@@ -1421,7 +1421,7 @@
 <div class="app-shell">
   <aside class:mobile-open={menuOpen} class="sidebar" aria-label="Repository navigation">
     <div class="brand-lockup">
-      <img class="product-mark" src="./assets/phaseatlas-logo-mark.png" width="1254" height="1254" alt="" />
+      <img class="product-mark" src={theme === "dark" ? "./assets/phaseatlas-logo-mark-dark.png" : "./assets/phaseatlas-logo-mark.png"} width="1254" height="1254" alt="" />
       <span class="product-name"><strong>PhaseAtlas</strong><small>Unify AI Tool</small></span>
     </div>
 
@@ -1460,7 +1460,7 @@
 
   <header class="mobile-topbar">
     <div class="mobile-brand">
-      <img class="product-mark" src="./assets/phaseatlas-logo-mark.png" width="1254" height="1254" alt="" />
+      <img class="product-mark" src={theme === "dark" ? "./assets/phaseatlas-logo-mark-dark.png" : "./assets/phaseatlas-logo-mark.png"} width="1254" height="1254" alt="" />
       <span class="product-name"><strong>PhaseAtlas</strong><small>Unify AI Tool</small></span>
     </div>
     <button class="icon-button" type="button" aria-label={menuOpen ? "Close menu" : "Open menu"} aria-expanded={menuOpen} onclick={() => (menuOpen = !menuOpen)}>
@@ -1754,7 +1754,7 @@
             {/if}
           {:else if !errorMessage}
             <div class="card empty-state">
-              <img src="./assets/phaseatlas-logo-mark.png" width="1254" height="1254" alt="" aria-hidden="true" />
+              <img src={theme === "dark" ? "./assets/phaseatlas-logo-mark-dark.png" : "./assets/phaseatlas-logo-mark.png"} width="1254" height="1254" alt="" aria-hidden="true" />
               <div><h2>This repository has no workspaces</h2><p>Let a read-only runner inspect the repository and propose its first workspace with starter tasks.</p><button class="primary-button empty-state-action" type="button" onclick={() => openPlanner("repository")}>Plan first workspace</button></div>
             </div>
           {/if}

@@ -245,7 +245,7 @@
 <WorkbenchShell {theme} {panelOpen} {panelHeight} {panelMaximized}>
   <header class="ide-titlebar" slot="titlebar">
     <div class="ide-product">
-      <img class="ide-mark" src="/assets/phaseatlas-logo-mark.png" alt="" />
+      <img class="ide-mark" src={theme === "dark" ? "./assets/phaseatlas-logo-mark-dark.png" : "./assets/phaseatlas-logo-mark.png"} alt="" />
       <div>
         <strong>Repository editor</strong>
         <small>PhaseAtlas · {checkoutId.slice(0, 8).toUpperCase()}</small>
@@ -343,7 +343,7 @@
         </footer>
       {:else}
         <div class="editor-empty">
-          <img src="/assets/phaseatlas-logo-mark.png" alt="" />
+          <img src={theme === "dark" ? "./assets/phaseatlas-logo-mark-dark.png" : "./assets/phaseatlas-logo-mark.png"} alt="" />
           <p class="empty-eyebrow">Repository workbench</p>
           <h2>Open a file from Explorer</h2>
           <p>Review task bodies and nearby source files without leaving PhaseAtlas.</p>

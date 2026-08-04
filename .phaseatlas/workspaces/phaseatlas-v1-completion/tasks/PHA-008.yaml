@@ -3,7 +3,7 @@ id: PHA-008
 title: Package and verify the desktop release pipeline
 kind: operations
 phase: distribution
-state: planned
+state: done
 priority: normal
 objective: PhaseAtlas produces installable desktop artifacts that load the static renderer, locate
   bundled worker code, preserve sandbox boundaries, and enforce explicit signing and update policies
@@ -25,8 +25,12 @@ scope:
     - pnpm-workspace.yaml
     - apps/desktop/package.json
     - apps/desktop/src/main.ts
+    - apps/desktop/src/repository-process-manager.ts
     - apps/desktop/tsup.config.ts
     - apps/ui/package.json
+    - apps/ui/src/lib/RepositoryWorkbench.svelte
+    - apps/ui/src/routes/+page.svelte
+    - apps/ui/static/assets/phaseatlas-logo-mark-dark.png
     - apps/ui/vite.config.ts
     - scripts
     - docs/development.md
@@ -69,3 +73,5 @@ acceptanceCriteria:
 verification: []
 evidenceRequirements:
   - type: human_review
+content:
+  path: PHA-008.md

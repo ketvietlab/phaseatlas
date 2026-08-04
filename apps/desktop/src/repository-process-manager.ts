@@ -283,6 +283,7 @@ class RepositoryWorkerHandle {
   private rejectReady!: (error: Error) => void;
   private readySettled = false;
   private readonly readyTimeout: NodeJS.Timeout;
+  private stderrTail = "";
 
   constructor(
     workerEntry: string,
@@ -305,7 +306,11 @@ class RepositoryWorkerHandle {
     this.child.on("message", (message: unknown) => this.onMessage(message));
     this.child.on("exit", (code) => this.onExit(code));
     this.child.stdout?.on("data", (chunk) => console.info(`[repository-worker] ${chunk}`));
-    this.child.stderr?.on("data", (chunk) => console.error(`[repository-worker] ${chunk}`));
+    this.child.stderr?.on("data", (chunk) => {
+      const diagnostic = String(chunk);
+      this.stderrTail = `${this.stderrTail}${diagnostic}`.slice(-4_000);
+      console.error(`[repository-worker] ${diagnostic}`);
+    });
   }
 
   async call<T>(method: RepositoryWorkerMethod, params?: Record<string, unknown>): Promise<T> {
@@ -339,7 +344,8 @@ class RepositoryWorkerHandle {
   }
 
   private onExit(code: number): void {
-    const error = new Error(`Repository worker exited with code ${code}.`);
+    const diagnostic = this.stderrTail.trim();
+    const error = new Error(`Repository worker exited with code ${code}.${diagnostic ? ` ${diagnostic}` : ""}`);
     this.failReady(error);
     for (const pending of this.pending.values()) {
       clearTimeout(pending.timeout);
