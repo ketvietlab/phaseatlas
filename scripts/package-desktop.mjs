@@ -1,6 +1,6 @@
 import { execFile } from "node:child_process";
 import { createRequire } from "node:module";
-import { cp, mkdir, mkdtemp, readFile, rename, rm, writeFile } from "node:fs/promises";
+import { cp, mkdir, mkdtemp, readFile, rename, rm, stat, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { promisify } from "node:util";
@@ -17,6 +17,13 @@ const execFileAsync = promisify(execFile);
 if (process.platform !== "darwin") throw new Error("PhaseAtlas desktop packaging currently supports macOS hosts only.");
 const channel = process.env.PHASEATLAS_RELEASE_CHANNEL || "development";
 if (!["development", "release"].includes(channel)) throw new Error("PHASEATLAS_RELEASE_CHANNEL must be development or release.");
+const rootPackage = JSON.parse(await readFile(path.join(repositoryRoot, "package.json"), "utf8"));
+const applicationVersion = rootPackage.version;
+const buildNumber = process.env.PHASEATLAS_BUILD_NUMBER || "1";
+if (typeof applicationVersion !== "string" || !/^\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?$/.test(applicationVersion)) {
+  throw new Error("The root package manifest must declare a valid semantic application version.");
+}
+if (!/^\d+$/.test(buildNumber)) throw new Error("PHASEATLAS_BUILD_NUMBER must contain decimal digits only.");
 
 const releaseInputs = channel === "release" ? {
   signingIdentity: process.env.PHASEATLAS_SIGN_IDENTITY,
@@ -30,6 +37,7 @@ if (releaseInputs) {
   const missing = Object.entries(releaseInputs).filter(([, value]) => !value).map(([key]) => key);
   if (missing.length) throw new Error(`Release packaging requires explicit signing, notarization, and signed update inputs: ${missing.join(", ")}.`);
   if (!String(releaseInputs.updateFeedUrl).startsWith("https://")) throw new Error("Release update feed must use HTTPS.");
+  await execFileAsync("openssl", ["dgst", "-sha256", "-verify", releaseInputs.updatePublicKey, "-signature", releaseInputs.updateSignature, releaseInputs.updateManifest]);
 }
 
 for (const required of [
@@ -50,20 +58,21 @@ if (!electronApplication.endsWith("Electron.app")) throw new Error("Installed El
 
 await rm(artifactRoot, { recursive: true, force: true });
 await mkdir(artifactRoot, { recursive: true });
-await cp(electronApplication, applicationPath, { recursive: true, preserveTimestamps: true });
+await cp(electronApplication, applicationPath, { recursive: true, preserveTimestamps: true, verbatimSymlinks: true });
 await rename(
   path.join(applicationPath, "Contents", "MacOS", "Electron"),
   path.join(applicationPath, "Contents", "MacOS", "PhaseAtlas"),
 );
 
 const plist = path.join(applicationPath, "Contents", "Info.plist");
-const plistSet = (key, type, value) => execFileAsync("plutil", ["-replace", key, `-${type}`, value, plist]);
+const plistSetAt = (target, key, type, value) => execFileAsync("plutil", ["-replace", key, `-${type}`, value, target]);
+const plistSet = (key, type, value) => plistSetAt(plist, key, type, value);
 await plistSet("CFBundleDisplayName", "string", "PhaseAtlas");
 await plistSet("CFBundleExecutable", "string", "PhaseAtlas");
 await plistSet("CFBundleIdentifier", "string", "vn.ketviet.phaseatlas");
 await plistSet("CFBundleName", "string", "PhaseAtlas");
-await plistSet("CFBundleShortVersionString", "string", "0.1.0");
-await plistSet("CFBundleVersion", "string", "1");
+await plistSet("CFBundleShortVersionString", "string", applicationVersion);
+await plistSet("CFBundleVersion", "string", buildNumber);
 for (const key of [
   "ElectronAsarIntegrity",
   "NSAppTransportSecurity",
@@ -73,6 +82,22 @@ for (const key of [
   "NSCameraUsageDescription",
   "NSMicrophoneUsageDescription",
 ]) await execFileAsync("plutil", ["-remove", key, plist]).catch(() => undefined);
+
+const frameworksPath = path.join(applicationPath, "Contents", "Frameworks");
+for (const suffix of ["", " (GPU)", " (Plugin)", " (Renderer)"]) {
+  const electronName = `Electron Helper${suffix}`;
+  const phaseAtlasName = `PhaseAtlas Helper${suffix}`;
+  const electronHelper = path.join(frameworksPath, `${electronName}.app`);
+  const phaseAtlasHelper = path.join(frameworksPath, `${phaseAtlasName}.app`);
+  const helperPlist = path.join(electronHelper, "Contents", "Info.plist");
+  await rename(
+    path.join(electronHelper, "Contents", "MacOS", electronName),
+    path.join(electronHelper, "Contents", "MacOS", phaseAtlasName),
+  );
+  await plistSetAt(helperPlist, "CFBundleIdentifier", "string", `vn.ketviet.phaseatlas.helper${suffix.replaceAll(/[^A-Za-z]/g, "")}`);
+  await plistSetAt(helperPlist, "CFBundleName", "string", phaseAtlasName);
+  await rename(electronHelper, phaseAtlasHelper);
+}
 
 const temporaryRoot = await mkdtemp(path.join(os.tmpdir(), "phaseatlas-package-"));
 try {
@@ -94,15 +119,20 @@ await rm(path.join(resourcesPath, "default_app.asar"), { force: true });
 await mkdir(path.join(resourcesPath, "app", "desktop"), { recursive: true });
 await mkdir(path.join(resourcesPath, "repository-worker"), { recursive: true });
 await mkdir(path.join(resourcesPath, "ui"), { recursive: true });
-await mkdir(path.join(resourcesPath, "node_modules"), { recursive: true });
+const packagedNodePty = path.join(resourcesPath, "node_modules", "node-pty");
+const nodePtyPrebuild = `${process.platform}-${process.arch}`;
+await mkdir(path.join(packagedNodePty, "prebuilds"), { recursive: true });
 await cp(path.join(repositoryRoot, "apps", "desktop", "dist", "main.js"), path.join(resourcesPath, "app", "desktop", "main.js"));
 await cp(path.join(repositoryRoot, "apps", "desktop", "dist", "preload.cjs"), path.join(resourcesPath, "app", "desktop", "preload.cjs"));
 await cp(path.join(repositoryRoot, "apps", "repository-worker", "dist", "index.js"), path.join(resourcesPath, "repository-worker", "index.js"));
 await cp(path.join(repositoryRoot, "apps", "ui", "build"), path.join(resourcesPath, "ui", "build"), { recursive: true });
-await cp(nodePtyPackage, path.join(resourcesPath, "node_modules", "node-pty"), { recursive: true, preserveTimestamps: true });
+await cp(path.join(nodePtyPackage, "package.json"), path.join(packagedNodePty, "package.json"));
+await cp(path.join(nodePtyPackage, "LICENSE"), path.join(packagedNodePty, "LICENSE"));
+await cp(path.join(nodePtyPackage, "lib"), path.join(packagedNodePty, "lib"), { recursive: true, preserveTimestamps: true, verbatimSymlinks: true });
+await cp(path.join(nodePtyPackage, "prebuilds", nodePtyPrebuild), path.join(packagedNodePty, "prebuilds", nodePtyPrebuild), { recursive: true, preserveTimestamps: true, verbatimSymlinks: true });
 await writeFile(path.join(resourcesPath, "app", "package.json"), JSON.stringify({
   name: "phaseatlas-desktop",
-  version: "0.1.0",
+  version: applicationVersion,
   private: true,
   type: "module",
   main: "desktop/main.js",
@@ -110,6 +140,8 @@ await writeFile(path.join(resourcesPath, "app", "package.json"), JSON.stringify(
 
 const policy = {
   schemaVersion: "phaseatlas.release/v1",
+  applicationVersion,
+  buildNumber,
   channel,
   updateMode: channel === "release" ? "manual" : "disabled",
   signedMetadata: channel === "release",
@@ -123,7 +155,6 @@ const policy = {
   } : {}),
 };
 if (releaseInputs) {
-  await execFileAsync("openssl", ["dgst", "-sha256", "-verify", releaseInputs.updatePublicKey, "-signature", releaseInputs.updateSignature, releaseInputs.updateManifest]);
   const updateRoot = path.join(resourcesPath, "update");
   await mkdir(updateRoot);
   await cp(releaseInputs.updatePublicKey, path.join(updateRoot, "public-key.pem"));
@@ -136,7 +167,7 @@ const manifestRoots = ["app", "repository-worker", "ui", "node_modules/node-pty"
 const manifestFiles = {};
 for (const root of manifestRoots) {
   const absolute = path.join(resourcesPath, root);
-  const relativeFiles = (await import("node:fs/promises")).stat(absolute).then((entry) => entry.isDirectory())
+  const relativeFiles = (await stat(absolute)).isDirectory()
     ? await filesBelow(absolute)
     : [""];
   for (const relative of relativeFiles) {
@@ -156,7 +187,7 @@ const signArguments = channel === "release"
 await execFileAsync("codesign", signArguments, { maxBuffer: 4 * 1024 * 1024 });
 await execFileAsync("codesign", ["--verify", "--deep", "--strict", applicationPath]);
 
-let archivePath = path.join(artifactRoot, `PhaseAtlas-0.1.0-darwin-${process.arch}.zip`);
+let archivePath = path.join(artifactRoot, `PhaseAtlas-${applicationVersion}-darwin-${process.arch}.zip`);
 await execFileAsync("ditto", ["-c", "-k", "--sequesterRsrc", "--keepParent", applicationPath, archivePath]);
 if (releaseInputs) {
   await execFileAsync("xcrun", ["notarytool", "submit", archivePath, "--keychain-profile", releaseInputs.notarizationProfile, "--wait"], { maxBuffer: 8 * 1024 * 1024 });

@@ -9,8 +9,8 @@ Development keeps the UI and desktop runtime separate:
 3. The main process owns repository selection and utility-process lifecycle.
 4. Opening a repository starts `@phaseatlas/repository-worker` with a fixed repository root.
 
-The packaged topology will load a static renderer. Packaging, signing, notarization, and updates are
-deliberately outside the first vertical slice.
+The packaged topology loads the generated static renderer and repository worker from the application
+bundle. It does not require Vite, pnpm, the source checkout, or workspace package resolution at runtime.
 
 ## Commands
 
@@ -19,6 +19,8 @@ pnpm dev       # build runtime, start renderer, restart Electron on backend chan
 pnpm check     # TypeScript and Svelte checks
 pnpm test      # core contract tests
 pnpm build     # production builds for every workspace
+pnpm package:desktop # build an ad-hoc-signed macOS development artifact
+pnpm verify:desktop  # verify its layout, manifest, signature, renderer, and worker
 ```
 
 The Svelte renderer uses Vite hot reload. Changes under contracts, core, repository worker, or
@@ -94,3 +96,59 @@ The review must list Git-derived files and a patch while the canonical checkout 
 Accept only with a clean, unchanged checkout; test Discard and Retain separately. After Retain, restart the
 desktop worker and verify that Resume review or Discard is required. `Option+L` toggles Chat on macOS
 (`Alt+L` elsewhere), and the Explorer action opens the existing repository file browser.
+
+## Desktop distribution
+
+### Supported artifact
+
+The distribution pipeline currently supports the architecture of the macOS packaging host. With Node
+24 or newer, run `pnpm package:desktop` and then `pnpm verify:desktop`. The first command creates:
+
+- `artifacts/desktop/darwin-<architecture>/PhaseAtlas.app`
+- `artifacts/desktop/darwin-<architecture>/PhaseAtlas-<version>-darwin-<architecture>.zip`
+
+The development application is ad-hoc signed and has update activity disabled. Verification checks the
+PhaseAtlas-owned SHA-256 manifest, sandbox settings, typed preload, code signature, credential exclusion,
+static renderer load, and a bundled worker inspection using isolated application-support data.
+
+### Release inputs
+
+Release packaging is fail-closed. Set `PHASEATLAS_RELEASE_CHANNEL=release` and provide all of the
+following outside the repository:
+
+- `PHASEATLAS_BUILD_NUMBER`: a decimal macOS bundle build number; defaults to `1` only for local builds.
+- `PHASEATLAS_SIGN_IDENTITY`: a Developer ID Application signing identity.
+- `PHASEATLAS_NOTARIZATION_PROFILE`: an existing `notarytool` keychain profile.
+- `PHASEATLAS_UPDATE_FEED_URL`: an HTTPS location for manually initiated updates.
+- `PHASEATLAS_UPDATE_PUBLIC_KEY_FILE`: the public verification key.
+- `PHASEATLAS_UPDATE_MANIFEST_FILE`: the release metadata to verify and bundle.
+- `PHASEATLAS_UPDATE_SIGNATURE_FILE`: its detached SHA-256 signature.
+
+The public key and signed metadata are verified offline before signing. Missing inputs, an HTTP feed,
+or an invalid signature stop the build. Private keys, provider credentials, environment files, and
+notarization credentials are never copied into the application. This milestone records update policy
+but deliberately provides no background update check or automatic installer.
+
+### Installation and release evidence
+
+1. Run `pnpm check`, `pnpm test`, `pnpm package:desktop`, and `pnpm verify:desktop` with the pinned Node
+   runtime.
+2. Record the Git revision, application version, build number, architecture, ZIP SHA-256, manifest file
+   count, `codesign --verify --deep --strict` result, notarization result, and packaged smoke output.
+3. Copy the verified application to a disposable location or `/Applications` only after the currently
+   running PhaseAtlas instance has stopped. Launch it with fresh application-support state and open a
+   non-sensitive test repository.
+4. Keep the evidence, ZIP, and bundle digest together. Do not publish the artifact until a maintainer
+   has reviewed the recorded evidence.
+
+### Manual update and rollback
+
+Before a manual update, download release metadata and its detached signature from the configured HTTPS
+feed, verify it with the bundled public key, compare the artifact SHA-256 with the signed manifest, and
+run the bundle verifier against the unpacked application. Stop PhaseAtlas before replacing the installed
+copy; application-support data remains outside the bundle.
+
+For rollback, retain the previous verified ZIP and evidence. Stop PhaseAtlas, restore that application,
+verify its code signature and recorded digest again, then launch with the existing application-support
+directory. Repository task contracts remain in Git and operational SQLite remains in application
+support, so replacing the application bundle does not rewrite either authority.

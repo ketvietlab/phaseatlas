@@ -3,7 +3,7 @@ id: PHA-011
 title: Add isolated chat edit mode and task handoff
 kind: code
 phase: agent-chat-editing
-state: in_review
+state: done
 priority: high
 objective: A task-independent chat can enter an explicitly confirmed edit mode in an isolated
   worktree, present validated diffs and verification for review, and optionally create a reviewed

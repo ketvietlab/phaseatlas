@@ -12,6 +12,7 @@ authority for task contracts and promoted evidence; desktop storage owns volatil
 flowchart TB
   UI["Svelte renderer"] --> Bridge["Preload bridge"]
   Bridge --> Main["Electron main · supervisor"]
+  Main --> Policy["Packaged release policy"]
   Main --> A["Repository worker A"]
   Main --> B["Repository worker B"]
   A --> WA["Workspace projections"]
@@ -35,6 +36,11 @@ without exposing `ipcRenderer` itself.
 The main process owns application lifecycle, native dialogs, repository selection, worker supervision,
 and message routing. Domain parsing and agent execution do not run in the main event loop.
 
+In a packaged application, the main process reads a fail-closed release policy from the application
+resources, loads only the bundled static renderer, and resolves the repository-worker entry inside the
+same bundle. Development artifacts disable updates. Release artifacts permit only a manually initiated
+flow backed by pre-verified signed metadata; no renderer capability can change that policy.
+
 ### Repository worker
 
 Every active checkout receives one Electron utility process. Its repository root is fixed at process
@@ -51,6 +57,7 @@ Preload                      Explicit, typed capability boundary
 Electron main                Trusted supervisor; no domain-heavy work
 Repository worker            Trusted for exactly one granted checkout
 Agent subprocess/worktree    Sandboxed execution with task-scoped permissions
+Release tooling              External signing/notarization credentials; public metadata only in bundle
 ```
 
 Planning runners are provider-specific only behind the repository-worker adapter boundary. The
@@ -76,3 +83,15 @@ repository never combines canonical YAML with legacy candidates, and an invalid 
 activates the legacy path.
 
 An agent can propose state and produce evidence. It cannot directly declare a canonical task complete.
+
+## Distribution boundary
+
+The macOS bundle contains Electron, the desktop main/preload output, the static renderer, the bundled
+repository worker, and the native terminal runtime. A generated SHA-256 manifest covers PhaseAtlas-owned
+files. Packaging validates the renderer sandbox strings, typed preload exposure, absence of workspace
+imports, absence of credential-like custom files, and the application code signature before the smoke
+test can start it.
+
+The application bundle is replaceable; canonical tasks remain in each repository and checkout-owned
+operational SQLite remains under PhaseAtlas application support. This separation makes rollback an
+application replacement rather than a task or execution-state migration.
