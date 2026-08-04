@@ -112,10 +112,15 @@ The development application is ad-hoc signed and has update activity disabled. V
 PhaseAtlas-owned SHA-256 manifest, sandbox settings, typed preload, code signature, credential exclusion,
 static renderer load, and a bundled worker inspection using isolated application-support data.
 
-### Release inputs
+### Release modes
 
-Release packaging is fail-closed. Set `PHASEATLAS_RELEASE_CHANNEL=release` and provide all of the
-following outside the repository:
+The public GitHub workflow temporarily creates unsigned distribution artifacts by setting both
+`PHASEATLAS_RELEASE_CHANNEL=release` and `PHASEATLAS_RELEASE_UNSIGNED=1`. The application is ad-hoc
+signed so its nested executables remain internally consistent, but it is not identified by an Apple
+Developer ID, notarized, or eligible for automatic updates.
+
+The future Developer ID path remains fail-closed. Set `PHASEATLAS_RELEASE_CHANNEL=release`, omit
+`PHASEATLAS_RELEASE_UNSIGNED`, and provide all of the following outside the repository:
 
 - `PHASEATLAS_BUILD_NUMBER`: a decimal macOS bundle build number; defaults to `1` only for local builds.
 - `PHASEATLAS_SIGN_IDENTITY`: a Developer ID Application signing identity.
@@ -132,29 +137,41 @@ or an invalid signature stop the build. Private keys, provider credentials, envi
 notarization credentials are never copied into the application. This milestone records update policy
 but deliberately provides no background update check or automatic installer.
 
-Production tags use the protected workflow in `.github/workflows/release.yml` to perform these steps
-for Apple Silicon and Intel, then publish the notarized ZIPs, signed update manifest, public key, and
-checksums to GitHub Releases. See the [release guide](releasing.md) for the SemVer, changelog, secrets,
-tagging, and recovery contract.
+Production tags use the workflow in `.github/workflows/release.yml` to build ad-hoc-signed ZIPs for
+Apple Silicon and Intel and publish them with SHA-256 checksums. See the [release guide](releasing.md)
+for the SemVer, changelog, quarantine, tagging, and recovery contract.
 
 ### Installation and release evidence
 
 1. Run `pnpm check`, `pnpm test`, `pnpm package:desktop`, and `pnpm verify:desktop` with the pinned Node
    runtime.
 2. Record the Git revision, application version, build number, architecture, ZIP SHA-256, manifest file
-   count, `codesign --verify --deep --strict` result, notarization result, and packaged smoke output.
+   count, `codesign --verify --deep --strict` result, signing mode, and packaged smoke output.
 3. Copy the verified application to a disposable location or `/Applications` only after the currently
    running PhaseAtlas instance has stopped. Launch it with fresh application-support state and open a
    non-sensitive test repository.
 4. Keep the evidence, ZIP, and bundle digest together. Do not publish the artifact until a maintainer
    has reviewed the recorded evidence.
 
+Because the current GitHub artifacts are not notarized, macOS may prevent the first launch. Verify the
+download against `SHA256SUMS.txt`, move `PhaseAtlas.app` into `/Applications`, and try **Control-click →
+Open** first. If Gatekeeper still blocks the verified application, explicitly remove quarantine:
+
+```bash
+xattr -dr com.apple.quarantine /Applications/PhaseAtlas.app
+```
+
+Only run this command for an artifact downloaded from the official PhaseAtlas release and verified
+against its published checksum. Developer ID signing and notarization will replace this temporary
+installation step in a later release.
+
 ### Manual update and rollback
 
-Before a manual update, download release metadata and its detached signature from the configured HTTPS
-feed, verify it with the bundled public key, compare the artifact SHA-256 with the signed manifest, and
-run the bundle verifier against the unpacked application. Stop PhaseAtlas before replacing the installed
-copy; application-support data remains outside the bundle.
+Before a manual update in the current unsigned channel, download the replacement ZIP and
+`SHA256SUMS.txt`, verify the ZIP digest, and run the bundle verifier against the unpacked application.
+Stop PhaseAtlas before replacing the installed copy; application-support data remains outside the
+bundle. The future Developer ID channel additionally verifies signed update metadata with its bundled
+public key.
 
 For rollback, retain the previous verified ZIP and evidence. Stop PhaseAtlas, restore that application,
 verify its code signature and recorded digest again, then launch with the existing application-support

@@ -25,8 +25,9 @@ may contain a documented breaking change.
   handling.
 - Repository-scoped chat with durable conversations, read-only inspection, file references, and a
   separately confirmed isolated edit-and-review workflow.
-- Verified macOS packaging with static renderer and worker bundles, code signing, notarization policy,
-  bundle manifests, smoke verification, and explicit manual update metadata.
+- Verified macOS packaging with static renderer and worker bundles, ad-hoc signing, bundle manifests,
+  smoke verification, dual-architecture GitHub artifacts, and published SHA-256 checksums. Developer
+  ID signing and notarization remain a documented future hardening path.
 - Public release engineering, Semantic Versioning, Keep a Changelog release notes, and contributor
   documentation.
 - MIT licensing for unrestricted use, modification, distribution, sublicensing, and commercial use
@@ -35,6 +36,9 @@ may contain a documented breaking change.
 
 ### Security
 
+- The first macOS artifacts are ad-hoc signed and not notarized. Verify the ZIP against
+  `SHA256SUMS.txt` before running `xattr -dr com.apple.quarantine /Applications/PhaseAtlas.app` when
+  Gatekeeper blocks the application.
 - Provider credentials, executable paths, raw payloads, worktree paths, process identifiers, and
   arbitrary commands remain outside the renderer contract.
 - Model output cannot directly publish canonical task contracts, promote evidence, or mark a task

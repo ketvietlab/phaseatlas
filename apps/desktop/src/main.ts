@@ -24,6 +24,7 @@ interface ReleasePolicy {
   applicationVersion: string;
   buildNumber: string;
   channel: "development" | "release";
+  signingMode: "ad-hoc" | "developer-id";
   updateMode: "disabled" | "manual";
   signedMetadata: boolean;
   update?: {
@@ -41,6 +42,7 @@ function releasePolicy(): ReleasePolicy {
       applicationVersion: app.getVersion(),
       buildNumber: "development",
       channel: "development",
+      signingMode: "ad-hoc",
       updateMode: "disabled",
       signedMetadata: false,
     };
@@ -61,10 +63,15 @@ function releasePolicy(): ReleasePolicy {
     typeof candidate.buildNumber !== "string" ||
     !candidate.buildNumber ||
     !["development", "release"].includes(String(candidate.channel)) ||
+    !["ad-hoc", "developer-id"].includes(String(candidate.signingMode)) ||
     !["disabled", "manual"].includes(String(candidate.updateMode)) ||
     typeof candidate.signedMetadata !== "boolean"
   ) throw new Error("Packaged release policy is invalid.");
-  if (candidate.channel === "development" && (candidate.updateMode !== "disabled" || candidate.signedMetadata)) {
+  if (candidate.channel === "development" && (
+    candidate.signingMode !== "ad-hoc" ||
+    candidate.updateMode !== "disabled" ||
+    candidate.signedMetadata
+  )) {
     throw new Error("Development artifacts must disable update activity.");
   }
   if (candidate.channel === "development" && candidate.update !== undefined) {
@@ -72,6 +79,12 @@ function releasePolicy(): ReleasePolicy {
   }
   if (candidate.channel === "release") {
     const update = candidate.update as Record<string, unknown> | undefined;
+    if (candidate.signingMode === "ad-hoc") {
+      if (candidate.updateMode !== "disabled" || candidate.signedMetadata || update !== undefined) {
+        throw new Error("Ad-hoc release artifacts must disable update activity.");
+      }
+      return candidate as unknown as ReleasePolicy;
+    }
     if (
       candidate.updateMode !== "manual" ||
       !candidate.signedMetadata ||
