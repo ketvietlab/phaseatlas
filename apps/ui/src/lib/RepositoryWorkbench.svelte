@@ -2,15 +2,22 @@
   import { onMount } from "svelte";
   import type { RepositoryFileDocument, RepositoryFileEntry } from "@phaseatlas/contracts";
   import MonacoEditor from "./MonacoEditor.svelte";
+  import WorkbenchShell from "./WorkbenchShell.svelte";
 
   export let checkoutId: string;
   export let initialPath = "";
   export let theme: "light" | "dark" = "light";
+  export let panelOpen = false;
+  export let panelHeight = 300;
+  export let panelMaximized = false;
+  export let terminalShortcutLabel = "⌘`";
   export let onClose: () => void = () => undefined;
   export let onSaved: (path: string) => void = () => undefined;
+  export let onToggleTerminal: () => void = () => undefined;
 
   type TreeRow = RepositoryFileEntry & { depth: number; parent: string };
   type EditorTab = RepositoryFileDocument & { savedContent: string };
+  type PersistedEditorState = { openPaths: string[]; activePath: string };
 
   let rows: TreeRow[] = [];
   let expanded = new Set<string>();
@@ -19,14 +26,53 @@
   let activePath = "";
   let error = "";
   let saving = false;
+  let monacoEditor: { focus(): void } | undefined;
+  let editorStateReady = false;
 
   $: activeTab = tabs.find((tab) => tab.path === activePath);
   $: dirtyCount = tabs.filter((tab) => tab.content !== tab.savedContent).length;
 
   onMount(() => {
-    void loadRoot();
-    if (initialPath) void openFile(initialPath);
+    void initializeEditor();
   });
+
+  async function initializeEditor() {
+    await loadRoot();
+    const saved = readEditorState();
+    for (const path of saved.openPaths) await openFile(path);
+    if (initialPath) await openFile(initialPath);
+    else if (saved.activePath && tabs.some((tab) => tab.path === saved.activePath)) activePath = saved.activePath;
+    editorStateReady = true;
+    persistEditorState(tabs, activePath);
+  }
+
+  function editorStateKey() {
+    return `phaseatlas.editor-state.v1.${checkoutId}`;
+  }
+
+  function readEditorState(): PersistedEditorState {
+    try {
+      const value = JSON.parse(window.localStorage.getItem(editorStateKey()) ?? "null") as unknown;
+      if (!value || typeof value !== "object" || Array.isArray(value)) return { openPaths: [], activePath: "" };
+      const state = value as Record<string, unknown>;
+      const openPaths = Array.isArray(state.openPaths)
+        ? state.openPaths.filter((path): path is string => typeof path === "string" && path.length > 0 && path.length <= 4096).slice(0, 30)
+        : [];
+      return {
+        openPaths: [...new Set(openPaths)],
+        activePath: typeof state.activePath === "string" ? state.activePath : "",
+      };
+    } catch {
+      return { openPaths: [], activePath: "" };
+    }
+  }
+
+  function persistEditorState(openTabs: EditorTab[], currentPath: string) {
+    window.localStorage.setItem(editorStateKey(), JSON.stringify({
+      openPaths: openTabs.map((tab) => tab.path),
+      activePath: currentPath,
+    } satisfies PersistedEditorState));
+  }
 
   async function loadRoot() {
     if (!window.phaseatlas) return;
@@ -73,6 +119,7 @@
     const existing = tabs.find((tab) => tab.path === path);
     if (existing) {
       activePath = path;
+      if (editorStateReady) persistEditorState(tabs, activePath);
       return;
     }
     error = "";
@@ -80,6 +127,7 @@
       const document = await window.phaseatlas.files.read(checkoutId, path);
       tabs = [...tabs, { ...document, savedContent: document.content }];
       activePath = path;
+      if (editorStateReady) persistEditorState(tabs, activePath);
     } catch (cause) {
       error = cause instanceof Error ? cause.message : `${path} could not be opened.`;
     }
@@ -112,6 +160,12 @@
     const index = tabs.findIndex((candidate) => candidate.path === path);
     tabs = tabs.filter((candidate) => candidate.path !== path);
     if (activePath === path) activePath = tabs[Math.max(index - 1, 0)]?.path ?? "";
+    persistEditorState(tabs, activePath);
+  }
+
+  function activateTab(path: string) {
+    activePath = path;
+    persistEditorState(tabs, activePath);
   }
 
   function requestClose() {
@@ -125,6 +179,10 @@
       return;
     }
     requestClose();
+  }
+
+  export function focusActiveEditor() {
+    monacoEditor?.focus();
   }
 
   function languageFor(path: string) {
@@ -184,8 +242,8 @@
   }
 </script>
 
-<div class="ide-shell" data-theme={theme} role="dialog" aria-modal="true" aria-label="Repository editor">
-  <header class="ide-titlebar">
+<WorkbenchShell {theme} {panelOpen} {panelHeight} {panelMaximized}>
+  <header class="ide-titlebar" slot="titlebar">
     <div class="ide-product">
       <img class="ide-mark" src="/assets/phaseatlas-logo-mark.png" alt="" />
       <div>
@@ -195,6 +253,19 @@
     </div>
     <div class="ide-title-actions">
       {#if dirtyCount}<span class="dirty-summary"><i></i>{dirtyCount} unsaved</span>{/if}
+      <button
+        class:active={panelOpen}
+        class="ide-terminal-toggle"
+        type="button"
+        aria-label={`${panelOpen ? "Close" : "Open"} repository terminal`}
+        aria-pressed={panelOpen}
+        title={`Toggle terminal (${terminalShortcutLabel})`}
+        onclick={onToggleTerminal}
+      >
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m5 7 4.5 5L5 17M12 17h7" /></svg>
+        <span>Terminal</span>
+        <kbd>{terminalShortcutLabel}</kbd>
+      </button>
       <button class="save-button" type="button" onclick={saveActive} disabled={!activeTab || activeTab.content === activeTab.savedContent || saving}>
         <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 4h12l2 2v14H5zM8 4v6h8V4M8 20v-6h8v6" /></svg>
         {saving ? "Saving…" : "Save"}
@@ -204,8 +275,7 @@
       </button>
     </div>
   </header>
-  <div class="ide-body">
-    <aside class="explorer-pane">
+  <aside class="explorer-pane" slot="sidebar">
       <header class="explorer-header">
         <div><span>Workspace</span><strong>Repository files</strong></div>
         <button class="icon-button" type="button" aria-label="Refresh explorer" title="Refresh explorer" onclick={loadRoot}>
@@ -241,12 +311,12 @@
         {/each}
         {#if !rows.length && !error}<p class="tree-empty">This repository has no visible files.</p>{/if}
       </div>
-    </aside>
-    <main class="editor-pane">
+  </aside>
+  <main class="editor-pane" slot="content">
       <div class="editor-tabs" role="tablist" aria-label="Open files">
         {#each tabs as tab}
           <div class:active={tab.path === activePath} class="editor-tab">
-            <button class="tab-select" type="button" role="tab" aria-selected={tab.path === activePath} onclick={() => activePath = tab.path}>
+            <button class="tab-select" type="button" role="tab" aria-selected={tab.path === activePath} onclick={() => activateTab(tab.path)}>
               <span class="tab-file-badge">{tab.path.split(".").pop()?.slice(0, 2).toUpperCase() || "·"}</span>
               <span>{tab.path.split("/").pop()}</span>{#if tab.content !== tab.savedContent}<i title="Unsaved changes"></i>{/if}
             </button>
@@ -264,7 +334,7 @@
           <span>{activeTab.content.length.toLocaleString()} chars</span>
         </div>
         <div class="editor-surface">
-          <MonacoEditor value={activeTab.content} language={languageFor(activeTab.path)} {theme} onChange={updateActiveContent} onSave={saveActive} />
+          <MonacoEditor bind:this={monacoEditor} value={activeTab.content} language={languageFor(activeTab.path)} {theme} onChange={updateActiveContent} onSave={saveActive} {onToggleTerminal} />
         </div>
         <footer class="editor-status">
           <span class:dirty={activeTab.content !== activeTab.savedContent}><i></i>{activeTab.content !== activeTab.savedContent ? "Modified" : "Saved"}</span>
@@ -279,21 +349,11 @@
           <p>Review task bodies and nearby source files without leaving PhaseAtlas.</p>
         </div>
       {/if}
-    </main>
-  </div>
-</div>
+  </main>
+  <div class="workbench-terminal" slot="panel"><slot></slot></div>
+</WorkbenchShell>
 
 <style>
-  .ide-shell {
-    position: fixed;
-    z-index: 120;
-    inset: 0;
-    display: grid;
-    grid-template-rows: 58px minmax(0, 1fr);
-    background: var(--canvas);
-    color: var(--text);
-  }
-
   .ide-titlebar {
     display: flex;
     align-items: center;
@@ -324,18 +384,21 @@
 
   .ide-title-actions { gap: 8px; -webkit-app-region: no-drag; }
   .dirty-summary { gap: 6px; margin-right: 3px; border-radius: var(--radius-full); padding: 4px 8px; background: var(--warning-surface); color: var(--warning-600); font-size: 10px; font-weight: 750; }
-  .ide-shell[data-theme="dark"] .dirty-summary { color: var(--warning-text); }
+  :global([data-theme="dark"]) .dirty-summary { color: var(--warning-text); }
   .dirty-summary i,
   .editor-status i { width: 6px; height: 6px; border-radius: 50%; background: currentColor; }
   .save-button { min-height: 34px; gap: 7px; border: 1px solid var(--brand-600); border-radius: var(--radius-sm); padding: 5px 11px; background: var(--brand-600); color: #fff; font-size: 11px; font-weight: 700; }
   .save-button:hover:not(:disabled) { border-color: var(--brand-700); background: var(--brand-700); }
   .save-button svg { width: 14px; height: 14px; fill: none; stroke: currentColor; stroke-linecap: round; stroke-linejoin: round; stroke-width: 1.8; }
+  .ide-terminal-toggle { display: flex; min-height: 34px; align-items: center; gap: 7px; border: 1px solid var(--border); border-radius: var(--radius-sm); padding: 5px 8px; background: var(--surface-soft); color: var(--text-muted); font-size: 10px; font-weight: 700; }
+  .ide-terminal-toggle:hover,.ide-terminal-toggle.active { border-color: var(--brand-300); background: var(--active-surface); color: var(--active-text); }
+  .ide-terminal-toggle svg { width: 14px; height: 14px; fill: none; stroke: currentColor; stroke-linecap: round; stroke-linejoin: round; stroke-width: 1.8; }
+  .ide-terminal-toggle kbd { border: 1px solid var(--border); border-bottom-width: 2px; border-radius: var(--radius-xs); padding: 1px 4px; background: var(--surface); color: inherit; font: 9px/1.2 "SFMono-Regular", Consolas, monospace; }
   .icon-button { display: grid; width: 32px; height: 32px; place-items: center; border: 1px solid transparent; border-radius: var(--radius-sm); padding: 0; background: transparent; color: var(--text-muted); }
   .icon-button:hover { border-color: var(--border); background: var(--surface-soft); color: var(--text); }
   .icon-button svg { width: 16px; height: 16px; fill: none; stroke: currentColor; stroke-linecap: round; stroke-linejoin: round; stroke-width: 1.8; }
   .ide-close { margin-left: 2px; }
 
-  .ide-body { display: grid; min-height: 0; grid-template-columns: 264px minmax(0, 1fr); }
   .explorer-pane { min-width: 0; overflow: hidden; border-right: 1px solid var(--border); background: var(--surface-soft); }
   .explorer-header { display: flex; height: 58px; align-items: center; justify-content: space-between; border-bottom: 1px solid var(--border-soft); padding: 8px 10px 8px 16px; }
   .explorer-header span,
@@ -390,8 +453,9 @@
   .ide-error { display: grid; grid-template-columns: auto minmax(0, 1fr); gap: 8px; border-bottom: 1px solid color-mix(in srgb, var(--warning-500) 55%, var(--border)); padding: 8px 12px; background: var(--warning-surface); color: var(--warning-text); font-size: 10px; }
   .ide-error strong { color: currentColor; }
   .ide-error span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .workbench-terminal { min-width: 0; min-height: 0; overflow: hidden; }
 
   @keyframes explorer-pulse { to { opacity: .25; transform: rotate(90deg) scale(.7); } }
-  @media (max-width: 760px) { .ide-body { grid-template-columns: 210px minmax(0, 1fr); } .ide-product small { display: none; } }
+  @media (max-width: 760px) { .ide-product small,.ide-terminal-toggle span,.ide-terminal-toggle kbd { display: none; } .ide-terminal-toggle { width: 34px; justify-content: center; padding: 0; } }
   @media (prefers-reduced-motion: reduce) { .tree-chevron { transition: none; } .tree-chevron.loading { animation-duration: 1.5s; } }
 </style>

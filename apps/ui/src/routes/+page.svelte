@@ -31,8 +31,16 @@
   const PROVIDER_SETTINGS_STORAGE_KEY = "phaseatlas.repository-provider-settings.v1";
   const SELECTED_AGENT_RUN_STORAGE_KEY = "phaseatlas.selected-agent-run.v1";
   const TERMINAL_HEIGHT_STORAGE_KEY = "phaseatlas.terminal-height.v1";
+  const WORKBENCH_STATE_STORAGE_KEY = "phaseatlas.workbench-state.v1";
 
   type RepositoryProviderSettings = Record<string, { runnerId: string; modelId: string }>;
+  type PersistedWorkbenchState = {
+    selectedCheckoutId: string;
+    chatOpen: boolean;
+    editorOpen: boolean;
+    terminalOpen: boolean;
+    terminalMaximized: boolean;
+  };
   type CommandCard = {
     commandId: string;
     command: string;
@@ -124,9 +132,10 @@
   let terminalOpen = false;
   let terminalMaximized = false;
   let terminalHeight = 300;
-  let terminalPanel: { focus(): void } | undefined;
-  let repositoryWorkbench: { closeActiveSurface(): void } | undefined;
+  let terminalPanel: { focus(): void; hasFocus(): boolean } | undefined;
+  let repositoryWorkbench: { closeActiveSurface(): void; focusActiveEditor(): void } | undefined;
   let chatOpen = false;
+  let workbenchStateReady = false;
 
   $: selectedRepository = repositories.find(
     (repository) => repository.checkoutId === selectedCheckoutId,
@@ -174,6 +183,16 @@
   $: explorerShortcutLabel = platform === "darwin" ? "⌘⇧E" : "Ctrl+Shift+E";
   $: terminalShortcutLabel = platform === "darwin" ? "⌘`" : "Ctrl+`";
   $: chatShortcutLabel = platform === "darwin" ? "⌥L" : "Alt+L";
+  $: if (workbenchStateReady && selectedCheckoutId) {
+    persistWorkbenchState({
+      selectedCheckoutId,
+      chatOpen,
+      editorOpen,
+      terminalOpen,
+      terminalMaximized,
+    });
+  }
+
   onMount(() => {
     theme = document.documentElement.dataset.theme === "dark" ? "dark" : "light";
     const savedTaskView = window.localStorage.getItem(TASK_VIEW_STORAGE_KEY);
@@ -226,12 +245,50 @@
         window.phaseatlas.repositories.list(),
         window.phaseatlas.runtime.platform(),
       ]);
-      if (repositories[0]) await selectRepository(repositories[0].checkoutId);
+      const savedWorkbenchState = readWorkbenchState();
+      const savedRepository = repositories.find((repository) => repository.checkoutId === savedWorkbenchState?.selectedCheckoutId);
+      const initialRepository = savedRepository ?? repositories[0];
+      if (initialRepository) await selectRepository(initialRepository.checkoutId);
+      if (savedRepository && savedWorkbenchState) restoreWorkbenchState(savedWorkbenchState);
+      workbenchStateReady = true;
     } catch (error) {
       errorMessage = error instanceof Error ? error.message : "PhaseAtlas could not be initialized.";
     } finally {
       loading = false;
     }
+  }
+
+  function readWorkbenchState(): PersistedWorkbenchState | null {
+    try {
+      const value = JSON.parse(window.localStorage.getItem(WORKBENCH_STATE_STORAGE_KEY) ?? "null") as unknown;
+      if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+      const state = value as Record<string, unknown>;
+      if (typeof state.selectedCheckoutId !== "string") return null;
+      return {
+        selectedCheckoutId: state.selectedCheckoutId,
+        chatOpen: state.chatOpen === true,
+        editorOpen: state.editorOpen === true,
+        terminalOpen: state.terminalOpen === true,
+        terminalMaximized: state.terminalOpen === true && state.terminalMaximized === true,
+      };
+    } catch {
+      return null;
+    }
+  }
+
+  function persistWorkbenchState(state: PersistedWorkbenchState) {
+    window.localStorage.setItem(WORKBENCH_STATE_STORAGE_KEY, JSON.stringify(state));
+  }
+
+  function restoreWorkbenchState(state: PersistedWorkbenchState) {
+    chatOpen = state.chatOpen;
+    editorOpen = state.editorOpen;
+    terminalOpen = state.terminalOpen;
+    terminalMaximized = state.terminalOpen && state.terminalMaximized;
+  }
+
+  function clearWorkbenchState() {
+    window.localStorage.removeItem(WORKBENCH_STATE_STORAGE_KEY);
   }
 
   async function openRepository() {
@@ -327,13 +384,21 @@
 
   async function toggleTerminal() {
     if (!selectedCheckoutId) return;
-    terminalOpen = !terminalOpen;
-    if (!terminalOpen) {
-      terminalMaximized = false;
+    if (terminalOpen) {
+      await closeTerminal();
       return;
     }
+    terminalOpen = true;
     await tick();
     terminalPanel?.focus();
+  }
+
+  async function closeTerminal(restoreEditorFocus = true) {
+    terminalOpen = false;
+    terminalMaximized = false;
+    if (!restoreEditorFocus || !editorOpen) return;
+    await tick();
+    repositoryWorkbench?.focusActiveEditor();
   }
 
   function updateTerminalHeight(nextHeight: number) {
@@ -1232,7 +1297,11 @@
       agentEventCursors = {};
       terminalMaximized = false;
       if (repositories[0]) await selectRepository(repositories[0].checkoutId);
-      else terminalOpen = false;
+      else {
+        terminalOpen = false;
+        editorOpen = false;
+        clearWorkbenchState();
+      }
     }
   }
 
@@ -1243,7 +1312,9 @@
   }
 
   function closeCurrentSurface() {
-    if (editorOpen) {
+    if (terminalOpen && terminalPanel?.hasFocus()) {
+      void closeTerminal();
+    } else if (editorOpen) {
       repositoryWorkbench?.closeActiveSurface();
     } else if (chatOpen) {
       chatOpen = false;
@@ -1260,8 +1331,7 @@
     } else if (plannerOpen) {
       closePlanner();
     } else if (terminalOpen) {
-      terminalOpen = false;
-      terminalMaximized = false;
+      void closeTerminal(false);
     } else {
       menuOpen = false;
     }
@@ -1316,7 +1386,7 @@
     const terminalShortcut = modifier && !event.shiftKey && !event.altKey && (
       event.code === "Backquote" || event.key.toLowerCase() === "j"
     );
-    if (terminalShortcut && !event.repeat && !chatOpen && !executionOpen && !plannerOpen && !providerSettingsOpen && !editorOpen && !contentPanelTask) {
+    if (terminalShortcut && !event.repeat && !chatOpen && !executionOpen && !plannerOpen && !providerSettingsOpen && !contentPanelTask) {
       event.preventDefault();
       void toggleTerminal();
       return;
@@ -1399,7 +1469,7 @@
   {#if menuOpen}<button class="sidebar-backdrop" type="button" aria-label="Close menu" onclick={() => (menuOpen = false)}></button>{/if}
 
   <main
-    class:terminal-visible={terminalOpen && Boolean(selectedCheckoutId) && !terminalMaximized}
+    class:terminal-visible={terminalOpen && !editorOpen && Boolean(selectedCheckoutId) && !terminalMaximized}
     class="main"
     id="main-content"
     style={`--terminal-panel-height: ${terminalHeight}px`}
@@ -2257,7 +2327,7 @@
   />
 {/if}
 
-{#if terminalOpen && selectedCheckoutId && selectedRepository}
+{#if terminalOpen && !editorOpen && selectedCheckoutId && selectedRepository}
   {#key selectedCheckoutId}
     <TerminalPanel
       bind:this={terminalPanel}
@@ -2267,10 +2337,7 @@
       height={terminalHeight}
       maximized={terminalMaximized}
       shortcutLabel={terminalShortcutLabel}
-      onClose={() => {
-        terminalOpen = false;
-        terminalMaximized = false;
-      }}
+      onClose={() => void closeTerminal(false)}
       onHeightChange={updateTerminalHeight}
       onToggleMaximized={() => terminalMaximized = !terminalMaximized}
     />
@@ -2283,7 +2350,30 @@
     checkoutId={selectedCheckoutId}
     initialPath={editorInitialPath}
     theme={theme === "dark" ? "dark" : "light"}
+    panelOpen={terminalOpen && Boolean(selectedRepository)}
+    panelHeight={terminalHeight}
+    panelMaximized={terminalMaximized}
+    terminalShortcutLabel={terminalShortcutLabel}
     onClose={() => editorOpen = false}
     onSaved={handleEditorSaved}
-  />
+    onToggleTerminal={() => void toggleTerminal()}
+  >
+    {#if terminalOpen && selectedRepository}
+      {#key selectedCheckoutId}
+        <TerminalPanel
+          bind:this={terminalPanel}
+          checkoutId={selectedCheckoutId}
+          repositoryName={selectedRepository.name}
+          theme={theme === "dark" ? "dark" : "light"}
+          height={terminalHeight}
+          maximized={terminalMaximized}
+          docked={true}
+          shortcutLabel={terminalShortcutLabel}
+          onClose={() => void closeTerminal()}
+          onHeightChange={updateTerminalHeight}
+          onToggleMaximized={() => terminalMaximized = !terminalMaximized}
+        />
+      {/key}
+    {/if}
+  </RepositoryWorkbench>
 {/if}
