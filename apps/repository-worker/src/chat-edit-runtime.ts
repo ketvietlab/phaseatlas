@@ -271,7 +271,19 @@ export class ChatEditRuntime {
   async cancel(editId: string): Promise<ChatEditCancellationResult> {
     const normalized = safeId(editId, "editId");
     const active = this.active.get(normalized);
-    if (!active) return { editId: normalized, disposition: "already_terminal" };
+    if (!active) {
+      if (this.store.getRun(normalized).status !== "starting") {
+        return { editId: normalized, disposition: "already_terminal" };
+      }
+      const terminal = this.store.terminalizeRun({
+        runId: normalized,
+        type: "chat.edit.cancelled",
+        payload: { reason: "approval_cancelled" },
+        status: "cancelled",
+      });
+      if (terminal.event) this.emit(normalized, terminal.event);
+      return { editId: normalized, disposition: "cancelled" };
+    }
     active.controller.abort(new Error("Chat edit cancelled by user."));
     await active.completion.catch(() => undefined);
     return { editId: normalized, disposition: "cancelled" };

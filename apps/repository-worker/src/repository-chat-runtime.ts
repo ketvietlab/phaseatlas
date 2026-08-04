@@ -20,6 +20,27 @@ import { RepositoryChatAdapterRegistry } from "./chat-adapter-registry.js";
 import { safeChatAttachments } from "./chat-attachment-policy.js";
 
 const TERMINAL_CHAT_STATUSES = new Set(["completed", "failed", "cancelled", "interrupted"]);
+const SENSITIVE_ATTACHMENT = /(^|\/)(?:\.env(?:\.|$)|id_(?:rsa|dsa|ecdsa|ed25519)$|credentials?(?:\.|$)|secrets?(?:\.|$)|.*\.(?:pem|p12|pfx|key))$/i;
+const CHAT_IMAGE_MEDIA_TYPES = new Set(["image/png", "image/jpeg", "image/webp", "image/gif"]);
+const MAX_CHAT_IMAGE_BYTES = 5 * 1024 * 1024;
+const MAX_CHAT_IMAGE_TOTAL_BYTES = 16 * 1024 * 1024;
+const CHAT_CONTEXT_TAIL_MESSAGES = 40;
+const CHAT_CONTEXT_SUMMARY_RECENT_MESSAGES = 20;
+const CHAT_CONTEXT_SUMMARY_MAX_CHARS = 3_000;
+
+function shortMessage(value: string, max = 140): string {
+  const compact = value.replace(/\s+/g, " ").trim();
+  return compact.length <= max ? compact : `${compact.slice(0, max).trim()}…`;
+}
+
+function summarizeMessages(messages: RepositoryChatMessage[], prefix = "") {
+  const lines = messages
+    .slice(-CHAT_CONTEXT_SUMMARY_RECENT_MESSAGES)
+    .map((message) => `${message.role === "user" ? "User" : "Assistant"}: ${shortMessage(message.content)}`);
+  const summary = `${prefix}${lines.join("\n")}`.trim();
+  if (!summary) return undefined;
+  return summary.length > CHAT_CONTEXT_SUMMARY_MAX_CHARS ? `${summary.slice(0, CHAT_CONTEXT_SUMMARY_MAX_CHARS).trim()}…` : summary;
+}
 
 function publicText(value: string, maxLength: number): string {
   const sanitized = value
@@ -226,6 +247,40 @@ export class RepositoryChatRuntime {
     void entry.completion.catch(() => undefined);
   }
 
+  private sessionContextPrompt(turn: RepositoryChatTurn, allMessages: RepositoryChatMessage[]): { messages: RepositoryChatMessage[]; summary?: string } {
+    const keepStart = Math.max(allMessages.length - CHAT_CONTEXT_TAIL_MESSAGES, 0);
+    const keptMessages = allMessages.slice(keepStart);
+    const contextState = this.store.getChatSessionContext(turn.sessionId);
+    const oldestKeptSequence = keptMessages.at(0)?.sequence ?? 0;
+
+    const unsummarizedArchived = contextState
+      ? allMessages.filter((message) => message.sequence > contextState.summarizedThroughSequence && message.sequence < oldestKeptSequence)
+      : allMessages.slice(0, Math.max(allMessages.length - CHAT_CONTEXT_TAIL_MESSAGES, 0));
+
+    const summaryParts: string[] = [];
+    if (contextState?.summary) summaryParts.push(contextState.summary);
+    const adHocSummary = summarizeMessages(unsummarizedArchived);
+    if (adHocSummary) summaryParts.push(adHocSummary);
+
+    const summary = summaryParts.join("\n\n").trim() || undefined;
+    return { messages: keptMessages, summary };
+  }
+
+  private persistSessionContext(turn: RepositoryChatTurn, allMessages: RepositoryChatMessage[]): void {
+    const summaryMessages = allMessages.slice(0, Math.max(allMessages.length - CHAT_CONTEXT_TAIL_MESSAGES, 0));
+    const summary = summarizeMessages(summaryMessages, "Conversation condensed:\n");
+    if (!summary) {
+      this.store.clearChatSessionContext(turn.sessionId);
+      return;
+    }
+    const summarizedThroughSequence = summaryMessages.at(-1)?.sequence ?? 0;
+    if (!summarizedThroughSequence) {
+      this.store.clearChatSessionContext(turn.sessionId);
+      return;
+    }
+    this.store.updateChatSessionContext(turn.sessionId, summary, summarizedThroughSequence);
+  }
+
   private async execute(
     turnId: string,
     adapter: ReturnType<RepositoryChatAdapterRegistry["get"]>,
@@ -241,11 +296,14 @@ export class RepositoryChatRuntime {
     this.publish(running);
     try {
       const baseline = await captureGitState({ worktreePath: this.repositoryRoot });
+      const allMessages = this.store.listChatMessages(turn.sessionId);
+      const contextPrompt = this.sessionContextPrompt(turn, allMessages);
       const answer = await adapter.execute({
         repositoryRoot: this.repositoryRoot,
         model: turn.model,
         ...(turn.reasoningEffort ? { reasoningEffort: turn.reasoningEffort } : {}),
-        messages: this.store.listChatMessages(turn.sessionId),
+        messages: contextPrompt.messages,
+        ...(contextPrompt.summary ? { summary: contextPrompt.summary } : {}),
         signal,
         emit: (event) => {
           if (signal.aborted) return;
@@ -277,6 +335,7 @@ export class RepositoryChatRuntime {
         timestamp,
       });
       if (terminal.event) this.publish(terminal.event);
+      this.persistSessionContext(turn, allMessages);
     } catch (error) {
       const cancelled = signal.aborted;
       const message = cancelled

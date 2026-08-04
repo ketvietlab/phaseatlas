@@ -23,7 +23,7 @@ import type {
   ValidatedAgentRunResult,
 } from "@phaseatlas/contracts";
 
-const SCHEMA_VERSION = "4";
+const SCHEMA_VERSION = "5";
 const RUN_KINDS = new Set<PersistedRunKind>(["planning", "task_content", "agent"]);
 const RUN_STATUSES = new Set<PersistedRunStatus>(["starting", "running", "completed", "failed", "cancelled", "interrupted"]);
 const TERMINAL_RUN_STATUSES = new Set<PersistedRunStatus>(["completed", "failed", "cancelled", "interrupted"]);
@@ -46,6 +46,13 @@ const CHAT_EVENT_TYPES = new Set<PersistedRepositoryChatEvent["type"]>([
 const { DatabaseSync } = createRequire(import.meta.url)("node:" + "sqlite") as {
   DatabaseSync: typeof DatabaseSyncType;
 };
+
+export interface RepositoryChatSessionContextSnapshot {
+  sessionId: string;
+  summary: string;
+  summarizedThroughSequence: number;
+  updatedAt: string;
+}
 
 function parseTaskKeys(value: unknown): string[] {
   if (typeof value !== "string") return [];
@@ -88,6 +95,22 @@ function parseValidatedResult(value: unknown): ValidatedAgentRunResult {
     throw new Error("Operational store contains an invalid agent result.");
   }
   return parsed as ValidatedAgentRunResult;
+}
+
+function parseChatContextSummary(value: unknown): RepositoryChatSessionContextSnapshot {
+  if (!value || typeof value !== "object") throw new Error("Operational store contains an invalid chat context summary.");
+  const row = value as Record<string, unknown>;
+  const summarizedThroughSequence = Number(row.summarized_through_sequence);
+  if (typeof row.session_id !== "string" || typeof row.summary !== "string" ||
+      !Number.isInteger(summarizedThroughSequence) || summarizedThroughSequence < 0 || typeof row.updated_at !== "string") {
+    throw new Error("Operational store contains an invalid chat context summary.");
+  }
+  return {
+    sessionId: row.session_id,
+    summary: row.summary,
+    summarizedThroughSequence,
+    updatedAt: row.updated_at,
+  };
 }
 
 export interface PersistedAgentRunSpecRecord {
@@ -501,6 +524,40 @@ export class CheckoutOperationalStore {
     const row = this.database.prepare("SELECT * FROM chat_sessions WHERE session_id = ?").get(sessionId) as Record<string, unknown> | undefined;
     if (!row) throw new Error(`Chat session ${sessionId} is not registered.`);
     return this.chatSessionFromRow(row);
+  }
+
+  getChatSessionContext(sessionId: string): RepositoryChatSessionContextSnapshot | null {
+    const row = this.database.prepare(`
+      SELECT * FROM chat_session_contexts WHERE session_id = ?
+    `).get(sessionId) as Record<string, unknown> | undefined;
+    if (!row) return null;
+    if (!String(row.session_id)) throw new Error(`Chat session context ${sessionId} is invalid.`);
+    if (String(row.session_id) !== sessionId) throw new Error(`Chat session context ${sessionId} does not match query.`);
+    return parseChatContextSummary(row);
+  }
+
+  updateChatSessionContext(sessionId: string, summary: string, summarizedThroughSequence: number): RepositoryChatSessionContextSnapshot {
+    this.getChatSession(sessionId);
+    if (!summary.trim()) throw new Error("Chat session context summary is required.");
+    const sequence = Number(summarizedThroughSequence);
+    if (!Number.isInteger(sequence) || sequence < 0) throw new Error("summarizedThroughSequence is invalid.");
+    const timestamp = new Date().toISOString();
+    this.database.prepare(`
+      INSERT INTO chat_session_contexts (session_id, summary, summarized_through_sequence, updated_at)
+      VALUES (?, ?, ?, ?)
+      ON CONFLICT(session_id) DO UPDATE SET
+        summary = excluded.summary,
+        summarized_through_sequence = excluded.summarized_through_sequence,
+        updated_at = excluded.updated_at
+    `).run(sessionId, summary, sequence, timestamp);
+    const row = this.database.prepare("SELECT * FROM chat_session_contexts WHERE session_id = ?").get(sessionId) as Record<string, unknown> | undefined;
+    if (!row) throw new Error("Unable to persist chat session context.");
+    return parseChatContextSummary(row);
+  }
+
+  clearChatSessionContext(sessionId: string): void {
+    this.getChatSession(sessionId);
+    this.database.prepare("DELETE FROM chat_session_contexts WHERE session_id = ?").run(sessionId);
   }
 
   renameChatSession(sessionId: string, title: string, timestamp = new Date().toISOString()): RepositoryChatSession {
@@ -1048,6 +1105,12 @@ export class CheckoutOperationalStore {
         payload_json TEXT NOT NULL,
         PRIMARY KEY (turn_id, sequence)
       );
+      CREATE TABLE IF NOT EXISTS chat_session_contexts (
+        session_id TEXT PRIMARY KEY REFERENCES chat_sessions(session_id) ON DELETE CASCADE,
+        summary TEXT NOT NULL,
+        summarized_through_sequence INTEGER NOT NULL CHECK(summarized_through_sequence >= 0),
+        updated_at TEXT NOT NULL
+      );
     `);
     const schema = this.database.prepare("SELECT value FROM store_meta WHERE key = 'schema_version'").get() as { value?: string } | undefined;
     if (existingDatabase && !schema?.value) this.failInitialization("Checkout store schema metadata is missing.");
@@ -1063,6 +1126,10 @@ export class CheckoutOperationalStore {
     if (schemaVersion === "3") {
       this.migrateVersionThree();
       schemaVersion = "4";
+    }
+    if (schemaVersion === "4") {
+      this.migrateVersionFour();
+      schemaVersion = "5";
     }
     if (schemaVersion && schemaVersion !== SCHEMA_VERSION) {
       this.failInitialization(`Unsupported checkout store schema version ${schemaVersion}.`);
@@ -1155,6 +1222,25 @@ export class CheckoutOperationalStore {
         WHERE event_type = 'chat.tool.output';
 
         UPDATE store_meta SET value = '4' WHERE key = 'schema_version';
+      `);
+      this.database.exec("COMMIT");
+    } catch (error) {
+      this.database.exec("ROLLBACK");
+      throw error;
+    }
+  }
+
+  private migrateVersionFour(): void {
+    this.database.exec("BEGIN IMMEDIATE");
+    try {
+      this.database.exec(`
+        CREATE TABLE IF NOT EXISTS chat_session_contexts (
+          session_id TEXT PRIMARY KEY REFERENCES chat_sessions(session_id) ON DELETE CASCADE,
+          summary TEXT NOT NULL,
+          summarized_through_sequence INTEGER NOT NULL CHECK(summarized_through_sequence >= 0),
+          updated_at TEXT NOT NULL
+        );
+        UPDATE store_meta SET value = '5' WHERE key = 'schema_version';
       `);
       this.database.exec("COMMIT");
     } catch (error) {

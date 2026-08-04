@@ -137,6 +137,18 @@ test("requires confirmation, isolates edits, derives review evidence, and applie
     runtime.prepare({ sessionId: "session-one", prompt: "Edit files", accessMode: "invalid" as never }),
     /access mode is invalid/,
   );
+  const cancelledBeforeApproval = await runtime.prepare({
+    sessionId: "session-one",
+    prompt: "Prepare an edit but do not start it",
+    accessMode: "ask_for_approval",
+  });
+  assert.equal(runtime.result(cancelledBeforeApproval.editId).status, "awaiting_confirmation");
+  assert.equal((await runtime.cancel(cancelledBeforeApproval.editId)).disposition, "cancelled");
+  assert.equal(runtime.result(cancelledBeforeApproval.editId).status, "cancelled");
+  await assert.rejects(
+    runtime.start({ editId: cancelledBeforeApproval.editId, confirmationDigest: cancelledBeforeApproval.confirmationDigest }),
+    /current state/,
+  );
   const prepared = await runtime.prepare({
     sessionId: "session-one",
     prompt: "Edit the fixture files",

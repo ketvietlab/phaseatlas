@@ -456,3 +456,128 @@ test("persists agent specs, results, revalidation, and retry linkage", async (co
   assert.equal(reopened.parentRunId("run-retry"), "run-original");
   reopened.close();
 });
+
+test("persists chat session context snapshots", async (context) => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "phaseatlas-chat-context-"));
+  context.after(() => rm(root, { recursive: true, force: true }));
+  const store = new CheckoutOperationalStore(path.join(root, "operations.sqlite"), CHECKOUT_A);
+  const timestamp = "2026-08-04T00:00:00.000Z";
+  store.createChatSession({
+    sessionId: "session-context",
+    checkoutId: CHECKOUT_A,
+    runnerId: "codex-cli",
+    model: "gpt-fixture",
+    title: "Context",
+    state: "open",
+    createdAt: timestamp,
+    updatedAt: timestamp,
+  });
+  assert.equal(store.getChatSessionContext("session-context"), null);
+  const first = store.updateChatSessionContext("session-context", "Initial summary.", 10);
+  const fetched = store.getChatSessionContext("session-context");
+  assert.equal(fetched?.summary, first.summary);
+  assert.equal(first.summarizedThroughSequence, 10);
+  assert.equal(fetched?.updatedAt, first.updatedAt);
+  const updated = store.updateChatSessionContext("session-context", "Updated summary.", 20);
+  assert.equal(updated.summarizedThroughSequence, 20);
+  assert.equal(store.getChatSessionContext("session-context")?.summary, "Updated summary.");
+  store.clearChatSessionContext("session-context");
+  assert.equal(store.getChatSessionContext("session-context"), null);
+  store.close();
+});
+
+test("migrates schema version 4 into chat context snapshots", async (context) => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "phaseatlas-chat-context-migration-"));
+  context.after(() => rm(root, { recursive: true, force: true }));
+  const databasePath = path.join(root, "operations.sqlite");
+  const legacy = new DatabaseSync(databasePath);
+  legacy.exec(`
+    CREATE TABLE store_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+    CREATE TABLE runs (
+      run_id TEXT PRIMARY KEY,
+      kind TEXT NOT NULL,
+      status TEXT NOT NULL,
+      task_keys_json TEXT NOT NULL,
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL
+    );
+    CREATE TABLE run_events (
+      run_id TEXT NOT NULL REFERENCES runs(run_id) ON DELETE CASCADE,
+      sequence INTEGER NOT NULL,
+      event_type TEXT NOT NULL,
+      timestamp TEXT NOT NULL,
+      payload_json TEXT NOT NULL,
+      PRIMARY KEY (run_id, sequence)
+    );
+    CREATE TABLE chat_sessions (
+      session_id TEXT PRIMARY KEY,
+      checkout_id TEXT NOT NULL,
+      runner_id TEXT NOT NULL,
+      model_id TEXT NOT NULL,
+      reasoning_effort TEXT,
+      title TEXT NOT NULL,
+      state TEXT NOT NULL,
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL
+    );
+    CREATE TABLE chat_messages (
+      message_id TEXT PRIMARY KEY,
+      session_id TEXT NOT NULL REFERENCES chat_sessions(session_id) ON DELETE CASCADE,
+      turn_id TEXT,
+      role TEXT NOT NULL,
+      content TEXT NOT NULL,
+      attachments_json TEXT NOT NULL,
+      sequence INTEGER NOT NULL,
+      created_at TEXT NOT NULL,
+      UNIQUE(session_id, sequence)
+    );
+    CREATE TABLE chat_turns (
+      turn_id TEXT PRIMARY KEY,
+      session_id TEXT NOT NULL REFERENCES chat_sessions(session_id) ON DELETE CASCADE,
+      status TEXT NOT NULL,
+      runner_id TEXT NOT NULL,
+      model_id TEXT NOT NULL,
+      reasoning_effort TEXT,
+      user_message_id TEXT NOT NULL REFERENCES chat_messages(message_id),
+      assistant_message_id TEXT REFERENCES chat_messages(message_id),
+      parent_turn_id TEXT REFERENCES chat_turns(turn_id),
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL
+    );
+    CREATE TABLE chat_turn_events (
+      turn_id TEXT NOT NULL REFERENCES chat_turns(turn_id) ON DELETE CASCADE,
+      sequence INTEGER NOT NULL,
+      event_type TEXT NOT NULL,
+      timestamp TEXT NOT NULL,
+      payload_json TEXT NOT NULL,
+      PRIMARY KEY (turn_id, sequence)
+    );
+    INSERT INTO store_meta (key, value) VALUES ('schema_version', '4'), ('checkout_id', '${CHECKOUT_A}');
+  `);
+  legacy.close();
+
+  const migrated = new CheckoutOperationalStore(databasePath, CHECKOUT_A);
+  migrated.createChatSession({
+    sessionId: "session-context",
+    checkoutId: CHECKOUT_A,
+    runnerId: "codex-cli",
+    model: "gpt-fixture",
+    title: "Migrated context",
+    state: "open",
+    createdAt: "2026-08-04T00:00:00.000Z",
+    updatedAt: "2026-08-04T00:00:00.000Z",
+  });
+  assert.equal(migrated.getChatSessionContext("session-context"), null);
+  const persisted = migrated.updateChatSessionContext("session-context", "Recovered summary.", 5);
+  assert.equal(persisted.summary, "Recovered summary.");
+  const reopened = new CheckoutOperationalStore(databasePath, CHECKOUT_A);
+  const restored = reopened.getChatSessionContext("session-context");
+  assert.equal(restored?.summary, "Recovered summary.");
+  assert.equal(restored?.summarizedThroughSequence, 5);
+  migrated.close();
+  reopened.close();
+  const reopenedDatabase = new DatabaseSync(databasePath);
+  const meta = reopenedDatabase.prepare("SELECT value FROM store_meta WHERE key = 'schema_version'").get() as { value?: string } | undefined;
+  reopenedDatabase.close();
+  assert.equal(meta?.value, "5");
+});
