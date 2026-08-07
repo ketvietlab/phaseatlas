@@ -846,6 +846,9 @@ class ClaudeExecutionAdapter implements ProviderExecutionAdapter {
     emit(event: AgentEventWithoutSequence): void;
   }): Promise<AgentRunResult> {
     const executable = process.env.PHASEATLAS_CLAUDE_BIN || "claude";
+    // Claude reports failures in the stdout stream and leaves stderr empty, so the
+    // process error alone would surface "exited with code 1:" and nothing else.
+    let providerFailure = "";
     try {
       const args = [
         "--print",
@@ -863,7 +866,6 @@ class ClaudeExecutionAdapter implements ProviderExecutionAdapter {
       let lineBuffer = "";
       let structuredOutput: unknown;
       let resultText = "";
-      let providerFailure = "";
       let lastSummary = "";
       let commandCounter = 0;
       const commandIds = new Map<string, string>();
@@ -959,12 +961,11 @@ class ClaudeExecutionAdapter implements ProviderExecutionAdapter {
         [executable, context.workingDirectory],
       );
     } catch (error) {
+      const message = providerFailure || failureMessage(error, [executable, context.workingDirectory]);
       context.emit(context.signal.aborted
         ? { type: "run.status", status: "cancelled" }
-        : { type: "run.failed", message: failureMessage(error, [executable, context.workingDirectory]) });
-      throw new Error(context.signal.aborted
-        ? "Agent execution was cancelled."
-        : failureMessage(error, [executable, context.workingDirectory]));
+        : { type: "run.failed", message });
+      throw new Error(context.signal.aborted ? "Agent execution was cancelled." : message);
     }
   }
 }

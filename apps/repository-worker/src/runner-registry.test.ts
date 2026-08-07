@@ -296,3 +296,37 @@ test("bounds retained provider diagnostics while streaming complete output", asy
   assert.ok(result.stdout.length <= 64 * 1024);
   assert.ok(result.stdout.endsWith(marker));
 });
+
+test("surfaces the provider's own failure text when Claude exits non-zero with empty stderr", async () => {
+  const events: Array<Omit<AgentEvent, "sequence">> = [];
+  // Claude reports failures in the stdout stream and writes nothing to stderr,
+  // so the process error carries no diagnostic at all.
+  const failingRunner: ProviderProcessRunner = async (options) => {
+    options.onStdout(`${JSON.stringify({
+      type: "result",
+      subtype: "success",
+      is_error: true,
+      result: "Not logged in · Please run /login",
+    })}\n`);
+    throw new Error(`${options.executable} exited with code 1: `);
+  };
+  const registry = new RunnerRegistry({
+    processRunner: failingRunner,
+    codexExecutableResolver: async () => ({ executable: "fixture-codex", version: "fixture" }),
+    codexModelDiscovery: async () => [],
+  });
+  await assert.rejects(
+    registry.getExecution("claude-code", "analyze", "read-only").execute({
+      spec: { ...executionSpec, action: "analyze", sandbox: "read-only" },
+      workingDirectory: executionSpec.executionDirectory,
+      modelId: "sonnet",
+      reasoningEffort: "low",
+      signal: new AbortController().signal,
+      emit: (event) => events.push(event),
+    }),
+    /Not logged in/,
+  );
+  const failure = events.find((event) => event.type === "run.failed");
+  assert.equal(failure?.type === "run.failed" && failure.message.includes("Not logged in"), true);
+  assert.equal(failure?.type === "run.failed" && failure.message.includes("exited with code 1"), false);
+});

@@ -28,6 +28,9 @@ may contain a documented breaking change.
 
 ### Fixed
 
+- A failing Claude Code run reported only "exited with code 1:" with no reason. Claude writes its
+  failure into the stdout stream and leaves stderr empty, so the diagnostic it already parsed was
+  discarded in favour of an empty process error.
 - Every Claude Code invocation failed with "When using --print, --output-format=stream-json requires
   --verbose". Planning, execution, chat, and isolated chat edits now pass the required flag.
 
