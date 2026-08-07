@@ -11,8 +11,9 @@ may contain a documented breaking change.
 ### Added
 
 - File paths cited by the model are clickable. A path in a result summary, next action, verification
-  note, blocker, evidence reference, or conversation reply opens that file in the run panel, so a
-  claim about the repository can be checked where it is made.
+  note, blocker, evidence reference, or conversation reply opens that file in a panel on the right of
+  the run workbench, so a claim about the repository can be checked where it is made. Markdown opens
+  rendered, with a Preview and Source toggle.
 
 - The task conversation can change the repository: an Ask/Edit toggle in its composer runs the
   existing confirmed, isolated, reviewed edit path, with accept and discard offered inline once the

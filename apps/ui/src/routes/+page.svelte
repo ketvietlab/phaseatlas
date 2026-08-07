@@ -124,6 +124,7 @@
   let openedFileError = "";
   let openedFileLoading = false;
   let openedFileRequest = 0;
+  let openedFileMode: "preview" | "source" = "preview";
   let executionActions: AgentRunActionAvailability[] = [];
   let executionActionsLoading = false;
   let executionError = "";
@@ -179,6 +180,7 @@
   // One ordered pipeline per task. A stage counts as done only when a completed
   // run exists for this exact task revision — an older revision is a stale claim,
   // not progress. The entry point is the first stage that is not yet done.
+  $: openedFileIsMarkdown = /\.mdx?$/i.test(openedFilePath);
   $: pipelineRuns = selectedTask
     ? agentRuns.filter((run) => run.taskKey === canonicalTaskKey(selectedTask))
     : [];
@@ -623,6 +625,7 @@
       if (requestId !== openedFileRequest) return;
       openedFilePath = document.path;
       openedFileContent = document.content;
+      openedFileMode = "preview";
     } catch (error) {
       if (requestId !== openedFileRequest) return;
       openedFileError = error instanceof Error ? error.message : "The file could not be opened.";
@@ -2157,21 +2160,6 @@
               providerReady={providerSelectionReady}
               onOpenPath={openRepositoryPathInEditor}
             />
-            {#if openedFilePath}
-              <div class="opened-file">
-                <header>
-                  <code>{openedFilePath}</code>
-                  <button type="button" aria-label="Close file" onclick={closeOpenedFile}>×</button>
-                </header>
-                {#if openedFileLoading}
-                  <p class="opened-file-state">Reading {openedFilePath}…</p>
-                {:else if openedFileError}
-                  <p class="opened-file-state">{openedFileError}</p>
-                {:else}
-                  <pre>{openedFileContent}</pre>
-                {/if}
-              </div>
-            {/if}
           </div>
         {/if}
 
@@ -2266,6 +2254,29 @@
           <div class="execution-run-empty"><span class="execution-header-mark" aria-hidden="true"><svg class="icon" viewBox="0 0 24 24"><path d="M5 4h14v16H5zM8 8h8M8 12h5M8 16h7"/></svg></span><h3>No run selected</h3><p>Start an action or choose a durable attempt from repository history.</p></div>
         {/if}
       </div>
+      {#if openedFilePath}
+        <aside class="opened-file" aria-label={`File ${openedFilePath}`}>
+          <header>
+            <code title={openedFilePath}>{openedFilePath}</code>
+            {#if openedFileIsMarkdown}
+              <div class="opened-file-modes" role="group" aria-label="View mode">
+                <button class:active={openedFileMode === "preview"} type="button" aria-pressed={openedFileMode === "preview"} onclick={() => openedFileMode = "preview"}>Preview</button>
+                <button class:active={openedFileMode === "source"} type="button" aria-pressed={openedFileMode === "source"} onclick={() => openedFileMode = "source"}>Source</button>
+              </div>
+            {/if}
+            <button class="opened-file-close" type="button" aria-label="Close file" onclick={closeOpenedFile}>×</button>
+          </header>
+          {#if openedFileLoading}
+            <p class="opened-file-state">Reading {openedFilePath}…</p>
+          {:else if openedFileError}
+            <p class="opened-file-state">{openedFileError}</p>
+          {:else if openedFileIsMarkdown && openedFileMode === "preview"}
+            <div class="opened-file-preview"><ModelMarkdown source={openedFileContent} onOpenPath={openRepositoryPathInEditor} /></div>
+          {:else}
+            <pre>{openedFileContent}</pre>
+          {/if}
+        </aside>
+      {/if}
     </div>
   </div>
 {/if}
