@@ -13,9 +13,10 @@ may contain a documented breaking change.
 - Reasoning effort for Claude Code, discovered from the installed CLI's `--effort` levels and applied
   to planning, execution, chat, and isolated chat edits. CLI builds without `--effort` keep the
   control disabled instead of offering levels the binary would reject.
-- A provider picker in the chat composer, next to the send button. It reports the provider the open
-  conversation will actually answer with, and a change applies to that conversation and to the
-  repository-wide selection at the same time.
+- A provider picker in the chat composer. It collapses the selection to one button reading
+  `Claude / Sonnet / Medium`, and opens a searchable popover grouped by CLI with reasoning effort for
+  the chosen model. It reports the provider the open conversation will actually answer with, and a
+  change applies to that conversation and to the repository-wide selection at the same time.
 - `chat.setSessionProvider`, which retargets an open conversation after validating the selection
   against the discovered catalog. Past turns keep the provider they were recorded with.
 
