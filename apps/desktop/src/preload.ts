@@ -115,7 +115,7 @@ const api: PhaseAtlasDesktopApi = {
     },
   },
   ide: {
-    open: (checkoutId, theme) => ipcRenderer.invoke("phaseatlas:ide:open", checkoutId, theme),
+    open: (checkoutId, theme, runId) => ipcRenderer.invoke("phaseatlas:ide:open", checkoutId, theme, runId),
     setTheme: (theme) => ipcRenderer.invoke("phaseatlas:ide:theme:set", theme),
   },
   runtime: {

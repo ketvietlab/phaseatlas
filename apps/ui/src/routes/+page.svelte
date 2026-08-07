@@ -646,6 +646,21 @@
 
   // The IDE is a separate window owned by the main process; the renderer only
   // asks for it by checkout and hands over the current theme.
+  // Repo home opens the canonical checkout; a stage opens the worktree it produced.
+  async function openRunWorktreeInIde(runId: string) {
+    if (!window.phaseatlas || !selectedCheckoutId || ideOpening) return;
+    ideOpening = true;
+    ideError = "";
+    try {
+      await window.phaseatlas.ide.open(selectedCheckoutId, theme === "dark" ? "dark" : "light", runId);
+    } catch (error) {
+      ideError = error instanceof Error ? error.message : "The run worktree could not be opened.";
+      executionError = ideError;
+    } finally {
+      ideOpening = false;
+    }
+  }
+
   async function openEmbeddedIde() {
     if (!window.phaseatlas || !selectedCheckoutId || ideOpening) return;
     ideOpening = true;
@@ -2189,6 +2204,7 @@
               runEvents={agentEvents}
               providerReady={providerSelectionReady}
               onOpenPath={openRepositoryPathInEditor}
+              onOpenWorktree={openRunWorktreeInIde}
             />
           </div>
         {/if}

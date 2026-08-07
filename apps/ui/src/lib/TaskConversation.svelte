@@ -20,6 +20,7 @@
   export let runEvents: Record<string, PersistedRunEvent[]> = {};
   export let providerReady = false;
   export let onOpenPath: (path: string) => void = () => undefined;
+  export let onOpenWorktree: (runId: string) => void = () => undefined;
 
   type StageEntry = {
     kind: "stage";
@@ -29,6 +30,7 @@
     narration: string;
     commands: number;
     failure: string;
+    hasWorktree: boolean;
   };
   type MessageEntry = { kind: "message"; id: string; at: string; message: RepositoryChatMessage };
   type Entry = StageEntry | MessageEntry;
@@ -77,6 +79,7 @@
       run,
       narration: narration.trim(),
       commands: events.filter((event) => event.type === "command.completed").length,
+      hasWorktree: run.sandbox === "workspace-write" && ["completed", "failed"].includes(run.status),
       failure: typeof failureEvent?.payload.message === "string" ? failureEvent.payload.message : "",
     };
   });
@@ -250,6 +253,11 @@
               <p class="turn-activity">Ran {entry.commands} repository {entry.commands === 1 ? "command" : "commands"}</p>
             {/if}
             {#if entry.failure}<p class="turn-failure">{entry.failure}</p>{/if}
+            {#if entry.hasWorktree}
+              <button class="stage-worktree" type="button" onclick={() => onOpenWorktree(entry.run.runId)}>
+                Open this run's worktree in the IDE
+              </button>
+            {/if}
           </div>
         </article>
       {:else}
@@ -358,6 +366,8 @@
   .turn-text { margin: 0; color: var(--text); font-size: 14px; line-height: 1.62; white-space: pre-wrap; overflow-wrap: anywhere; }
   .turn[data-role="user"] .turn-text { border-left: 2px solid var(--brand-300); padding-left: 9px; color: var(--text-muted); }
   .turn-activity { margin: 5px 0 0; color: var(--text-subtle); font-size: 12px; }
+  .stage-worktree { margin-top: 7px; border: 1px solid var(--border); border-radius: var(--radius-xs); padding: 4px 9px; background: var(--surface-soft); color: var(--text-muted); font-size: 11.5px; font-weight: 700; }
+  .stage-worktree:hover { border-color: var(--brand-300); background: var(--active-surface); color: var(--active-text); }
   .turn-failure { margin: 6px 0 0; border-radius: var(--radius-xs); padding: 6px 8px; background: color-mix(in srgb,#c44242 8%,var(--surface)); color: var(--text-muted); font-size: 12.5px; }
 
   .conversation-status { margin: 2px 0 0; color: var(--text-subtle); font-size: 12.5px; }

@@ -47,6 +47,7 @@ import {
   type RepositorySummary,
   type RepositoryWorkerMethod,
   type RunnerDescriptor,
+  type WorktreeLeaseRecord,
   type TaskContentEvent,
   type TaskContentRunSummary,
   type TaskContentStartInput,
@@ -472,6 +473,10 @@ export class RepositoryProcessManager {
 
   async saveFile(checkoutId: string, filePath: string, content: string): Promise<void> {
     await (await this.ensureWorker(checkoutId)).call<void>("file.save", { path: filePath, content });
+  }
+
+  async leaseForRun(checkoutId: string, runId: string): Promise<WorktreeLeaseRecord | null> {
+    return (await this.ensureWorker(checkoutId)).call<WorktreeLeaseRecord | null>("agent-run.lease", { runId });
   }
 
   async listRunners(checkoutId: string): Promise<RunnerDescriptor[]> {

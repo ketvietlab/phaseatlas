@@ -888,6 +888,7 @@ export type RepositoryWorkerMethod =
   | "chat.session.get"
   | "chat.session.rename"
   | "chat.session.provider"
+  | "agent-run.lease"
   | "chat.session.close"
   | "chat.message.list"
   | "chat.turn.list"
@@ -1054,7 +1055,8 @@ export interface PhaseAtlasDesktopApi {
     subscribe(listener: (event: PhaseAtlasDesktopEvent) => void): () => void;
   };
   ide: {
-    open(checkoutId: string, theme: "light" | "dark"): Promise<{ checkoutId: string; opened: true; reused: boolean }>;
+    // runId opens that run's retained worktree; omitting it opens the canonical checkout.
+    open(checkoutId: string, theme: "light" | "dark", runId?: string): Promise<{ checkoutId: string; opened: true; reused: boolean }>;
     setTheme(theme: "light" | "dark"): Promise<void>;
   };
   runtime: {

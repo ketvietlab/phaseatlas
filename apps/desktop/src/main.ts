@@ -192,11 +192,27 @@ function registerIpc(): void {
   ipcMain.on("phaseatlas:ide:theme:get", (event) => {
     event.returnValue = embeddedIde.themeForWebContents(event.sender.id);
   });
-  ipcMain.handle("phaseatlas:ide:open", async (event, checkoutId: string, theme: string) => {
+  ipcMain.handle("phaseatlas:ide:open", async (event, checkoutId: string, theme: string, runId?: string) => {
     assertPhaseAtlasTheme(theme);
     const repository = repositories.describe(checkoutId);
     const owner = BrowserWindow.fromWebContents(event.sender) ?? undefined;
-    return embeddedIde.open(repository.checkoutId, repository.path, repository.name, theme, owner);
+    if (runId === undefined) {
+      return embeddedIde.open({ checkoutId: repository.checkoutId }, repository.path, repository.name, theme, owner);
+    }
+    // A run's worktree is only a workspace while its lease is retained. Opening
+    // one that is about to be removed would discard whatever the user typed.
+    const lease = await repositories.leaseForRun(checkoutId, runId);
+    if (!lease) throw new Error("This run has no worktree to open.");
+    if (lease.status !== "retained") {
+      throw new Error(`This run's worktree is ${lease.status} and can no longer be opened.`);
+    }
+    return embeddedIde.open(
+      { checkoutId: repository.checkoutId, leaseId: lease.leaseId },
+      lease.worktreePath,
+      `${repository.name} · ${lease.branch}`,
+      theme,
+      owner,
+    );
   });
   ipcMain.handle("phaseatlas:ide:theme:set", (_event, theme: string) => {
     assertPhaseAtlasTheme(theme);

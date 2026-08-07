@@ -1145,6 +1145,11 @@ async function dispatch(request: WorkerRequest): Promise<unknown> {
     }
     case "chat.session.rename":
       return chatRuntime.renameSession(chatRenameInput(requestParams(request).input));
+    case "agent-run.lease": {
+      const runId = requestParams(request).runId;
+      if (typeof runId !== "string" || !runId.trim()) throw new Error("runId is required.");
+      return leaseManager.list().find((lease) => lease.runId === runId) ?? null;
+    }
     case "chat.session.provider":
       return chatRuntime.setSessionProvider(chatProviderInput(requestParams(request).input));
     case "chat.session.close": {

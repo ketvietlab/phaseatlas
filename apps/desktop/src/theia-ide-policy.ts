@@ -15,11 +15,30 @@ export function assertTheiaLaunchIdentity(checkoutId: string, repositoryPath: st
   if (!path.isAbsolute(repositoryPath)) throw new Error("The IDE repository path must be canonical and absolute.");
 }
 
-// One stable port per checkout, derived rather than allocated, so reopening a
-// repository reaches the same backend instead of leaking a new one each time.
-export function theiaPortForCheckout(checkoutId: string): number {
-  if (!CHECKOUT_ID_PATTERN.test(checkoutId)) throw new Error("The IDE checkout identity is invalid.");
-  return THEIA_PORT_BASE + Number.parseInt(checkoutId.slice(0, 8), 16) % THEIA_PORT_RANGE;
+const LEASE_ID_PATTERN = /^[a-f0-9-]{36}$/;
+
+// The canonical checkout and each retained worktree are separate IDE targets:
+// the checkout is the user's own copy, a worktree is what an agent produced.
+// They must not share a window, a port or a config directory.
+export interface TheiaTarget {
+  checkoutId: string;
+  leaseId?: string;
+}
+
+export function theiaTargetKey(target: TheiaTarget): string {
+  if (!CHECKOUT_ID_PATTERN.test(target.checkoutId)) throw new Error("The IDE checkout identity is invalid.");
+  if (target.leaseId === undefined) return target.checkoutId;
+  if (!LEASE_ID_PATTERN.test(target.leaseId)) throw new Error("The IDE worktree identity is invalid.");
+  return `${target.checkoutId}:${target.leaseId}`;
+}
+
+// One stable port per target, derived rather than allocated, so reopening a
+// repository or a worktree reaches the same backend instead of leaking one.
+export function theiaPortForTarget(target: TheiaTarget): number {
+  const key = theiaTargetKey(target);
+  let hash = 0;
+  for (const character of key) hash = (hash * 31 + character.charCodeAt(0)) >>> 0;
+  return THEIA_PORT_BASE + hash % THEIA_PORT_RANGE;
 }
 
 export function theiaBackendArguments(repositoryPath: string, port: number, pluginsPath: string): string[] {

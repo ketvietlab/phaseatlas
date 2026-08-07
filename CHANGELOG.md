@@ -10,6 +10,11 @@ may contain a documented breaking change.
 
 ### Added
 
+- The embedded IDE opens two kinds of workspace. The button beside Chat opens the canonical checkout;
+  a finished implementation run offers its retained worktree, which is where the agent's work and its
+  base revision actually are. Each target gets its own window, port and configuration, and a worktree
+  can only be opened while its lease is retained.
+
 - File paths cited by the model are clickable. A path in a result summary, next action, verification
   note, blocker, evidence reference, or conversation reply opens that file in a panel on the right of
   the run workbench, so a claim about the repository can be checked where it is made. Markdown opens

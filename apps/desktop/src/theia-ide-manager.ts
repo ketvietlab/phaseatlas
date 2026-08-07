@@ -10,8 +10,10 @@ import {
   assertTheiaLaunchIdentity,
   isAllowedTheiaNavigation,
   theiaBackendArguments,
-  theiaPortForCheckout,
+  theiaPortForTarget,
+  theiaTargetKey,
   type PhaseAtlasTheme,
+  type TheiaTarget,
 } from "./theia-ide-policy.js";
 
 const STARTUP_TIMEOUT_MS = 20_000;
@@ -78,6 +80,8 @@ function closeButtonBootstrap(): string {
 }
 
 interface TheiaInstance {
+  key: string;
+  target: TheiaTarget;
   checkoutId: string;
   repositoryPath: string;
   port: number;
@@ -95,12 +99,12 @@ export interface TheiaOpenResult {
   reused: boolean;
 }
 
-async function reserveCheckoutPort(checkoutId: string): Promise<number> {
-  const port = theiaPortForCheckout(checkoutId);
+async function reserveTargetPort(target: TheiaTarget): Promise<number> {
+  const port = theiaPortForTarget(target);
   return new Promise((resolve, reject) => {
     const server = net.createServer();
     server.once("error", (error) => {
-      reject(new Error(`The saved IDE port ${port} for this checkout is unavailable.`, { cause: error }));
+      reject(new Error(`The saved IDE port ${port} for this workspace is unavailable.`, { cause: error }));
     });
     server.listen(port, "localhost", () => {
       server.close((error) => error ? reject(error) : resolve(port));
@@ -147,17 +151,19 @@ export class TheiaIdeManager {
   ) {}
 
   async open(
-    checkoutId: string,
+    target: TheiaTarget,
     repositoryPath: string,
     repositoryName: string,
     theme: PhaseAtlasTheme,
     ownerWindow?: BrowserWindow,
   ): Promise<TheiaOpenResult> {
+    const checkoutId = target.checkoutId;
+    const key = theiaTargetKey(target);
     assertTheiaLaunchIdentity(checkoutId, repositoryPath);
-    const existing = this.instances.get(checkoutId);
+    const existing = this.instances.get(key);
     if (existing) {
       if (existing.repositoryPath !== repositoryPath) {
-        throw new Error("The IDE checkout path no longer matches its registered identity.");
+        throw new Error("The IDE workspace path no longer matches its registered identity.");
       }
       this.applyTheme(existing, theme);
       if (ownerWindow && !ownerWindow.isDestroyed() && existing.window && !existing.window.isDestroyed()) {
@@ -168,10 +174,10 @@ export class TheiaIdeManager {
       return { checkoutId, opened: true, reused: true };
     }
     // Two clicks before the backend is ready must not spawn two backends.
-    const pending = this.starts.get(checkoutId);
+    const pending = this.starts.get(key);
     if (pending) {
       const result = await pending;
-      const pendingInstance = this.instances.get(checkoutId);
+      const pendingInstance = this.instances.get(key);
       if (pendingInstance) this.applyTheme(pendingInstance, theme);
       const pendingWindow = pendingInstance?.window;
       if (ownerWindow && !ownerWindow.isDestroyed() && pendingWindow && !pendingWindow.isDestroyed()) {
@@ -180,19 +186,19 @@ export class TheiaIdeManager {
       pendingWindow?.focus();
       return { ...result, opened: true, reused: true };
     }
-    const start = this.start(checkoutId, repositoryPath, repositoryName, theme, ownerWindow);
-    this.starts.set(checkoutId, start);
+    const start = this.start(target, repositoryPath, repositoryName, theme, ownerWindow);
+    this.starts.set(key, start);
     try {
       return await start;
     } finally {
-      this.starts.delete(checkoutId);
+      this.starts.delete(key);
     }
   }
 
   stopAll(): void {
-    for (const [checkoutId, instance] of [...this.instances]) {
+    for (const [key, instance] of [...this.instances]) {
       if (instance.window && !instance.window.isDestroyed()) instance.window.close();
-      else this.stop(checkoutId);
+      else this.stop(key);
     }
   }
 
@@ -217,7 +223,7 @@ export class TheiaIdeManager {
   }
 
   private async start(
-    checkoutId: string,
+    target: TheiaTarget,
     repositoryPath: string,
     repositoryName: string,
     theme: PhaseAtlasTheme,
@@ -228,14 +234,19 @@ export class TheiaIdeManager {
       access(this.preloadEntry),
       access(this.defaultExtensionsRoot),
     ]);
-    const checkoutRuntime = path.join(this.runtimeRoot, "checkouts", checkoutId);
+    const checkoutId = target.checkoutId;
+    const key = theiaTargetKey(target);
+    // Config and plugins are per target, or two windows overwrite each other.
+    const checkoutRuntime = target.leaseId
+      ? path.join(this.runtimeRoot, "checkouts", checkoutId, "ide-worktrees", target.leaseId)
+      : path.join(this.runtimeRoot, "checkouts", checkoutId, "ide");
     const configPath = path.join(checkoutRuntime, "config");
     const pluginsPath = path.join(checkoutRuntime, "plugins");
     await Promise.all([
       mkdir(configPath, { recursive: true, mode: 0o700 }),
       mkdir(pluginsPath, { recursive: true, mode: 0o700 }),
     ]);
-    const port = await reserveCheckoutPort(checkoutId);
+    const port = await reserveTargetPort(target);
     const child = spawn(process.execPath, [this.backendEntry, ...theiaBackendArguments(repositoryPath, port, pluginsPath)], {
       cwd: repositoryPath,
       env: {
@@ -247,6 +258,8 @@ export class TheiaIdeManager {
       stdio: ["ignore", "pipe", "pipe"],
     });
     const instance: TheiaInstance = {
+      key,
+      target,
       checkoutId,
       repositoryPath,
       port,
@@ -255,7 +268,7 @@ export class TheiaIdeManager {
       stopping: false,
       theme,
     };
-    this.instances.set(checkoutId, instance);
+    this.instances.set(key, instance);
     child.stdout.resume();
     child.once("error", (error) => {
       instance.startupError = error;
@@ -265,16 +278,16 @@ export class TheiaIdeManager {
       instance.stderrTail = `${instance.stderrTail}${chunk}`.slice(-DIAGNOSTIC_LIMIT);
     });
     child.once("exit", () => {
-      if (this.instances.get(checkoutId) === instance) this.instances.delete(checkoutId);
+      if (this.instances.get(key) === instance) this.instances.delete(key);
       if (!instance.window?.isDestroyed()) instance.window?.destroy();
     });
     try {
       await waitForBackend(instance);
-      if (this.instances.get(checkoutId) !== instance) throw new Error("Theia IDE stopped before its window could open.");
+      if (this.instances.get(key) !== instance) throw new Error("Theia IDE stopped before its window could open.");
       instance.window = await this.createWindow(instance, repositoryName, ownerWindow);
       return { checkoutId, opened: true, reused: false };
     } catch (error) {
-      this.stop(checkoutId);
+      this.stop(key);
       throw error;
     }
   }
@@ -302,7 +315,7 @@ export class TheiaIdeManager {
         nodeIntegration: false,
         sandbox: true,
         webSecurity: true,
-        partition: `persist:phaseatlas-theia-${instance.checkoutId}`,
+        partition: `persist:phaseatlas-theia-${instance.key.replace(":", "-")}`,
       },
     });
     instance.window = window;
@@ -318,7 +331,7 @@ export class TheiaIdeManager {
               nodeIntegration: false,
               sandbox: true,
               webSecurity: true,
-              partition: `persist:phaseatlas-theia-${instance.checkoutId}`,
+              partition: `persist:phaseatlas-theia-${instance.key.replace(":", "-")}`,
             },
           },
         };
@@ -335,7 +348,7 @@ export class TheiaIdeManager {
     const fitToOwner = () => {
       if (owner && !owner.isDestroyed() && !window.isDestroyed()) window.setBounds(owner.getBounds(), false);
     };
-    const ownerClosed = () => this.stop(instance.checkoutId);
+    const ownerClosed = () => this.stop(instance.key);
     owner?.on("move", fitToOwner);
     owner?.on("resize", fitToOwner);
     owner?.once("closed", ownerClosed);
@@ -347,7 +360,7 @@ export class TheiaIdeManager {
       owner?.removeListener("move", fitToOwner);
       owner?.removeListener("resize", fitToOwner);
       owner?.removeListener("closed", ownerClosed);
-      this.stop(instance.checkoutId);
+      this.stop(instance.key);
     });
     await window.loadURL(origin);
     return window;
@@ -360,11 +373,11 @@ export class TheiaIdeManager {
     instance.window.webContents.send("phaseatlas:ide:theme-changed", theme);
   }
 
-  private stop(checkoutId: string): void {
-    const instance = this.instances.get(checkoutId);
+  private stop(key: string): void {
+    const instance = this.instances.get(key);
     if (!instance || instance.stopping) return;
     instance.stopping = true;
-    this.instances.delete(checkoutId);
+    this.instances.delete(key);
     if (!instance.window?.isDestroyed()) instance.window?.destroy();
     if (instance.process.exitCode !== null || instance.process.signalCode !== null) return;
     instance.process.kill("SIGTERM");
