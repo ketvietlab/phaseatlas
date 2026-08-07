@@ -70,9 +70,12 @@
     ? choices.filter(({ runner, model }) =>
         `${runner.name} ${model.displayName} ${model.id}`.toLowerCase().includes(normalizedQuery))
     : choices;
+  // A runner with no models still belongs in the list: dropping it silently
+  // leaves the user unable to tell "not installed" from "installed but signed
+  // out". Keep it, and show why it cannot be chosen.
   $: groups = runners
     .map((runner) => ({ runner, models: matches.filter((choice) => choice.runner.id === runner.id) }))
-    .filter((group) => group.models.length > 0);
+    .filter((group) => group.models.length > 0 || (!normalizedQuery && !group.runner.available));
   $: flattened = groups.flatMap((group) => group.models);
   $: highlighted = Math.min(highlighted, Math.max(flattened.length - 1, 0));
 
@@ -189,6 +192,9 @@
       <div class="provider-options" role="listbox" aria-label="Discovered models">
         {#each groups as group}
           <p class="provider-group">{group.runner.name}{#if !group.runner.available}<span>unavailable</span>{/if}</p>
+          {#if !group.models.length}
+            <p class="provider-unavailable">{group.runner.unavailableReason ?? `${group.runner.name} is unavailable.`}</p>
+          {/if}
           {#each group.models as choice}
             {@const index = flattened.indexOf(choice)}
             {@const selected = choice.runner.id === runnerId && choice.model.id === modelId}
@@ -260,6 +266,7 @@
   .provider-option-tag { flex: 0 0 auto; border-radius: var(--radius-full); padding: 1px 5px; background: var(--surface-soft); color: var(--text-subtle); font-size: 8px; }
   .provider-option-check { width: 5px; height: 9px; flex: 0 0 auto; border-right: 1.6px solid currentColor; border-bottom: 1.6px solid currentColor; transform: translateY(-1px) rotate(45deg); }
   .provider-empty { margin: 10px 8px; color: var(--text-subtle); font-size: 11px; }
+  .provider-unavailable { margin: 0 6px 4px; color: var(--text-subtle); font-size: 10px; line-height: 1.45; }
 
   .provider-effort { display: flex; align-items: center; gap: 8px; border-top: 1px solid var(--border-soft); padding: 6px 8px; }
   .provider-effort > span { color: var(--text-subtle); font-size: 9px; font-weight: 750; letter-spacing: .06em; text-transform: uppercase; }
