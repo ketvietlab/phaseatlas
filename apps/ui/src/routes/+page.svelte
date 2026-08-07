@@ -166,7 +166,7 @@
   $: selectedModels = selectedRunner?.models ?? [];
   $: selectedProviderModel = selectedModels.find((model) => model.id === plannerModel);
   $: selectedReasoningEfforts = selectedProviderModel?.reasoningEfforts ?? [];
-  $: selectedModelEffortValue = modelEffortValue(plannerModel, plannerReasoningEffort);
+  $: reasoningEffortSupported = selectedReasoningEfforts.length > 0;
   $: providerSelectionReady = Boolean(
     selectedRunner?.available && selectedProviderModel &&
     (!plannerReasoningEffort || selectedReasoningEfforts.includes(plannerReasoningEffort)),
@@ -530,18 +530,16 @@
     if (executionOpen && selectedTask) void loadExecutionActions(selectedTask);
   }
 
-  function modelEffortValue(modelId: string, reasoningEffort: string): string {
-    return `${encodeURIComponent(modelId)}|${encodeURIComponent(reasoningEffort)}`;
+  function selectProviderModel(modelId: string) {
+    if (!selectedModels.some((candidate) => candidate.id === modelId)) return;
+    plannerModel = modelId;
+    plannerReasoningEffort = defaultReasoningEffort(modelId);
+    persistRepositoryProviderSettings();
+    if (executionOpen && selectedTask) void loadExecutionActions(selectedTask);
   }
 
-  function selectProviderModelEffort(value: string) {
-    const separator = value.indexOf("|");
-    if (separator < 0) return;
-    const modelId = decodeURIComponent(value.slice(0, separator));
-    const reasoningEffort = decodeURIComponent(value.slice(separator + 1));
-    const model = selectedModels.find((candidate) => candidate.id === modelId);
-    if (!model || reasoningEffort && !model.reasoningEfforts.includes(reasoningEffort)) return;
-    plannerModel = modelId;
+  function selectProviderReasoningEffort(reasoningEffort: string) {
+    if (reasoningEffort && !selectedReasoningEfforts.includes(reasoningEffort)) return;
     plannerReasoningEffort = reasoningEffort;
     persistRepositoryProviderSettings();
     if (executionOpen && selectedTask) void loadExecutionActions(selectedTask);
@@ -1671,17 +1669,33 @@
                   {/each}
                 </select>
               </label>
-              <label>
-                <span class="sr-only">Model and reasoning effort</span>
-                <select value={selectedModelEffortValue} onchange={(event) => selectProviderModelEffort(event.currentTarget.value)} disabled={!selectedModels.length} aria-label="Model and reasoning effort" title="Model and reasoning effort">
+              <label class="provider-quick-model">
+                <span class="sr-only">Model</span>
+                <select value={plannerModel} onchange={(event) => selectProviderModel(event.currentTarget.value)} disabled={!selectedModels.length} aria-label="Model" title="Model">
                   {#each selectedModels as model}
-                    <optgroup label={model.displayName}>
-                      <option value={modelEffortValue(model.id, "")}>{model.displayName} · Provider default</option>
-                      {#each model.reasoningEfforts as effort}
-                        <option value={modelEffortValue(model.id, effort)}>{model.displayName} · {effort} effort{effort === model.defaultReasoningEffort ? " · default" : ""}</option>
-                      {/each}
-                    </optgroup>
+                    <option value={model.id}>{model.displayName}{model.isDefault ? " · default" : ""}</option>
                   {/each}
+                </select>
+              </label>
+              <label class="provider-quick-effort">
+                <span class="sr-only">Reasoning effort</span>
+                <select
+                  value={plannerReasoningEffort}
+                  onchange={(event) => selectProviderReasoningEffort(event.currentTarget.value)}
+                  disabled={!reasoningEffortSupported}
+                  aria-label="Reasoning effort"
+                  title={reasoningEffortSupported
+                    ? "Reasoning effort"
+                    : `${selectedProviderModel?.displayName ?? "This model"} does not expose reasoning effort`}
+                >
+                  {#if reasoningEffortSupported}
+                    <option value="">Provider default</option>
+                    {#each selectedReasoningEfforts as effort}
+                      <option value={effort}>{effort}{effort === selectedProviderModel?.defaultReasoningEffort ? " · default" : ""}</option>
+                    {/each}
+                  {:else}
+                    <option value="">No effort control</option>
+                  {/if}
                 </select>
               </label>
             </div>
@@ -1999,7 +2013,7 @@
             <p>The provider will write only inside a PhaseAtlas-owned worktree. The canonical checkout and task state remain unchanged until a separate review.</p>
             <dl>
               <div><dt>Repository</dt><dd>{selectedRepository?.name}</dd></div>
-              <div><dt>Provider</dt><dd>{selectedRunner?.name} · {selectedProviderModel?.displayName}{plannerReasoningEffort ? ` · ${plannerReasoningEffort}` : " · default effort"}</dd></div>
+              <div><dt>Provider</dt><dd>{selectedRunner?.name} · {selectedProviderModel?.displayName}{plannerReasoningEffort ? ` · ${plannerReasoningEffort} effort` : reasoningEffortSupported ? " · default effort" : ""}</dd></div>
               <div><dt>Sandbox</dt><dd>{executionConfirmAction.sandbox}</dd></div>
               <div><dt>Network</dt><dd>{selectedTask.scope.allowExternalNetwork ? "Allowed by task" : "Blocked"}</dd></div>
             </dl>
@@ -2175,7 +2189,7 @@
           <span class="runner-status-dot"></span>
           <div>
             <strong>{selectedRunner?.name ?? "No runner available"} · {selectedProviderModel?.displayName ?? "No model"}</strong>
-            <small>{plannerReasoningEffort ? `${plannerReasoningEffort} reasoning effort` : "Provider default reasoning effort"}</small>
+            <small>{plannerReasoningEffort ? `${plannerReasoningEffort} reasoning effort` : reasoningEffortSupported ? "Provider default reasoning effort" : "This provider does not expose reasoning effort"}</small>
           </div>
         </div>
 

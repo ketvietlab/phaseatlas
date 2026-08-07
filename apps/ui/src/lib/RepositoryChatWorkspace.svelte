@@ -117,6 +117,22 @@
   $: selectedRunner = runners.find((runner) => runner.id === runnerId);
   $: selectedModel = selectedRunner?.models.find((model) => model.id === modelId);
   $: providerReady = Boolean(selectedRunner?.available && selectedModel);
+  // Turns always run on the provider frozen into the session at creation time
+  // (repository-chat-runtime resolves session.model / session.reasoningEffort),
+  // so the header must report that — not the current repository-bar selection.
+  $: sessionRunner = selectedSession ? runners.find((runner) => runner.id === selectedSession.runnerId) : undefined;
+  $: sessionModel = selectedSession
+    ? sessionRunner?.models.find((model) => model.id === selectedSession.model)
+    : undefined;
+  $: sessionRunnerLabel = selectedSession
+    ? sessionRunner?.name ?? selectedSession.runnerId
+    : selectedRunner?.name ?? "Provider unavailable";
+  $: sessionModelLabel = selectedSession
+    ? `${sessionModel?.displayName ?? selectedSession.model}${selectedSession.reasoningEffort ? ` · ${selectedSession.reasoningEffort}` : ""}`
+    : selectedModel?.displayName ?? "Select a discovered model";
+  $: sessionProviderDiverged = Boolean(
+    selectedSession && (selectedSession.runnerId !== runnerId || selectedSession.model !== modelId),
+  );
   $: activeTurn = [...selectedTurns].reverse().find((turn) => ACTIVE.has(turn.status)) ?? null;
   $: activeEdit = edits.find((edit) => edit.status === "running") ?? null;
   $: awaitingConfirmationEdit = !preparedEdit
@@ -1064,9 +1080,18 @@
         <p>Repository intelligence</p>
         <h2 id="repository-chat-title">Agent chat <span>/ {repositoryName}</span></h2>
       </div>
-      <button class="provider-chip" class:unavailable={!providerReady} type="button" title="Show agent configuration" onclick={onShowAgentConfiguration}>
+      <button
+        class="provider-chip"
+        class:unavailable={!providerReady}
+        class:diverged={sessionProviderDiverged}
+        type="button"
+        title={sessionProviderDiverged
+          ? "This conversation keeps the provider it was created with. New chats use the repository bar selection."
+          : "Show agent configuration"}
+        onclick={onShowAgentConfiguration}
+      >
         <span></span>
-        <div><small>{selectedRunner?.name ?? "Provider unavailable"}</small><strong>{selectedModel?.displayName ?? "Select a discovered model"}</strong></div>
+        <div><small>{sessionRunnerLabel}</small><strong>{sessionModelLabel}</strong></div>
       </button>
       <button class="explorer-chip" type="button" title="Open repository file explorer" onclick={onOpenExplorer}>
         <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 5h16v14H4zM8 5v14M11 9h6M11 13h4"/></svg>
@@ -1288,7 +1313,7 @@
                 </section>
               {/if}
               <div class="composer-card" class:disabled={!providerReady || selectedSession.state === "closed"} data-mode={chatMode} data-access={editAccessMode}>
-                <textarea bind:this={composerElement} bind:value={composer} oninput={handleComposerInput} onkeydown={handleComposerKeydown} onkeyup={handleComposerCaret} onblur={handleComposerBlur} onclick={() => updateMentionFromComposer()} rows="2" maxlength="32000" aria-label="Chat message" aria-autocomplete="list" aria-controls={mentionOpen ? "repository-mention-options" : undefined} aria-activedescendant={mentionOpen && mentionResults.length ? `repository-mention-${mentionSelection}` : undefined} placeholder={selectedSession.state === "closed" ? "This conversation is archived" : providerReady ? chatMode === "edit" ? `Describe the change for ${selectedRunner?.name}…` : `Ask ${selectedRunner?.name} about ${repositoryName}…` : "Select an available provider and discovered model in repository settings"} disabled={!providerReady || selectedSession.state === "closed"}></textarea>
+                <textarea bind:this={composerElement} bind:value={composer} oninput={handleComposerInput} onkeydown={handleComposerKeydown} onkeyup={handleComposerCaret} onblur={handleComposerBlur} onclick={() => updateMentionFromComposer()} rows="2" maxlength="32000" aria-label="Chat message" aria-autocomplete="list" aria-controls={mentionOpen ? "repository-mention-options" : undefined} aria-activedescendant={mentionOpen && mentionResults.length ? `repository-mention-${mentionSelection}` : undefined} placeholder={selectedSession.state === "closed" ? "This conversation is archived" : providerReady ? chatMode === "edit" ? `Describe the change for ${sessionRunnerLabel}…` : `Ask ${sessionRunnerLabel} about ${repositoryName}…` : "Select an available provider and discovered model in repository settings"} disabled={!providerReady || selectedSession.state === "closed"}></textarea>
                 <div class="composer-toolbar">
                   <form class="attachment-entry" onsubmit={(event) => { event.preventDefault(); addAttachment(); }}>
                     <div class="composer-mode-switch" aria-label="Agent mode">
@@ -1343,7 +1368,7 @@
   .chat-header { display: grid; min-width: 0; grid-template-columns: 40px minmax(180px,1fr) minmax(160px,auto) auto auto auto 36px; align-items: center; gap: 8px; border-bottom: 1px solid var(--border); padding: 0 12px 0 16px; background: color-mix(in srgb,var(--surface) 96%,var(--brand-50)); -webkit-app-region: drag; }
   .chat-header button,.chat-header .provider-chip,.chat-header .access-chip { -webkit-app-region: no-drag; }.chat-mark { position: relative; width: 32px; height: 32px; border: 1px solid var(--brand-200); border-radius: 10px; background: var(--active-surface); }.chat-mark span { position: absolute; width: 7px; height: 7px; border: 1px solid var(--brand-500); background: var(--surface); transform: rotate(45deg); }.chat-mark span:nth-child(1) { top: 5px; left: 12px; }.chat-mark span:nth-child(2) { bottom: 5px; left: 5px; }.chat-mark span:nth-child(3) { right: 5px; bottom: 5px; background: var(--brand-500); }
   .chat-title { min-width: 0; }.chat-title p,.conversation-header p { margin: 0 0 2px; color: var(--active-text); font-size: 11px; font-weight: 800; letter-spacing: .09em; text-transform: uppercase; }.chat-title h2 { overflow: hidden; margin: 0; font-size: 16px; letter-spacing: -.015em; text-overflow: ellipsis; white-space: nowrap; }.chat-title h2 span { color: var(--text-subtle); font-weight: 560; }
-  .provider-chip { display: flex; min-width: 0; align-items: center; gap: 8px; border: 1px solid var(--border); border-radius: var(--radius); padding: 6px 9px; background: var(--surface); color: var(--text); text-align: left; }.provider-chip:hover { border-color: var(--brand-300); background: var(--active-surface); }.provider-chip > span { width: 7px; height: 7px; flex: 0 0 7px; border-radius: 50%; background: var(--success-500); box-shadow: 0 0 0 3px color-mix(in srgb,var(--success-500) 14%,transparent); }.provider-chip.unavailable > span { background: var(--warning-500); }.provider-chip div { min-width: 0; }.provider-chip small,.provider-chip strong { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }.provider-chip small { color: var(--text-subtle); font-size: 10px; text-transform: uppercase; }.provider-chip strong { margin-top: 1px; font-size: 12px; }
+  .provider-chip { display: flex; min-width: 0; align-items: center; gap: 8px; border: 1px solid var(--border); border-radius: var(--radius); padding: 6px 9px; background: var(--surface); color: var(--text); text-align: left; }.provider-chip:hover { border-color: var(--brand-300); background: var(--active-surface); }.provider-chip > span { width: 7px; height: 7px; flex: 0 0 7px; border-radius: 50%; background: var(--success-500); box-shadow: 0 0 0 3px color-mix(in srgb,var(--success-500) 14%,transparent); }.provider-chip.unavailable > span { background: var(--warning-500); }.provider-chip.diverged > span { background: var(--brand-500); box-shadow: 0 0 0 3px color-mix(in srgb,var(--brand-500) 14%,transparent); }.provider-chip div { min-width: 0; }.provider-chip small,.provider-chip strong { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }.provider-chip small { color: var(--text-subtle); font-size: 10px; text-transform: uppercase; }.provider-chip strong { margin-top: 1px; font-size: 12px; }
   .explorer-chip { display: inline-flex; align-items: center; gap: 6px; border: 1px solid var(--border); border-radius: var(--radius); padding: 8px 10px; background: var(--surface); color: var(--text-muted); font-size: 12px; font-weight: 750; }.explorer-chip:hover,.explorer-chip.active { border-color: var(--brand-300); background: var(--active-surface); color: var(--active-text); }.explorer-chip svg { width: 15px; height: 15px; fill: none; stroke: currentColor; stroke-width: 1.7; }
   .access-chip { display: flex; align-items: center; gap: 5px; border: 1px solid var(--border); border-radius: var(--radius-full); padding: 5px 8px; color: var(--text-muted); font-size: 11px; font-weight: 750; text-transform: uppercase; white-space: nowrap; }.access-chip[data-mode="edit"] { border-color: color-mix(in srgb,var(--warning-500) 52%,var(--border)); background: var(--warning-surface); color: var(--warning-text); }.access-chip[data-mode="edit"][data-access="ask_for_approval"] { border-color: color-mix(in srgb,var(--brand-400) 55%,var(--border)); background: var(--active-surface); color: var(--active-text); }.access-chip svg { width: 12px; height: 12px; fill: none; stroke: currentColor; stroke-width: 1.8; }.close-chat { display: grid; width: 34px; height: 34px; place-items: center; border: 0; border-radius: var(--radius); background: transparent; color: var(--text-muted); font-size: 24px; }.close-chat:hover { background: var(--surface-soft); color: var(--text); }
   .chat-grid { display: grid; min-height: 0; grid-template-columns: 252px minmax(0,1fr); }.session-rail { display: grid; min-height: 0; grid-template-rows: 52px minmax(0,1fr) 44px; border-right: 1px solid var(--border); background: var(--surface-soft); }.session-rail-header { display: flex; align-items: center; justify-content: space-between; border-bottom: 1px solid var(--border); padding: 0 10px 0 13px; }.session-rail-header > div { display: flex; align-items: center; gap: 7px; }.session-rail-header span { color: var(--text-muted); font-size: 12px; font-weight: 800; letter-spacing: .06em; text-transform: uppercase; }.session-rail-header strong { display: grid; min-width: 20px; height: 18px; place-items: center; border-radius: var(--radius-full); background: var(--surface); color: var(--text-subtle); font-size: 11px; }.session-rail-header > button { display: grid; width: 29px; height: 29px; place-items: center; border: 1px solid var(--border); border-radius: var(--radius-sm); background: var(--surface); color: var(--active-text); font-size: 18px; }.session-rail-header > button:hover { border-color: var(--brand-300); background: var(--active-surface); }.session-rail-header > button:disabled { opacity: .45; }

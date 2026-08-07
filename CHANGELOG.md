@@ -8,6 +8,15 @@ may contain a documented breaking change.
 
 ## [Unreleased]
 
+### Changed
+
+- Split the repository agent selector into separate model and reasoning-effort controls instead of one
+  combined dropdown whose options multiplied every model by every effort level.
+- Reasoning effort is now disabled with an explicit reason for providers that do not expose it, and
+  provider summaries no longer claim a "default effort" for those providers.
+- Repository chat now reports the provider, model, and reasoning effort frozen into the open
+  conversation rather than the current repository-bar selection.
+
 ## [0.1.0] - 2026-08-04
 
 ### Added
