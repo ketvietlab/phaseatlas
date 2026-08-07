@@ -20,6 +20,11 @@ may contain a documented breaking change.
 - `chat.setSessionProvider`, which retargets an open conversation after validating the selection
   against the discovered catalog. Past turns keep the provider they were recorded with.
 
+### Fixed
+
+- Every Claude Code invocation failed with "When using --print, --output-format=stream-json requires
+  --verbose". Planning, execution, chat, and isolated chat edits now pass the required flag.
+
 ### Removed
 
 - The chat composer's "Files & folders" and "Images" buttons. Context is attached by typing `@` and

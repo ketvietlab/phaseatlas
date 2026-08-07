@@ -821,6 +821,7 @@ class ClaudeExecutionAdapter implements ProviderExecutionAdapter {
       const args = [
         "--print",
         "--output-format", "stream-json",
+        "--verbose",
         "--include-partial-messages",
         "--json-schema", JSON.stringify(AGENT_RUN_RESULT_SCHEMA),
         "--permission-mode", context.spec.sandbox === "read-only" ? "plan" : "acceptEdits",
@@ -1101,6 +1102,7 @@ class ClaudePlanningAdapter implements PlanningRunnerAdapter {
     const args = [
       "--print",
       "--output-format", "stream-json",
+      "--verbose",
       "--include-partial-messages",
       "--json-schema", JSON.stringify(schema),
       "--permission-mode", "plan",

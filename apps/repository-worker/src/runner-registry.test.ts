@@ -216,6 +216,8 @@ test("Codex and Claude fixtures translate to the same normalized execution contr
   assert.equal(observedArgs.get("fixture-codex")?.includes("--config"), true);
   assert.equal(observedArgs.get("fixture-codex")?.includes('model_reasoning_effort="high"'), true);
   const claudeArgs = observedArgs.get(process.env.PHASEATLAS_CLAUDE_BIN || "claude") ?? [];
+  // Claude Code rejects --print --output-format stream-json unless --verbose is present.
+  assert.equal(claudeArgs.includes("--verbose"), true);
   assert.equal(claudeArgs[claudeArgs.indexOf("--effort") + 1], "xhigh");
   assert.equal(claudeArgs.indexOf("--effort") < claudeArgs.indexOf("--"), true);
 });

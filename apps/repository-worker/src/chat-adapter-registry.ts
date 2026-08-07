@@ -392,6 +392,7 @@ class ClaudeChatAdapter implements RepositoryChatAdapter {
       "--mcp-config", "{}",
       "--output-format", "stream-json",
       "--input-format", "stream-json",
+      "--verbose",
       "--include-partial-messages",
       "--permission-mode", "plan",
       "--tools", "Read,Glob,Grep",
