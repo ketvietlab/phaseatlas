@@ -77,12 +77,34 @@ async function detectRunner(options: {
   name: string;
   executable: string;
   discoverModels: (executable: string) => Promise<RunnerModelDescriptor[]>;
+  checkAuthentication?: (executable: string) => Promise<boolean>;
 }): Promise<RunnerDescriptor> {
   try {
     const { stdout, stderr } = await execFileAsync(options.executable, ["--version"], {
       timeout: 3_000,
       env: process.env,
     });
+    // An installed CLI is not a usable one. Probe authentication where the
+    // provider exposes it, so the renderer never offers a runner whose every
+    // run would fail at sign-in.
+    const authenticated = options.checkAuthentication
+      ? await options.checkAuthentication(options.executable).catch(() => true)
+      : true;
+    if (!authenticated) {
+      const unavailableReason = `${options.name} is installed but not signed in. Run its login command, then reopen the repository.`;
+      return {
+        id: options.id,
+        provider: options.provider,
+        name: options.name,
+        version: `${stdout || stderr}`.trim().split("\n")[0],
+        available: false,
+        unavailableReason,
+        capabilities: [...RUNNER_CAPABILITIES],
+        models: [],
+        modelDiscovery: { status: "unavailable", unavailableReason },
+        execution: executionDescriptor(),
+      };
+    }
     const models = await options.discoverModels(options.executable).catch(() => []);
     return {
       id: options.id,
@@ -270,6 +292,32 @@ async function discoverCodexModels(executable: string): Promise<RunnerModelDescr
     maxBuffer: 16 * 1024 * 1024,
   });
   return parseCodexModelCatalog(stdout);
+}
+
+export function parseClaudeAuthStatus(value: string): boolean {
+  try {
+    const parsed = JSON.parse(value) as unknown;
+    const record = recordValue(parsed);
+    // Only an explicit false means signed out. Anything unrecognised stays
+    // permissive so an output change cannot silently disable the provider.
+    return record?.loggedIn !== false;
+  } catch {
+    return true;
+  }
+}
+
+async function checkClaudeAuthentication(executable: string): Promise<boolean> {
+  // `claude auth status` exits 1 while signed out but still prints the JSON, so
+  // the payload decides, not the exit code.
+  const stdout = await execFileAsync(executable, ["auth", "status", "--json"], {
+    timeout: 5_000,
+    env: process.env,
+    maxBuffer: 256 * 1024,
+  }).then(
+    (result) => result.stdout,
+    (error: { stdout?: unknown }) => typeof error?.stdout === "string" ? error.stdout : "",
+  );
+  return parseClaudeAuthStatus(stdout);
 }
 
 async function discoverClaudeModels(executable: string): Promise<RunnerModelDescriptor[]> {
@@ -1119,6 +1167,7 @@ class ClaudePlanningAdapter implements PlanningRunnerAdapter {
       name: "Claude Code",
       executable: this.executable,
       discoverModels: discoverClaudeModels,
+      checkAuthentication: checkClaudeAuthentication,
     });
   }
 

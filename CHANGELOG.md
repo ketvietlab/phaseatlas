@@ -28,6 +28,10 @@ may contain a documented breaking change.
 
 ### Fixed
 
+- Claude Code was offered as an available provider, with a full model catalog, while signed out —
+  its version and model discovery never needed authentication, so every run failed at sign-in
+  instead. Discovery now probes `claude auth status` and reports the runner as unavailable with the
+  reason.
 - A failing Claude Code run reported only "exited with code 1:" with no reason. Claude writes its
   failure into the stdout stream and leaves stderr empty, so the diagnostic it already parsed was
   discarded in favour of an empty process error.

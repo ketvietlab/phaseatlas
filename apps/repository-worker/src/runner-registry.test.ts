@@ -14,6 +14,7 @@ import {
   assertRunnerModel,
   assertRunnerSelection,
   claudeReasoningEffortArguments,
+  parseClaudeAuthStatus,
   parseClaudeModelHelp,
   parseClaudeReasoningEfforts,
   parseCodexModelCatalog,
@@ -326,7 +327,17 @@ test("surfaces the provider's own failure text when Claude exits non-zero with e
     }),
     /Not logged in/,
   );
-  const failure = events.find((event) => event.type === "run.failed");
-  assert.equal(failure?.type === "run.failed" && failure.message.includes("Not logged in"), true);
-  assert.equal(failure?.type === "run.failed" && failure.message.includes("exited with code 1"), false);
+  // Omit<> over a union collapses to the shared keys, so read the message off the record.
+  const failure = events.find((event) => event.type === "run.failed") as { message?: string } | undefined;
+  assert.equal(failure?.message?.includes("Not logged in"), true);
+  assert.equal(failure?.message?.includes("exited with code 1"), false);
+});
+
+test("treats an installed but signed-out CLI as unavailable", () => {
+  assert.equal(parseClaudeAuthStatus(JSON.stringify({ loggedIn: false, authMethod: "none" })), false);
+  assert.equal(parseClaudeAuthStatus(JSON.stringify({ loggedIn: true, authMethod: "oauth" })), true);
+  // An unrecognised or malformed payload must not disable a working provider.
+  assert.equal(parseClaudeAuthStatus("not json"), true);
+  assert.equal(parseClaudeAuthStatus(JSON.stringify({ status: "signed-in" })), true);
+  assert.equal(parseClaudeAuthStatus(JSON.stringify([])), true);
 });
