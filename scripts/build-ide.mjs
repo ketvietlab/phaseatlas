@@ -12,10 +12,23 @@ const submodule = path.join(repositoryRoot, "ide", "theia");
 const example = path.join(submodule, "examples", "browser");
 const output = path.join(repositoryRoot, "ide", "lib");
 
+// The repository pins Node 24; Theia needs >= 22. A shell still on an older
+// default produces failures deep inside npm rather than at the entry point.
+const [major] = process.versions.node.split(".").map(Number);
+if (!Number.isInteger(major) || major < 22) {
+  throw new Error(`The embedded IDE build needs Node 22 or newer; this is ${process.versions.node}. Run "nvm use" first.`);
+}
+
+const npmCommand = process.platform === "win32" ? "npm.cmd" : "npm";
+
 function run(command, args, cwd) {
   return new Promise((resolve, reject) => {
     const child = spawn(command, args, { cwd, stdio: "inherit", env: process.env });
-    child.once("error", reject);
+    child.once("error", (error) => reject(
+      error && error.code === "ENOENT"
+        ? new Error(`${command} was not found on PATH.`)
+        : error,
+    ));
     child.once("exit", (code) => code === 0
       ? resolve()
       : reject(new Error(`${command} ${args.join(" ")} exited with code ${code}`)));
@@ -28,10 +41,11 @@ try {
   throw new Error("ide/theia is empty. Run: git submodule update --init --depth 1 ide/theia");
 }
 
-// Theia's monorepo is yarn/lerna based; using anything else silently produces a
-// half-linked workspace that fails deep inside the build.
-await run("yarn", ["install", "--frozen-lockfile"], submodule);
-await run("yarn", ["build:browser"], submodule);
+// Theia 1.74 ships package-lock.json and npm workspaces; it left yarn behind.
+// npm is also invoked directly because corepack refuses to run a package manager
+// other than the one this repository declares.
+await run(npmCommand, ["ci"], submodule);
+await run(npmCommand, ["run", "build:browser"], submodule);
 
 await rm(output, { recursive: true, force: true });
 await cp(path.join(example, "lib"), output, { recursive: true });

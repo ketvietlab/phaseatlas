@@ -18,11 +18,15 @@ pnpm build:ide                # yarn install + yarn build:browser, then copy to 
 pnpm fetch:ide-extensions     # download and verify the pinned extensions
 ```
 
-Theia's monorepo builds with yarn and lerna. `build:ide` shells out to that
-toolchain rather than joining the pnpm workspace, because a partially linked
-Theia workspace fails deep inside the build with errors that do not name the
-cause. The build is large and slow; neither `ide/lib` nor `ide/default-extensions`
-is committed.
+Theia 1.74 uses npm workspaces and lerna — it ships `package-lock.json`, not a
+yarn lockfile. `build:ide` invokes `npm` directly inside the submodule rather
+than joining the pnpm workspace: corepack refuses to run a package manager other
+than the one this repository declares, and a partially linked Theia workspace
+fails deep inside the build with errors that do not name the cause.
+
+Run it under Node 24 (`nvm use`). A shell whose default is older will fail in
+corepack before the script starts. The build is large and slow; neither
+`ide/lib` nor `ide/default-extensions` is committed.
 
 ## What the desktop expects
 
