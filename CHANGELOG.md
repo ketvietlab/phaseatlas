@@ -28,6 +28,10 @@ may contain a documented breaking change.
 
 ### Fixed
 
+- Claude Code always reported itself as signed out inside PhaseAtlas, even for a signed-in user. The
+  repository worker's environment allowlist dropped `USER`, which the CLI needs to resolve its stored
+  credentials, so no Claude Code run could ever authenticate.
+
 - Claude Code was offered as an available provider, with a full model catalog, while signed out —
   its version and model discovery never needed authentication, so every run failed at sign-in
   instead. Discovery now probes `claude auth status` and reports the runner as unavailable with the

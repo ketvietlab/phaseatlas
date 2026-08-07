@@ -111,6 +111,11 @@ function workerEnvironment(repositoryPath: string, checkoutStorePath: string): R
   const allowedKeys = [
     "PATH",
     "HOME",
+    // Claude Code resolves its stored credentials through the account identity,
+    // so stripping USER leaves the CLI reporting itself as signed out even when
+    // the user is signed in. LOGNAME is its POSIX twin.
+    "USER",
+    "LOGNAME",
     "SHELL",
     "TMPDIR",
     "SSH_AUTH_SOCK",
