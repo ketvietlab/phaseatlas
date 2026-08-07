@@ -1,0 +1,3 @@
+[submodule "ide/theia"]
+	path = ide/theia
+	url = https://github.com/eclipse-theia/theia.git
