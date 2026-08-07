@@ -530,6 +530,21 @@
     if (executionOpen && selectedTask) void loadExecutionActions(selectedTask);
   }
 
+  // Shared by the repository bar and the chat composer picker: one repository-wide
+  // selection, persisted per checkout, regardless of which surface changed it.
+  function applyProviderSelection(nextRunnerId: string, nextModelId: string, nextReasoningEffort: string) {
+    const runner = runners.find((candidate) => candidate.id === nextRunnerId);
+    const model = runner?.models.find((candidate) => candidate.id === nextModelId);
+    if (!runner || !model) return;
+    plannerRunnerId = nextRunnerId;
+    plannerModel = nextModelId;
+    plannerReasoningEffort = nextReasoningEffort && model.reasoningEfforts.includes(nextReasoningEffort)
+      ? nextReasoningEffort
+      : "";
+    persistRepositoryProviderSettings();
+    if (executionOpen && selectedTask) void loadExecutionActions(selectedTask);
+  }
+
   function selectProviderModel(modelId: string) {
     if (!selectedModels.some((candidate) => candidate.id === modelId)) return;
     plannerModel = modelId;
@@ -2365,6 +2380,7 @@
       {terminalOpen}
       {terminalHeight}
       {terminalShortcutLabel}
+      onSelectProvider={applyProviderSelection}
       onClose={() => chatOpen = false}
       onOpenExplorer={() => {
         openRepositoryEditor();

@@ -5,6 +5,7 @@ import type {
   RepositoryChatCreateInput,
   RepositoryChatEventPage,
   RepositoryChatMessage,
+  RepositoryChatProviderInput,
   RepositoryChatRenameInput,
   RepositoryChatRetryInput,
   RepositoryChatSendInput,
@@ -118,6 +119,19 @@ export class RepositoryChatRuntime {
     return this.store.renameChatSession(
       boundedId(input.sessionId, "sessionId"),
       publicText(input.title, 120),
+    );
+  }
+
+  async setSessionProvider(input: RepositoryChatProviderInput): Promise<RepositoryChatSession> {
+    const runnerId = boundedId(input.runnerId, "runnerId");
+    const model = boundedId(input.model, "model");
+    const reasoningEffort = input.reasoningEffort ? boundedId(input.reasoningEffort, "reasoningEffort") : undefined;
+    await this.validateProvider(runnerId, model, reasoningEffort);
+    return this.store.setChatSessionProvider(
+      boundedId(input.sessionId, "sessionId"),
+      runnerId,
+      model,
+      reasoningEffort,
     );
   }
 

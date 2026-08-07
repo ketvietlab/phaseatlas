@@ -38,6 +38,7 @@ import {
   type RepositoryChatCreateInput,
   type RepositoryChatEventPage,
   type RepositoryChatMessage,
+  type RepositoryChatProviderInput,
   type RepositoryChatRenameInput,
   type RepositoryChatRetryInput,
   type RepositoryChatSendInput,
@@ -572,6 +573,10 @@ export class RepositoryProcessManager {
 
   async renameChatSession(checkoutId: string, input: RepositoryChatRenameInput): Promise<RepositoryChatSession> {
     return (await this.ensureWorker(checkoutId)).call<RepositoryChatSession>("chat.session.rename", { input });
+  }
+
+  async setChatSessionProvider(checkoutId: string, input: RepositoryChatProviderInput): Promise<RepositoryChatSession> {
+    return (await this.ensureWorker(checkoutId)).call<RepositoryChatSession>("chat.session.provider", { input });
   }
 
   async closeChatSession(checkoutId: string, sessionId: string): Promise<RepositoryChatSession> {

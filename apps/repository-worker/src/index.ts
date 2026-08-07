@@ -23,6 +23,7 @@ import type {
   RepositoryChatCreateInput,
   RepositoryChatAttachment,
   RepositoryChatImageMediaType,
+  RepositoryChatProviderInput,
   RepositoryChatRenameInput,
   RepositoryChatRetryInput,
   RepositoryChatSendInput,
@@ -201,6 +202,24 @@ function chatRenameInput(value: unknown): RepositoryChatRenameInput {
     throw new Error("sessionId and title are required.");
   }
   return { sessionId: value.sessionId, title: value.title };
+}
+
+function chatProviderInput(value: unknown): RepositoryChatProviderInput {
+  const fields = ["sessionId", "runnerId", "model", "reasoningEffort"];
+  if (!isRecord(value) || Object.keys(value).some((field) => !fields.includes(field))) {
+    throw new Error("Chat provider input is invalid.");
+  }
+  if (typeof value.sessionId !== "string" || typeof value.runnerId !== "string" || typeof value.model !== "string") {
+    throw new Error("sessionId, runnerId, and model are required.");
+  }
+  return {
+    sessionId: value.sessionId,
+    runnerId: value.runnerId,
+    model: value.model,
+    ...(typeof value.reasoningEffort === "string" && value.reasoningEffort.trim()
+      ? { reasoningEffort: value.reasoningEffort.trim() }
+      : {}),
+  };
 }
 
 function chatSendInput(value: unknown): RepositoryChatSendInput {
@@ -1095,6 +1114,8 @@ async function dispatch(request: WorkerRequest): Promise<unknown> {
     }
     case "chat.session.rename":
       return chatRuntime.renameSession(chatRenameInput(requestParams(request).input));
+    case "chat.session.provider":
+      return chatRuntime.setSessionProvider(chatProviderInput(requestParams(request).input));
     case "chat.session.close": {
       const sessionId = requestParams(request).sessionId;
       if (typeof sessionId !== "string") throw new Error("sessionId is required.");

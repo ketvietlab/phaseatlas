@@ -568,6 +568,26 @@ export class CheckoutOperationalStore {
     return this.getChatSession(sessionId);
   }
 
+  setChatSessionProvider(
+    sessionId: string,
+    runnerId: string,
+    model: string,
+    reasoningEffort?: string,
+    timestamp = new Date().toISOString(),
+  ): RepositoryChatSession {
+    if (!runnerId.trim() || !model.trim()) throw new Error("Chat session provider selection is incomplete.");
+    const session = this.getChatSession(sessionId);
+    if (session.state === "closed") throw new Error("An archived chat session cannot change provider.");
+    const active = this.database.prepare(`
+      SELECT turn_id FROM chat_turns WHERE session_id = ? AND status IN ('starting', 'running') LIMIT 1
+    `).get(sessionId) as { turn_id?: string } | undefined;
+    if (active?.turn_id) throw new Error("Cancel the active chat turn before changing provider.");
+    this.database.prepare(`
+      UPDATE chat_sessions SET runner_id = ?, model_id = ?, reasoning_effort = ?, updated_at = ? WHERE session_id = ?
+    `).run(runnerId.trim(), model.trim(), reasoningEffort?.trim() || null, timestamp, sessionId);
+    return this.getChatSession(sessionId);
+  }
+
   closeChatSession(sessionId: string, timestamp = new Date().toISOString()): RepositoryChatSession {
     const session = this.getChatSession(sessionId);
     const active = this.database.prepare(`

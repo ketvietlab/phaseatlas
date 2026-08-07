@@ -689,6 +689,13 @@ export interface RepositoryChatRenameInput {
   title: string;
 }
 
+export interface RepositoryChatProviderInput {
+  sessionId: string;
+  runnerId: string;
+  model: string;
+  reasoningEffort?: string;
+}
+
 export interface RepositoryChatSendInput {
   sessionId: string;
   text: string;
@@ -868,6 +875,7 @@ export type RepositoryWorkerMethod =
   | "chat.session.list"
   | "chat.session.get"
   | "chat.session.rename"
+  | "chat.session.provider"
   | "chat.session.close"
   | "chat.message.list"
   | "chat.turn.list"
@@ -1011,6 +1019,7 @@ export interface PhaseAtlasDesktopApi {
     listSessions(checkoutId: string): Promise<RepositoryChatSession[]>;
     getSession(checkoutId: string, sessionId: string): Promise<RepositoryChatSession>;
     renameSession(checkoutId: string, input: RepositoryChatRenameInput): Promise<RepositoryChatSession>;
+    setSessionProvider(checkoutId: string, input: RepositoryChatProviderInput): Promise<RepositoryChatSession>;
     closeSession(checkoutId: string, sessionId: string): Promise<RepositoryChatSession>;
     listMessages(checkoutId: string, sessionId: string): Promise<RepositoryChatMessage[]>;
     listTurns(checkoutId: string, sessionId: string): Promise<RepositoryChatTurn[]>;

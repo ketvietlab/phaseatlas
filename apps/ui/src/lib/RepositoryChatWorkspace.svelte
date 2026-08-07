@@ -33,6 +33,11 @@
   export let onOpenExplorer: () => void = () => undefined;
   export let onToggleTerminal: () => void = () => undefined;
   export let onCreateTaskProposal: (request: string) => void = () => undefined;
+  export let onSelectProvider: (
+    nextRunnerId: string,
+    nextModelId: string,
+    nextReasoningEffort: string,
+  ) => void = () => undefined;
 
   type Activity = {
     id: string;
@@ -117,22 +122,19 @@
   $: selectedRunner = runners.find((runner) => runner.id === runnerId);
   $: selectedModel = selectedRunner?.models.find((model) => model.id === modelId);
   $: providerReady = Boolean(selectedRunner?.available && selectedModel);
-  // Turns always run on the provider frozen into the session at creation time
-  // (repository-chat-runtime resolves session.model / session.reasoningEffort),
-  // so the header must report that — not the current repository-bar selection.
-  $: sessionRunner = selectedSession ? runners.find((runner) => runner.id === selectedSession.runnerId) : undefined;
-  $: sessionModel = selectedSession
-    ? sessionRunner?.models.find((model) => model.id === selectedSession.model)
-    : undefined;
-  $: sessionRunnerLabel = selectedSession
-    ? sessionRunner?.name ?? selectedSession.runnerId
-    : selectedRunner?.name ?? "Provider unavailable";
-  $: sessionModelLabel = selectedSession
-    ? `${sessionModel?.displayName ?? selectedSession.model}${selectedSession.reasoningEffort ? ` · ${selectedSession.reasoningEffort}` : ""}`
-    : selectedModel?.displayName ?? "Select a discovered model";
-  $: sessionProviderDiverged = Boolean(
-    selectedSession && (selectedSession.runnerId !== runnerId || selectedSession.model !== modelId),
-  );
+  // Turns run on the provider stored on the session, not the repository-bar
+  // selection, so the composer picker reads and writes the session's own values
+  // whenever one is open. Applying a change updates both.
+  $: activeRunnerId = selectedSession?.runnerId ?? runnerId;
+  $: activeModelId = selectedSession?.model ?? modelId;
+  $: activeReasoningEffort = selectedSession ? selectedSession.reasoningEffort ?? "" : reasoningEffort;
+  $: activeRunner = runners.find((runner) => runner.id === activeRunnerId);
+  $: activeModels = activeRunner?.models ?? [];
+  $: activeModel = activeModels.find((model) => model.id === activeModelId);
+  $: activeEfforts = activeModel?.reasoningEfforts ?? [];
+  $: activeEffortSupported = activeEfforts.length > 0;
+  $: sessionRunnerLabel = activeRunner?.name ?? activeRunnerId ?? "Provider unavailable";
+  $: providerPickerLocked = Boolean(activeTurn || activeEdit || preparedEdit || editBusy);
   $: activeTurn = [...selectedTurns].reverse().find((turn) => ACTIVE.has(turn.status)) ?? null;
   $: activeEdit = edits.find((edit) => edit.status === "running") ?? null;
   $: awaitingConfirmationEdit = !preparedEdit
@@ -296,6 +298,54 @@
     ]);
     messagesBySession = { ...messagesBySession, [sessionId]: messages };
     turnsBySession = { ...turnsBySession, [sessionId]: turns };
+  }
+
+  function defaultEffortFor(runner: RunnerDescriptor | undefined, candidateModelId: string): string {
+    const model = runner?.models.find((candidate) => candidate.id === candidateModelId);
+    return model?.defaultReasoningEffort && model.reasoningEfforts.includes(model.defaultReasoningEffort)
+      ? model.defaultReasoningEffort
+      : "";
+  }
+
+  // The picker is global: it moves the repository-wide selection and, when a
+  // conversation is open, retargets that conversation so the next turn actually
+  // runs on what the user just chose. Past turns keep their own recorded model.
+  async function applyProvider(nextRunnerId: string, nextModelId: string, nextReasoningEffort: string) {
+    if (!nextRunnerId || !nextModelId) return;
+    onSelectProvider(nextRunnerId, nextModelId, nextReasoningEffort);
+    if (!window.phaseatlas || !selectedSession || selectedSession.state !== "open") return;
+    if (
+      selectedSession.runnerId === nextRunnerId &&
+      selectedSession.model === nextModelId &&
+      (selectedSession.reasoningEffort ?? "") === nextReasoningEffort
+    ) return;
+    try {
+      const updated = await window.phaseatlas.chat.setSessionProvider(checkoutId, {
+        sessionId: selectedSession.sessionId,
+        runnerId: nextRunnerId,
+        model: nextModelId,
+        ...(nextReasoningEffort ? { reasoningEffort: nextReasoningEffort } : {}),
+      });
+      sessions = sessions.map((session) => session.sessionId === updated.sessionId ? updated : session);
+    } catch (error) {
+      errorMessage = error instanceof Error ? error.message : "Unable to change the conversation provider.";
+    }
+  }
+
+  function changeProviderRunner(event: Event) {
+    const nextRunnerId = (event.currentTarget as HTMLSelectElement).value;
+    const runner = runners.find((candidate) => candidate.id === nextRunnerId);
+    const nextModelId = runner?.models.find((model) => model.isDefault)?.id ?? runner?.models[0]?.id ?? "";
+    void applyProvider(nextRunnerId, nextModelId, defaultEffortFor(runner, nextModelId));
+  }
+
+  function changeProviderModel(event: Event) {
+    const nextModelId = (event.currentTarget as HTMLSelectElement).value;
+    void applyProvider(activeRunnerId, nextModelId, defaultEffortFor(activeRunner, nextModelId));
+  }
+
+  function changeProviderEffort(event: Event) {
+    void applyProvider(activeRunnerId, activeModelId, (event.currentTarget as HTMLSelectElement).value);
   }
 
   async function createSession() {
@@ -1080,19 +1130,6 @@
         <p>Repository intelligence</p>
         <h2 id="repository-chat-title">Agent chat <span>/ {repositoryName}</span></h2>
       </div>
-      <button
-        class="provider-chip"
-        class:unavailable={!providerReady}
-        class:diverged={sessionProviderDiverged}
-        type="button"
-        title={sessionProviderDiverged
-          ? "This conversation keeps the provider it was created with. New chats use the repository bar selection."
-          : "Show agent configuration"}
-        onclick={onShowAgentConfiguration}
-      >
-        <span></span>
-        <div><small>{sessionRunnerLabel}</small><strong>{sessionModelLabel}</strong></div>
-      </button>
       <button class="explorer-chip" type="button" title="Open repository file explorer" onclick={onOpenExplorer}>
         <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 5h16v14H4zM8 5v14M11 9h6M11 13h4"/></svg>
         Explorer
@@ -1339,6 +1376,49 @@
                     {#if attachmentDraft}<button type="submit">Add</button>{/if}
                   </form>
                   <div class="composer-actions">
+                    <div class="provider-picker" class:unavailable={!providerReady} title="Applies to this conversation and to every repository selection">
+                      <label>
+                        <span class="sr-only">Agent CLI</span>
+                        <select value={activeRunnerId} onchange={changeProviderRunner} disabled={providerPickerLocked} aria-label="Agent CLI">
+                          {#each runners as runner}
+                            <option value={runner.id} disabled={!runner.available}>{runner.name}</option>
+                          {/each}
+                          {#if activeRunnerId && !activeRunner}
+                            <option value={activeRunnerId}>{activeRunnerId}</option>
+                          {/if}
+                        </select>
+                      </label>
+                      <label>
+                        <span class="sr-only">Model</span>
+                        <select value={activeModelId} onchange={changeProviderModel} disabled={providerPickerLocked || !activeModels.length} aria-label="Model">
+                          {#each activeModels as model}
+                            <option value={model.id}>{model.displayName}</option>
+                          {/each}
+                          {#if activeModelId && !activeModel}
+                            <option value={activeModelId}>{activeModelId}</option>
+                          {/if}
+                        </select>
+                      </label>
+                      <label>
+                        <span class="sr-only">Reasoning effort</span>
+                        <select
+                          value={activeReasoningEffort}
+                          onchange={changeProviderEffort}
+                          disabled={providerPickerLocked || !activeEffortSupported}
+                          aria-label="Reasoning effort"
+                          title={activeEffortSupported ? "Reasoning effort" : `${activeModel?.displayName ?? "This model"} does not expose reasoning effort`}
+                        >
+                          {#if activeEffortSupported}
+                            <option value="">Default effort</option>
+                            {#each activeEfforts as effort}
+                              <option value={effort}>{effort}</option>
+                            {/each}
+                          {:else}
+                            <option value="">No effort control</option>
+                          {/if}
+                        </select>
+                      </label>
+                    </div>
                     <span>{composer.length.toLocaleString()} / 32,000</span>
                     {#if activeTurn}<button class="cancel-button" type="button" onclick={() => cancelTurn(activeTurn!.turnId)}><i></i>Stop</button>{:else if chatMode === "edit"}<button class="send-button" type="button" aria-label={editAccessMode === "ask_for_approval" ? "Review edit request" : "Start full-access edit"} onclick={prepareEdit} disabled={!canPrepareEdit}><span>{editAccessMode === "ask_for_approval" ? "Review request" : "Start edit"}</span><kbd>↵</kbd></button>{:else}<button class="send-button" type="button" aria-label="Send message" onclick={sendMessage} disabled={!canSend}><span>Send</span><kbd>↵</kbd></button>{/if}
                   </div>
@@ -1365,10 +1445,10 @@
   .chat-layer { position: fixed; z-index: 96; inset: 0 0 var(--chat-terminal-inset,0px) var(--sidebar-width); padding: 10px; background: color-mix(in srgb,var(--canvas) 82%,transparent); backdrop-filter: blur(12px); animation: chat-in .2s cubic-bezier(.2,.76,.2,1); }
   .chat-layer.inactive { display: none; }
   .chat-shell { display: grid; width: 100%; height: 100%; grid-template-rows: 64px minmax(0,1fr); overflow: hidden; border: 1px solid var(--border); border-radius: var(--radius-lg); background: var(--surface); color: var(--text); box-shadow: 0 24px 80px rgba(16,22,19,.18); }
-  .chat-header { display: grid; min-width: 0; grid-template-columns: 40px minmax(180px,1fr) minmax(160px,auto) auto auto auto 36px; align-items: center; gap: 8px; border-bottom: 1px solid var(--border); padding: 0 12px 0 16px; background: color-mix(in srgb,var(--surface) 96%,var(--brand-50)); -webkit-app-region: drag; }
-  .chat-header button,.chat-header .provider-chip,.chat-header .access-chip { -webkit-app-region: no-drag; }.chat-mark { position: relative; width: 32px; height: 32px; border: 1px solid var(--brand-200); border-radius: 10px; background: var(--active-surface); }.chat-mark span { position: absolute; width: 7px; height: 7px; border: 1px solid var(--brand-500); background: var(--surface); transform: rotate(45deg); }.chat-mark span:nth-child(1) { top: 5px; left: 12px; }.chat-mark span:nth-child(2) { bottom: 5px; left: 5px; }.chat-mark span:nth-child(3) { right: 5px; bottom: 5px; background: var(--brand-500); }
+  .chat-header { display: grid; min-width: 0; grid-template-columns: 40px minmax(180px,1fr) auto auto auto 36px; align-items: center; gap: 8px; border-bottom: 1px solid var(--border); padding: 0 12px 0 16px; background: color-mix(in srgb,var(--surface) 96%,var(--brand-50)); -webkit-app-region: drag; }
+  .chat-header button,.chat-header .access-chip { -webkit-app-region: no-drag; }.chat-mark { position: relative; width: 32px; height: 32px; border: 1px solid var(--brand-200); border-radius: 10px; background: var(--active-surface); }.chat-mark span { position: absolute; width: 7px; height: 7px; border: 1px solid var(--brand-500); background: var(--surface); transform: rotate(45deg); }.chat-mark span:nth-child(1) { top: 5px; left: 12px; }.chat-mark span:nth-child(2) { bottom: 5px; left: 5px; }.chat-mark span:nth-child(3) { right: 5px; bottom: 5px; background: var(--brand-500); }
   .chat-title { min-width: 0; }.chat-title p,.conversation-header p { margin: 0 0 2px; color: var(--active-text); font-size: 11px; font-weight: 800; letter-spacing: .09em; text-transform: uppercase; }.chat-title h2 { overflow: hidden; margin: 0; font-size: 16px; letter-spacing: -.015em; text-overflow: ellipsis; white-space: nowrap; }.chat-title h2 span { color: var(--text-subtle); font-weight: 560; }
-  .provider-chip { display: flex; min-width: 0; align-items: center; gap: 8px; border: 1px solid var(--border); border-radius: var(--radius); padding: 6px 9px; background: var(--surface); color: var(--text); text-align: left; }.provider-chip:hover { border-color: var(--brand-300); background: var(--active-surface); }.provider-chip > span { width: 7px; height: 7px; flex: 0 0 7px; border-radius: 50%; background: var(--success-500); box-shadow: 0 0 0 3px color-mix(in srgb,var(--success-500) 14%,transparent); }.provider-chip.unavailable > span { background: var(--warning-500); }.provider-chip.diverged > span { background: var(--brand-500); box-shadow: 0 0 0 3px color-mix(in srgb,var(--brand-500) 14%,transparent); }.provider-chip div { min-width: 0; }.provider-chip small,.provider-chip strong { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }.provider-chip small { color: var(--text-subtle); font-size: 10px; text-transform: uppercase; }.provider-chip strong { margin-top: 1px; font-size: 12px; }
+  
   .explorer-chip { display: inline-flex; align-items: center; gap: 6px; border: 1px solid var(--border); border-radius: var(--radius); padding: 8px 10px; background: var(--surface); color: var(--text-muted); font-size: 12px; font-weight: 750; }.explorer-chip:hover,.explorer-chip.active { border-color: var(--brand-300); background: var(--active-surface); color: var(--active-text); }.explorer-chip svg { width: 15px; height: 15px; fill: none; stroke: currentColor; stroke-width: 1.7; }
   .access-chip { display: flex; align-items: center; gap: 5px; border: 1px solid var(--border); border-radius: var(--radius-full); padding: 5px 8px; color: var(--text-muted); font-size: 11px; font-weight: 750; text-transform: uppercase; white-space: nowrap; }.access-chip[data-mode="edit"] { border-color: color-mix(in srgb,var(--warning-500) 52%,var(--border)); background: var(--warning-surface); color: var(--warning-text); }.access-chip[data-mode="edit"][data-access="ask_for_approval"] { border-color: color-mix(in srgb,var(--brand-400) 55%,var(--border)); background: var(--active-surface); color: var(--active-text); }.access-chip svg { width: 12px; height: 12px; fill: none; stroke: currentColor; stroke-width: 1.8; }.close-chat { display: grid; width: 34px; height: 34px; place-items: center; border: 0; border-radius: var(--radius); background: transparent; color: var(--text-muted); font-size: 24px; }.close-chat:hover { background: var(--surface-soft); color: var(--text); }
   .chat-grid { display: grid; min-height: 0; grid-template-columns: 252px minmax(0,1fr); }.session-rail { display: grid; min-height: 0; grid-template-rows: 52px minmax(0,1fr) 44px; border-right: 1px solid var(--border); background: var(--surface-soft); }.session-rail-header { display: flex; align-items: center; justify-content: space-between; border-bottom: 1px solid var(--border); padding: 0 10px 0 13px; }.session-rail-header > div { display: flex; align-items: center; gap: 7px; }.session-rail-header span { color: var(--text-muted); font-size: 12px; font-weight: 800; letter-spacing: .06em; text-transform: uppercase; }.session-rail-header strong { display: grid; min-width: 20px; height: 18px; place-items: center; border-radius: var(--radius-full); background: var(--surface); color: var(--text-subtle); font-size: 11px; }.session-rail-header > button { display: grid; width: 29px; height: 29px; place-items: center; border: 1px solid var(--border); border-radius: var(--radius-sm); background: var(--surface); color: var(--active-text); font-size: 18px; }.session-rail-header > button:hover { border-color: var(--brand-300); background: var(--active-surface); }.session-rail-header > button:disabled { opacity: .45; }
@@ -1383,7 +1463,7 @@
   .composer-stack { position: relative; width: min(850px,100%); margin: 0 auto; }
   .composer-card { width: 100%; overflow: hidden; border: 1px solid var(--border); border-radius: var(--radius-lg); background: var(--surface); box-shadow: 0 4px 18px rgba(25,31,28,.07); }.composer-card:focus-within { border-color: var(--brand-400); box-shadow: 0 0 0 3px color-mix(in srgb,var(--brand-400) 14%,transparent); }.composer-card.disabled { opacity: .65; }.composer-card textarea { display: block; width: 100%; min-height: 58px; max-height: 180px; resize: vertical; border: 0; padding: 12px 14px 7px; outline: 0; background: transparent; color: var(--text); font: 14px/1.55 Inter,ui-sans-serif,system-ui,sans-serif; }.composer-card textarea::placeholder { color: var(--text-subtle); }
   .mention-menu { position: absolute; z-index: 5; right: 0; bottom: calc(100% + 7px); left: 0; overflow: hidden; border: 1px solid var(--border); border-radius: var(--radius-lg); background: var(--surface); box-shadow: 0 18px 48px rgba(16,22,19,.2); animation: mention-in .14s cubic-bezier(.2,.76,.2,1); }.mention-menu > header { display: grid; min-height: 48px; grid-template-columns: 30px minmax(0,1fr) auto; align-items: center; gap: 9px; border-bottom: 1px solid var(--border); padding: 7px 10px; background: var(--surface-soft); }.mention-mark { display: grid; width: 28px; height: 28px; place-items: center; border: 1px solid var(--brand-300); border-radius: var(--radius-sm); background: var(--active-surface); color: var(--active-text); font: 800 15px/1 "SFMono-Regular",Consolas,monospace; }.mention-menu > header div { min-width: 0; }.mention-menu > header strong,.mention-menu > header small { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }.mention-menu > header strong { font-size: 11px; }.mention-menu > header small { margin-top: 2px; color: var(--text-subtle); font-size: 10px; }.mention-menu > header > kbd { border: 1px solid var(--border); border-radius: var(--radius-xs); padding: 3px 5px; background: var(--surface); color: var(--text-subtle); font: 9px/1 "SFMono-Regular",Consolas,monospace; }.mention-options { max-height: min(330px,40vh); overflow: auto; padding: 5px; }.mention-options > button { display: grid; width: 100%; min-height: 45px; grid-template-columns: 30px minmax(0,1fr) auto; align-items: center; gap: 9px; border: 1px solid transparent; border-radius: var(--radius-sm); padding: 5px 8px; background: transparent; color: var(--text); text-align: left; }.mention-options > button:hover,.mention-options > button.active { border-color: var(--brand-200); background: var(--active-surface); }.mention-icon { display: grid; width: 28px; height: 28px; place-items: center; border: 1px solid var(--border); border-radius: var(--radius-xs); background: var(--surface-soft); color: var(--text-muted); }.mention-options > button.active .mention-icon { border-color: var(--brand-300); background: var(--surface); color: var(--active-text); }.mention-icon svg { width: 15px; height: 15px; fill: none; stroke: currentColor; stroke-linecap: round; stroke-linejoin: round; stroke-width: 1.7; }.mention-icon[data-type="directory"] svg { fill: color-mix(in srgb,var(--brand-400) 14%,transparent); }.mention-path { min-width: 0; }.mention-path strong,.mention-path small { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }.mention-path strong { font: 650 11px/1.35 "SFMono-Regular",Consolas,monospace; }.mention-path small { margin-top: 2px; color: var(--text-subtle); font-size: 9px; }.mention-kind { color: var(--text-subtle); font-size: 9px; font-weight: 750; text-transform: uppercase; }.mention-menu > footer { display: flex; min-height: 30px; align-items: center; gap: 14px; border-top: 1px solid var(--border-soft); padding: 4px 10px; background: var(--surface-soft); color: var(--text-subtle); font-size: 9px; }.mention-menu > footer span { display: flex; align-items: center; gap: 4px; }.mention-menu > footer kbd { min-width: 17px; border: 1px solid var(--border); border-radius: 3px; padding: 2px 3px; background: var(--surface); color: var(--text-muted); font: 9px/1 "SFMono-Regular",Consolas,monospace; text-align: center; }.mention-menu > footer .indexing-dot { margin-left: auto; color: var(--active-text); }.mention-state { display: grid; min-height: 92px; grid-template-columns: 28px minmax(0,1fr) auto; place-content: center stretch; align-items: center; gap: 10px; padding: 14px; color: var(--text-muted); }.mention-state > span { display: grid; width: 27px; height: 27px; place-items: center; border-radius: 50%; background: var(--surface-soft); color: var(--text-subtle); font-size: 11px; font-weight: 800; }.mention-state.loading > span { border: 2px solid var(--border); border-top-color: var(--brand-500); background: transparent; animation: spin .8s linear infinite; }.mention-state p { margin: 0; }.mention-state strong,.mention-state small { display: block; }.mention-state strong { color: var(--text); font-size: 11px; }.mention-state small { margin-top: 3px; color: var(--text-subtle); font-size: 10px; }.mention-state > button { border: 1px solid var(--border); border-radius: var(--radius-xs); padding: 5px 8px; background: var(--surface-soft); color: var(--text); font-size: 10px; }
-  .composer-toolbar { display: flex; min-height: 38px; align-items: center; justify-content: space-between; gap: 10px; border-top: 1px solid var(--border-soft); padding: 4px 5px 4px 7px; }.attachment-entry { display: flex; min-width: 0; flex: 1; align-items: center; gap: 5px; }.attachment-entry svg { width: 14px; height: 14px; flex: 0 0 14px; fill: none; stroke: var(--text-subtle); stroke-linecap: round; stroke-linejoin: round; stroke-width: 1.7; }.attachment-entry input { width: min(210px,100%); border: 0; outline: 0; background: transparent; color: var(--text-muted); font: 11px/1.4 "SFMono-Regular",Consolas,monospace; }.attachment-entry input.image-input { display: none; }.attachment-entry button { border: 1px solid var(--border); border-radius: var(--radius-xs); padding: 3px 6px; background: var(--surface-soft); color: var(--text); font-size: 10px; }.attachment-entry .mention-trigger,.attachment-entry .image-trigger { display: inline-flex; min-height: 27px; flex: 0 0 auto; align-items: center; gap: 6px; border-color: var(--brand-200); padding: 0 8px; background: var(--active-surface); color: var(--active-text); font-weight: 750; }.mention-trigger strong { font: 850 13px/1 "SFMono-Regular",Consolas,monospace; }.attachment-entry .mention-trigger:hover,.attachment-entry .image-trigger:hover { border-color: var(--brand-400); background: color-mix(in srgb,var(--active-surface) 80%,var(--brand-100)); }.attachment-entry .image-trigger:disabled { cursor: default; opacity: .42; }.attachment-entry .image-trigger svg { stroke: currentColor; }.composer-actions { display: flex; flex: 0 0 auto; align-items: center; gap: 8px; }.composer-actions > span { color: var(--text-subtle); font-size: 10px; }.send-button,.cancel-button { display: flex; min-height: 29px; align-items: center; gap: 8px; border: 0; border-radius: var(--radius-sm); padding: 0 9px; background: var(--brand-600); color: white; font-size: 11px; font-weight: 800; }.send-button kbd { border-left: 1px solid rgba(255,255,255,.25); padding-left: 7px; font: inherit; }.send-button:disabled { opacity: .38; }.cancel-button { background: #b94040; }.cancel-button i { width: 7px; height: 7px; background: white; }.composer-hint { display: flex; width: min(850px,100%); justify-content: space-between; margin: 5px auto 0; color: var(--text-subtle); font-size: 10px; }.composer-hint span { display: flex; align-items: center; gap: 5px; }.composer-hint i { width: 5px; height: 5px; border-radius: 50%; background: var(--success-500); }.attachment-list { display: flex; width: min(850px,100%); flex-wrap: wrap; gap: 6px; margin: 0 auto 6px; }.attachment-list > span { display: flex; align-items: center; gap: 5px; border: 1px solid var(--brand-200); border-radius: var(--radius-full); padding: 4px 5px 4px 8px; background: var(--active-surface); }.attachment-list code { color: var(--active-text); font-size: 10px; }.attachment-list button { display: grid; width: 16px; height: 16px; place-items: center; border: 0; border-radius: 50%; background: var(--surface); color: var(--text-muted); font-size: 13px; }.image-draft { position: relative; display: grid; width: 190px; height: 62px; grid-template-columns: 62px minmax(0,1fr) 20px; align-items: center; gap: 7px; overflow: hidden; margin: 0; border: 1px solid var(--brand-200); border-radius: var(--radius); padding-right: 5px; background: var(--active-surface); }.image-draft img { width: 62px; height: 62px; object-fit: cover; background: var(--surface-soft); }.image-draft-copy { min-width: 0; }.image-draft strong,.image-draft small { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }.image-draft strong { color: var(--text); font-size: 10px; }.image-draft small { margin-top: 3px; color: var(--text-subtle); font-size: 9px; }.image-draft button { align-self: start; margin-top: 5px; }.chat-error { display: grid; width: min(850px,100%); grid-template-columns: 20px minmax(0,1fr) 20px; align-items: center; gap: 7px; margin: 0 auto 7px; border: 1px solid color-mix(in srgb,#c44242 40%,var(--border)); border-radius: var(--radius); padding: 6px; background: color-mix(in srgb,#c44242 7%,var(--surface)); }.chat-error > span { display: grid; width: 20px; height: 20px; place-items: center; border-radius: var(--radius-xs); background: #c44242; color: white; font-size: 11px; font-weight: 850; }.chat-error p { overflow: hidden; margin: 0; color: var(--text-muted); font-size: 11px; text-overflow: ellipsis; white-space: nowrap; }.chat-error button { border: 0; background: transparent; color: var(--text-muted); font-size: 16px; }
+  .composer-toolbar { display: flex; min-height: 38px; align-items: center; justify-content: space-between; gap: 10px; border-top: 1px solid var(--border-soft); padding: 4px 5px 4px 7px; }.attachment-entry { display: flex; min-width: 0; flex: 1; align-items: center; gap: 5px; }.attachment-entry svg { width: 14px; height: 14px; flex: 0 0 14px; fill: none; stroke: var(--text-subtle); stroke-linecap: round; stroke-linejoin: round; stroke-width: 1.7; }.attachment-entry input { width: min(210px,100%); border: 0; outline: 0; background: transparent; color: var(--text-muted); font: 11px/1.4 "SFMono-Regular",Consolas,monospace; }.attachment-entry input.image-input { display: none; }.attachment-entry button { border: 1px solid var(--border); border-radius: var(--radius-xs); padding: 3px 6px; background: var(--surface-soft); color: var(--text); font-size: 10px; }.attachment-entry .mention-trigger,.attachment-entry .image-trigger { display: inline-flex; min-height: 27px; flex: 0 0 auto; align-items: center; gap: 6px; border-color: var(--brand-200); padding: 0 8px; background: var(--active-surface); color: var(--active-text); font-weight: 750; }.mention-trigger strong { font: 850 13px/1 "SFMono-Regular",Consolas,monospace; }.attachment-entry .mention-trigger:hover,.attachment-entry .image-trigger:hover { border-color: var(--brand-400); background: color-mix(in srgb,var(--active-surface) 80%,var(--brand-100)); }.attachment-entry .image-trigger:disabled { cursor: default; opacity: .42; }.attachment-entry .image-trigger svg { stroke: currentColor; }.composer-actions { display: flex; flex: 0 0 auto; align-items: center; gap: 8px; }.composer-actions > span { color: var(--text-subtle); font-size: 10px; }.provider-picker { display: flex; min-width: 0; height: 27px; align-items: center; overflow: hidden; border: 1px solid var(--border); border-radius: var(--radius-xs); background: var(--surface-soft); }.provider-picker:focus-within { border-color: var(--brand-400,var(--brand-300)); }.provider-picker.unavailable { border-color: color-mix(in srgb,var(--warning-500) 50%,var(--border)); }.provider-picker label { display: block; height: 100%; }.provider-picker label + label { border-left: 1px solid var(--border); }.provider-picker select { max-width: 132px; height: 100%; border: 0; padding: 0 18px 0 7px; background: transparent; color: var(--text-muted); font: inherit; font-size: 10px; font-weight: 750; outline: none; text-overflow: ellipsis; }.provider-picker select:disabled { cursor: not-allowed; opacity: .5; }.send-button,.cancel-button { display: flex; min-height: 29px; align-items: center; gap: 8px; border: 0; border-radius: var(--radius-sm); padding: 0 9px; background: var(--brand-600); color: white; font-size: 11px; font-weight: 800; }.send-button kbd { border-left: 1px solid rgba(255,255,255,.25); padding-left: 7px; font: inherit; }.send-button:disabled { opacity: .38; }.cancel-button { background: #b94040; }.cancel-button i { width: 7px; height: 7px; background: white; }.composer-hint { display: flex; width: min(850px,100%); justify-content: space-between; margin: 5px auto 0; color: var(--text-subtle); font-size: 10px; }.composer-hint span { display: flex; align-items: center; gap: 5px; }.composer-hint i { width: 5px; height: 5px; border-radius: 50%; background: var(--success-500); }.attachment-list { display: flex; width: min(850px,100%); flex-wrap: wrap; gap: 6px; margin: 0 auto 6px; }.attachment-list > span { display: flex; align-items: center; gap: 5px; border: 1px solid var(--brand-200); border-radius: var(--radius-full); padding: 4px 5px 4px 8px; background: var(--active-surface); }.attachment-list code { color: var(--active-text); font-size: 10px; }.attachment-list button { display: grid; width: 16px; height: 16px; place-items: center; border: 0; border-radius: 50%; background: var(--surface); color: var(--text-muted); font-size: 13px; }.image-draft { position: relative; display: grid; width: 190px; height: 62px; grid-template-columns: 62px minmax(0,1fr) 20px; align-items: center; gap: 7px; overflow: hidden; margin: 0; border: 1px solid var(--brand-200); border-radius: var(--radius); padding-right: 5px; background: var(--active-surface); }.image-draft img { width: 62px; height: 62px; object-fit: cover; background: var(--surface-soft); }.image-draft-copy { min-width: 0; }.image-draft strong,.image-draft small { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }.image-draft strong { color: var(--text); font-size: 10px; }.image-draft small { margin-top: 3px; color: var(--text-subtle); font-size: 9px; }.image-draft button { align-self: start; margin-top: 5px; }.chat-error { display: grid; width: min(850px,100%); grid-template-columns: 20px minmax(0,1fr) 20px; align-items: center; gap: 7px; margin: 0 auto 7px; border: 1px solid color-mix(in srgb,#c44242 40%,var(--border)); border-radius: var(--radius); padding: 6px; background: color-mix(in srgb,#c44242 7%,var(--surface)); }.chat-error > span { display: grid; width: 20px; height: 20px; place-items: center; border-radius: var(--radius-xs); background: #c44242; color: white; font-size: 11px; font-weight: 850; }.chat-error p { overflow: hidden; margin: 0; color: var(--text-muted); font-size: 11px; text-overflow: ellipsis; white-space: nowrap; }.chat-error button { border: 0; background: transparent; color: var(--text-muted); font-size: 16px; }
   .composer-mode-switch { display: inline-flex; min-height: 29px; flex: 0 0 auto; align-items: center; border: 1px solid var(--border); border-radius: 9px; padding: 2px; background: var(--surface-soft); }.composer-mode-switch button { min-height: 23px; border: 0; border-radius: 6px; padding: 0 9px; background: transparent; color: var(--text-subtle); font-size: 11px; font-weight: 780; }.composer-mode-switch button.active { background: var(--surface); color: var(--active-text); box-shadow: 0 1px 4px color-mix(in srgb,var(--text) 12%,transparent); }.composer-mode-switch button:disabled { cursor: default; opacity: .6; }.composer-card[data-mode="edit"] { border-color: color-mix(in srgb,var(--brand-500) 54%,var(--border)); box-shadow: 0 0 0 3px color-mix(in srgb,var(--brand-400) 8%,transparent),0 5px 22px color-mix(in srgb,var(--text) 7%,transparent); }.composer-card[data-mode="edit"][data-access="full_access"] { border-color: color-mix(in srgb,var(--warning-500) 62%,var(--border)); box-shadow: 0 0 0 3px color-mix(in srgb,var(--warning-500) 9%,transparent),0 5px 22px color-mix(in srgb,var(--text) 7%,transparent); }
   .edit-access-select { display: inline-flex; min-height: 29px; flex: 0 0 auto; align-items: center; gap: 4px; border: 1px solid var(--brand-300); border-radius: 9px; padding: 0 5px 0 7px; background: var(--active-surface); color: var(--active-text); }.edit-access-select[data-mode="full_access"] { border-color: color-mix(in srgb,var(--warning-500) 58%,var(--border)); background: var(--warning-surface); color: var(--warning-text); }.edit-access-select svg { stroke: currentColor; }.edit-access-select select { max-width: 132px; border: 0; outline: 0; background: transparent; color: inherit; font: 750 11px/1.2 Inter,ui-sans-serif,system-ui,sans-serif; cursor: pointer; }.edit-access-select select:disabled { cursor: default; opacity: .7; }
   .edit-state-dock { width: min(850px,100%); max-height: min(38vh,390px); overflow: auto; margin: 0 auto 9px; border-radius: 14px; scrollbar-gutter: stable; }.edit-confirmation,.edit-review,.edit-running,.edit-awaiting { width: 100%; margin: 0; border: 1px solid var(--brand-300); border-radius: 13px; padding: 12px 13px; background: color-mix(in srgb,var(--active-surface) 88%,var(--surface)); }.edit-state-dock > * + * { margin-top: 7px; }.edit-confirmation header { display: flex; align-items: center; justify-content: space-between; gap: 12px; }.edit-confirmation header span { color: var(--active-text); font-size: 11px; font-weight: 850; letter-spacing: .08em; text-transform: uppercase; }.edit-confirmation header strong { font: 12px/1.2 "SFMono-Regular",Consolas,monospace; }.edit-confirmation dl { display: grid; grid-template-columns: 1fr 1fr; gap: 9px 16px; margin: 12px 0; }.edit-confirmation dl div { min-width: 0; }.edit-confirmation dt { color: var(--text-subtle); font-size: 10px; font-weight: 750; letter-spacing: .05em; text-transform: uppercase; }.edit-confirmation dd { overflow: hidden; margin: 3px 0 0; color: var(--text); font-size: 12px; text-overflow: ellipsis; white-space: nowrap; }.edit-confirmation p { margin: 10px 0; color: var(--text-muted); font-size: 12px; line-height: 1.5; }.edit-confirmation > div:last-child,.review-actions { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 7px; }.edit-confirmation button,.review-actions button { min-height: 31px; border: 1px solid var(--border); border-radius: 9px; padding: 0 10px; background: var(--surface); color: var(--text); font-size: 11px; font-weight: 750; }.edit-confirmation .confirm-edit,.review-actions .accept-edit { border-color: var(--brand-600); background: var(--brand-600); color: white; }.edit-running,.edit-awaiting { display: grid; grid-template-columns: 22px minmax(0,1fr) auto; align-items: center; gap: 10px; }.edit-running > span { width: 19px; height: 19px; border: 2px solid var(--border); border-top-color: var(--brand-600); border-radius: 50%; animation: spin .8s linear infinite; }.edit-running p,.edit-awaiting p { margin: 0; }.edit-running strong,.edit-running small,.edit-awaiting strong,.edit-awaiting small { display: block; }.edit-running strong,.edit-awaiting strong { font-size: 12px; }.edit-running small,.edit-awaiting small { margin-top: 3px; color: var(--text-subtle); font-size: 11px; line-height: 1.4; }.edit-running button,.edit-awaiting button { min-height: 30px; border: 0; border-radius: 9px; padding: 0 9px; background: #b94040; color: white; font-size: 11px; font-weight: 750; }.edit-awaiting { border-color: color-mix(in srgb,var(--warning-500) 56%,var(--border)); background: var(--warning-surface); }.edit-awaiting > span { display: grid; width: 21px; height: 21px; place-items: center; border-radius: 50%; background: var(--warning-500); color: white; font-size: 11px; font-weight: 850; }.edit-awaiting button { border: 1px solid var(--border); background: var(--surface); color: var(--text); }.edit-review { background: var(--surface); }.edit-review summary { display: grid; grid-template-columns: auto 1fr auto; align-items: center; gap: 9px; cursor: pointer; list-style: none; }.edit-review summary span { color: var(--warning-text); font-size: 11px; font-weight: 850; text-transform: uppercase; }.edit-review summary strong { font-size: 12px; }.edit-review summary small { color: var(--text-subtle); font-size: 11px; }.edit-review > p { margin: 11px 0; color: var(--text-muted); font-size: 12px; line-height: 1.5; }.edit-review ul { display: grid; gap: 3px; margin: 8px 0; padding: 0; list-style: none; }.edit-review li { display: flex; justify-content: space-between; gap: 8px; border-bottom: 1px solid var(--border-soft); padding: 5px; font-size: 11px; }.edit-review li code { color: var(--text); }.edit-review li span { color: var(--text-subtle); text-transform: uppercase; }.edit-review pre { max-height: 250px; overflow: auto; border-radius: 9px; padding: 11px; background: #121916; color: #b9c6be; font: 11px/1.55 "SFMono-Regular",Consolas,monospace; white-space: pre; }.edit-blockers { display: grid; gap: 4px; margin: 8px 0; color: #b94040; font-size: 11px; }
@@ -1410,10 +1490,10 @@
   .chat-shell.kilo-chat { border-radius: 22px; background: color-mix(in srgb,var(--canvas) 88%,var(--surface)); }
   .kilo-chat .chat-header { border-bottom: 1px solid color-mix(in srgb,var(--border) 72%,transparent); padding-top: 8px; padding-bottom: 8px; background: color-mix(in srgb,var(--surface) 96%,var(--brand-50)); }
   .kilo-chat .chat-title h2 { font-size: 15px; letter-spacing: -0.02em; }
-  .kilo-chat .provider-chip { border-color: color-mix(in srgb,var(--border) 85%,transparent); }
-  .kilo-chat .provider-chip:hover { border-color: var(--brand-300); background: color-mix(in srgb,var(--active-surface) 85%,var(--surface)); }
-  .kilo-chat .provider-chip small { font-size: 9px; }
-  .kilo-chat .provider-chip strong { font-size: 12px; }
+  
+  
+  
+  
   .kilo-chat .chat-grid { grid-template-columns: 240px minmax(0,1fr); }
   .kilo-chat .session-rail { border-right: 1px solid color-mix(in srgb,var(--border) 80%,transparent); }
   .kilo-chat .session-rail-header { padding-top: 10px; padding-bottom: 10px; }
@@ -1475,9 +1555,9 @@
   .markdown-message :global(th) { background: var(--surface-soft); color: var(--text); }
   .markdown-message :global(.rendered-link) { color: var(--active-text); text-decoration: underline; text-underline-offset: 2px; }.markdown-message :global(.rendered-image) { color: var(--text-subtle); font-style: italic; }
   @keyframes chat-in { from { opacity: .4; transform: translateY(7px) scale(.997); } } @keyframes mention-in { from { opacity: 0; transform: translateY(6px) scale(.99); } } @keyframes signal { 50% { opacity: .3; box-shadow: 0 0 0 5px color-mix(in srgb,var(--brand-500) 12%,transparent); } } @keyframes spin { to { transform: rotate(360deg); } } @keyframes blink { 50% { opacity: .15; } } @keyframes shimmer { to { background-position: -200% 0; } }
-  @media (max-width: 1080px) { .access-chip { display: none; }.chat-header { grid-template-columns: 40px minmax(170px,1fr) minmax(150px,auto) auto 36px; } }
-  @media (max-width: 980px) { .chat-grid { grid-template-columns: 210px minmax(0,1fr); }.transcript-column { width: calc(100% - 28px); }.provider-chip { max-width: 190px; } }
-  @media (max-width: 767.98px) { .chat-layer { inset: 0 0 var(--chat-terminal-inset,0px); padding: 0; }.chat-shell { border: 0; border-radius: 0; }.chat-grid { grid-template-columns: 160px minmax(0,1fr); }.session-select { padding-right: 8px; }.session-actions { display: none; }.provider-chip,.access-chip { display: none; }.chat-header { grid-template-columns: 40px minmax(0,1fr) 34px 34px 36px; }.explorer-chip { width: 34px; padding: 0; justify-content: center; font-size: 0; }.explorer-chip svg { width: 16px; height: 16px; }.conversation-meta { display: none; }.user-message { max-width: 90%; }.composer-zone { padding-inline: 10px; }.edit-confirmation dl,.edit-verification { grid-template-columns: 1fr; } }
+  @media (max-width: 1080px) { .access-chip { display: none; }.chat-header { grid-template-columns: 40px minmax(170px,1fr) auto 36px; } }
+  @media (max-width: 980px) { .chat-grid { grid-template-columns: 210px minmax(0,1fr); }.transcript-column { width: calc(100% - 28px); } }
+  @media (max-width: 767.98px) { .chat-layer { inset: 0 0 var(--chat-terminal-inset,0px); padding: 0; }.chat-shell { border: 0; border-radius: 0; }.chat-grid { grid-template-columns: 160px minmax(0,1fr); }.session-select { padding-right: 8px; }.session-actions { display: none; }.access-chip { display: none; }.chat-header { grid-template-columns: 40px minmax(0,1fr) 34px 34px 36px; }.explorer-chip { width: 34px; padding: 0; justify-content: center; font-size: 0; }.explorer-chip svg { width: 16px; height: 16px; }.conversation-meta { display: none; }.user-message { max-width: 90%; }.composer-zone { padding-inline: 10px; }.edit-confirmation dl,.edit-verification { grid-template-columns: 1fr; } }
   @media (max-width: 560px) { .chat-grid { display: block; }.session-rail { display: none; }.conversation { height: 100%; }.chat-title h2 span { display: none; }.transcript-column { width: calc(100% - 20px); padding-top: 18px; }.composer-hint span:last-child,.composer-actions > span,.attachment-entry > svg,.attachment-entry input { display: none; }.attachment-entry .mention-trigger span,.attachment-entry .image-trigger span { display: none; }.timeline-activity-copy small { display: none; }.mention-options { max-height: 260px; }.mention-kind { display: none; } }
   @media (prefers-reduced-motion: reduce) { .chat-layer,.mention-menu,.session-state,.timeline-activity > i,.quiet-pulse > span,.markdown-message.streaming::after { animation: none; } }
 </style>

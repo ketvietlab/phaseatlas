@@ -153,6 +153,36 @@ test("persists provider-neutral chat sessions, messages, replay, and cancellatio
     /reasoning effort is not supported/,
   );
 
+  // Changing provider from the composer picker retargets the open conversation,
+  // and stays bound to the discovered catalog like session creation does.
+  const retargeted = await runtime.setSessionProvider({
+    sessionId: first.sessionId,
+    runnerId: "codex-cli",
+    model: "gpt-fixture",
+    reasoningEffort: "low",
+  });
+  assert.equal(retargeted.reasoningEffort, "low");
+  assert.equal(runtime.getSession(first.sessionId).reasoningEffort, "low");
+  await assert.rejects(
+    runtime.setSessionProvider({ sessionId: first.sessionId, runnerId: "codex-cli", model: "manually-entered" }),
+    /selected model is not present/,
+  );
+  await assert.rejects(
+    runtime.setSessionProvider({
+      sessionId: first.sessionId,
+      runnerId: "codex-cli",
+      model: "gpt-fixture",
+      reasoningEffort: "ultra",
+    }),
+    /reasoning effort is not supported/,
+  );
+  await runtime.setSessionProvider({
+    sessionId: first.sessionId,
+    runnerId: "codex-cli",
+    model: "gpt-fixture",
+    reasoningEffort: "high",
+  });
+
   const started = await runtime.send({
     sessionId: first.sessionId,
     text: "What is in this repository?",

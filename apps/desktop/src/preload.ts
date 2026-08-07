@@ -86,6 +86,7 @@ const api: PhaseAtlasDesktopApi = {
     listSessions: (checkoutId) => ipcRenderer.invoke("phaseatlas:chat:sessions:list", checkoutId),
     getSession: (checkoutId, sessionId) => ipcRenderer.invoke("phaseatlas:chat:sessions:get", checkoutId, sessionId),
     renameSession: (checkoutId, input) => ipcRenderer.invoke("phaseatlas:chat:sessions:rename", checkoutId, input),
+    setSessionProvider: (checkoutId, input) => ipcRenderer.invoke("phaseatlas:chat:sessions:provider", checkoutId, input),
     closeSession: (checkoutId, sessionId) => ipcRenderer.invoke("phaseatlas:chat:sessions:close", checkoutId, sessionId),
     listMessages: (checkoutId, sessionId) => ipcRenderer.invoke("phaseatlas:chat:messages:list", checkoutId, sessionId),
     listTurns: (checkoutId, sessionId) => ipcRenderer.invoke("phaseatlas:chat:turns:list", checkoutId, sessionId),
