@@ -28,6 +28,11 @@ Run it under Node 24 (`nvm use`). A shell whose default is older will fail in
 corepack before the script starts. The build is large and slow; neither
 `ide/lib` nor `ide/default-extensions` is committed.
 
+`ide/package.json` declares `type: commonjs`. Theia builds CommonJS, and the
+repository root declares `type: module`, which would otherwise make Node treat
+`ide/lib/**/*.js` as ESM and fail on the first `require()`. The packaged app does
+not hit this because `Resources/theia-ide` sits outside any module-typed package.
+
 ## What the desktop expects
 
 `apps/desktop/src/main.ts` resolves the backend as:
