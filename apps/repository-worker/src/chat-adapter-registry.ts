@@ -4,6 +4,7 @@ import type {
   RepositoryChatMessage,
 } from "@phaseatlas/contracts";
 import {
+  claudeReasoningEffortArguments,
   resolveCodexExecutable,
   runChildProcess,
   type ProviderProcessRunner,
@@ -396,6 +397,7 @@ class ClaudeChatAdapter implements RepositoryChatAdapter {
       "--tools", "Read,Glob,Grep",
       "--no-session-persistence",
       "--model", context.model,
+      ...claudeReasoningEffortArguments(context.reasoningEffort?.trim()),
     ];
     let buffer = "";
     let answer = "";

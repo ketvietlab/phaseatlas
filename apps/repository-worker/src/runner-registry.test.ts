@@ -13,7 +13,9 @@ import {
   formatCodexJsonEvent,
   assertRunnerModel,
   assertRunnerSelection,
+  claudeReasoningEffortArguments,
   parseClaudeModelHelp,
+  parseClaudeReasoningEfforts,
   parseCodexModelCatalog,
   RunnerRegistry,
   runChildProcess,
@@ -81,11 +83,25 @@ test("projects provider model catalogs without accepting arbitrary model text", 
     reasoningEfforts: ["low", "high"],
     defaultReasoningEffort: "high",
   }]);
-  assert.deepEqual(parseClaudeModelHelp("Model. Provide an alias for the latest model (e.g. 'fable', 'opus', or 'sonnet') or full name."), [
-    { id: "fable", displayName: "Fable", isDefault: false, reasoningEfforts: [] },
-    { id: "opus", displayName: "Opus", isDefault: false, reasoningEfforts: [] },
-    { id: "sonnet", displayName: "Sonnet", isDefault: false, reasoningEfforts: [] },
+  const claudeHelp = [
+    "  --effort <level>    Effort level for the current session",
+    "                      (low, medium, high, xhigh, max)",
+    "  --model <model>     Model. Provide an alias for the latest model (e.g. 'fable', 'opus', or 'sonnet') or full name.",
+  ].join("\n");
+  assert.deepEqual(parseClaudeReasoningEfforts(claudeHelp), ["low", "medium", "high", "xhigh", "max"]);
+  assert.deepEqual(parseClaudeModelHelp(claudeHelp), [
+    { id: "fable", displayName: "Fable", isDefault: false, reasoningEfforts: ["low", "medium", "high", "xhigh", "max"] },
+    { id: "opus", displayName: "Opus", isDefault: false, reasoningEfforts: ["low", "medium", "high", "xhigh", "max"] },
+    { id: "sonnet", displayName: "Sonnet", isDefault: false, reasoningEfforts: ["low", "medium", "high", "xhigh", "max"] },
   ]);
+  // A CLI build without --effort must keep the control disabled rather than
+  // offering levels the installed binary would reject.
+  assert.deepEqual(
+    parseClaudeModelHelp("Model. Provide an alias for the latest model (e.g. 'opus') or full name."),
+    [{ id: "opus", displayName: "Opus", isDefault: false, reasoningEfforts: [] }],
+  );
+  assert.deepEqual(claudeReasoningEffortArguments("xhigh"), ["--effort", "xhigh"]);
+  assert.deepEqual(claudeReasoningEffortArguments(undefined), []);
   const descriptor = {
     id: "fixture",
     provider: "fixture",
@@ -174,7 +190,9 @@ test("Codex and Claude fixtures translate to the same normalized execution contr
     const result = await registry.getExecution(runnerId, "implement", "workspace-write").execute({
       spec: executionSpec,
       workingDirectory: executionSpec.executionDirectory,
-      ...(runnerId === "codex-cli" ? { modelId: "gpt-safe", reasoningEffort: "high" } : {}),
+      ...(runnerId === "codex-cli"
+        ? { modelId: "gpt-safe", reasoningEffort: "high" }
+        : { modelId: "opus", reasoningEffort: "xhigh" }),
       signal: new AbortController().signal,
       emit: (event) => events.push(event),
     });
@@ -197,6 +215,9 @@ test("Codex and Claude fixtures translate to the same normalized execution contr
   assert.equal(JSON.stringify(claude.events).includes("/private/"), false);
   assert.equal(observedArgs.get("fixture-codex")?.includes("--config"), true);
   assert.equal(observedArgs.get("fixture-codex")?.includes('model_reasoning_effort="high"'), true);
+  const claudeArgs = observedArgs.get(process.env.PHASEATLAS_CLAUDE_BIN || "claude") ?? [];
+  assert.equal(claudeArgs[claudeArgs.indexOf("--effort") + 1], "xhigh");
+  assert.equal(claudeArgs.indexOf("--effort") < claudeArgs.indexOf("--"), true);
 });
 
 test("formats Codex JSONL events as readable terminal progress", () => {

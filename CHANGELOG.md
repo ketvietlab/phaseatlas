@@ -8,6 +8,12 @@ may contain a documented breaking change.
 
 ## [Unreleased]
 
+### Added
+
+- Reasoning effort for Claude Code, discovered from the installed CLI's `--effort` levels and applied
+  to planning, execution, chat, and isolated chat edits. CLI builds without `--effort` keep the
+  control disabled instead of offering levels the binary would reject.
+
 ### Changed
 
 - Split the repository agent selector into separate model and reasoning-effort controls instead of one

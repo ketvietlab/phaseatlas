@@ -3,6 +3,7 @@ import os from "node:os";
 import path from "node:path";
 import type { ChatEditSpec, RepositoryChatImageAttachment } from "@phaseatlas/contracts";
 import {
+  claudeReasoningEffortArguments,
   codexReasoningEffortArguments,
   resolveCodexExecutable,
   runChildProcess,
@@ -210,6 +211,7 @@ class ClaudeChatEditAdapter implements ChatEditAdapter {
         "--input-format", "stream-json",
         "--include-partial-messages", "--permission-mode", "acceptEdits", "--tools", "Read,Glob,Grep,Edit,Write",
         "--no-session-persistence", "--model", context.spec.model,
+        ...claudeReasoningEffortArguments(context.spec.reasoningEffort),
       ],
       cwd: context.workingDirectory,
       stdin: claudeEditInput(context.spec),

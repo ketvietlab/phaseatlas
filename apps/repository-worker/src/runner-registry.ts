@@ -233,18 +233,34 @@ export function parseCodexModelCatalog(value: string): RunnerModelDescriptor[] {
   return projected.map(({ descriptor }) => descriptor);
 }
 
+export function parseClaudeReasoningEfforts(value: string): string[] {
+  const normalized = value.replace(/\s+/g, " ");
+  const match = normalized.match(/--effort\s+<[^>]*>[^(]*\(([^)]*)\)/i);
+  if (!match?.[1]) return [];
+  const levels = match[1]
+    .split(",")
+    .map((level) => safeModelId(level.trim()))
+    .filter((level): level is string => Boolean(level));
+  return [...new Set(levels)];
+}
+
 export function parseClaudeModelHelp(value: string): RunnerModelDescriptor[] {
   const normalized = value.replace(/\s+/g, " ");
   const match = normalized.match(/alias for the latest model \(e\.g\.\s*([^)]*)\)/i);
   const aliases = [...(match?.[1] ?? "").matchAll(/['\"]([^'\"]+)['\"]/g)]
     .map((candidate) => safeModelId(candidate[1]))
     .filter((candidate): candidate is string => Boolean(candidate));
+  const reasoningEfforts = parseClaudeReasoningEfforts(value);
   return [...new Set(aliases)].map((id) => ({
     id,
     displayName: id.charAt(0).toUpperCase() + id.slice(1),
     isDefault: false,
-    reasoningEfforts: [],
+    reasoningEfforts,
   }));
+}
+
+export function claudeReasoningEffortArguments(reasoningEffort?: string): string[] {
+  return reasoningEffort ? ["--effort", reasoningEffort] : [];
 }
 
 async function discoverCodexModels(executable: string): Promise<RunnerModelDescriptor[]> {
@@ -812,6 +828,7 @@ class ClaudeExecutionAdapter implements ProviderExecutionAdapter {
         "--no-session-persistence",
       ];
       if (context.modelId) args.push("--model", context.modelId);
+      args.push(...claudeReasoningEffortArguments(context.reasoningEffort?.trim()));
       args.push("--", executionPrompt(context.spec));
       let lineBuffer = "";
       let structuredOutput: unknown;
@@ -1091,6 +1108,7 @@ class ClaudePlanningAdapter implements PlanningRunnerAdapter {
       "--no-session-persistence",
     ];
     if (context.input.model?.trim()) args.push("--model", context.input.model.trim());
+    args.push(...claudeReasoningEffortArguments(context.input.reasoningEffort?.trim()));
     args.push("--", prompt);
 
     let lineBuffer = "";
