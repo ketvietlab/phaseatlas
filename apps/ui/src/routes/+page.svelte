@@ -2171,9 +2171,12 @@
             {#if selectedAgentReview}
               <section class="execution-result" data-freshness={selectedAgentReview.freshness}>
                 <header>
-                  <div><p class="eyebrow">Validated result</p><h3>{selectedAgentReview.persisted.validated.result.summary}</h3></div>
+                  <div><p class="eyebrow">Validated result</p><h3>{selectedTask ? `${selectedTask.key.taskId} · ${actionLabel(selectedAgentRun?.action ?? "analyze")}` : "Summary"}</h3></div>
                   <span class="result-freshness">{selectedAgentReview.freshness}</span>
                 </header>
+                <!-- The summary is prose, often several hundred words. Heading
+                     typography made it a wall; it belongs in body text. -->
+                <p class="execution-result-summary">{selectedAgentReview.persisted.validated.result.summary}</p>
                 {#if selectedAgentReview.reason}<p class="execution-result-warning">{selectedAgentReview.reason}</p>{/if}
                 <div class="execution-result-grid">
                   <section><span>Outcome</span><strong>{selectedAgentReview.persisted.validated.result.outcome}</strong><small>{selectedAgentReview.promotable ? "Eligible for separate promotion review" : "Not promotable"}</small></section>
