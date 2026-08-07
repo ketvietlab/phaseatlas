@@ -69,6 +69,11 @@ may contain a documented breaking change.
 
 ### Changed
 
+- Model prose is rendered as Markdown wherever it appears — the validated result summary, next
+  action, verification details and blockers, and the task conversation — so a path written as
+  `infra/identity/login/` reads as code instead of showing its backticks. Links never resolve and
+  images are never fetched, matching how the chat transcript already treats untrusted model output.
+
 - Split the repository agent selector into separate model and reasoning-effort controls instead of one
   combined dropdown whose options multiplied every model by every effort level.
 - Reasoning effort is now disabled with an explicit reason for providers that do not expose it, and

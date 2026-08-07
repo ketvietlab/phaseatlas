@@ -5,6 +5,7 @@
   import TerminalPanel from "$lib/TerminalPanel.svelte";
   import ProviderPicker from "$lib/ProviderPicker.svelte";
   import TaskConversation from "$lib/TaskConversation.svelte";
+  import ModelMarkdown from "$lib/ModelMarkdown.svelte";
   import TaskContentPanel from "$lib/TaskContentPanel.svelte";
   import TaskMap from "$lib/TaskMap.svelte";
   import type {
@@ -2176,11 +2177,11 @@
                 </header>
                 <!-- The summary is prose, often several hundred words. Heading
                      typography made it a wall; it belongs in body text. -->
-                <p class="execution-result-summary">{selectedAgentReview.persisted.validated.result.summary}</p>
+                <div class="execution-result-summary"><ModelMarkdown source={selectedAgentReview.persisted.validated.result.summary} /></div>
                 {#if selectedAgentReview.reason}<p class="execution-result-warning">{selectedAgentReview.reason}</p>{/if}
                 <div class="execution-result-grid">
                   <section><span>Outcome</span><strong>{selectedAgentReview.persisted.validated.result.outcome}</strong><small>{selectedAgentReview.promotable ? "Eligible for separate promotion review" : "Not promotable"}</small></section>
-                  <section><span>Next action</span><strong>{selectedAgentReview.persisted.validated.result.nextAction}</strong><small>{selectedAgentReview.persisted.validated.result.requiresHumanReview ? "Human review required" : "No review requested"}</small></section>
+                  <section><span>Next action</span><strong><ModelMarkdown source={selectedAgentReview.persisted.validated.result.nextAction} /></strong><small>{selectedAgentReview.persisted.validated.result.requiresHumanReview ? "Human review required" : "No review requested"}</small></section>
                 </div>
                 <div class="execution-result-columns">
                   <section>
@@ -2192,7 +2193,7 @@
                   <section>
                     <header><strong>Verification</strong><span>{selectedAgentReview.persisted.validated.result.verification.length}</span></header>
                     {#if selectedAgentReview.persisted.validated.result.verification.length}
-                      <ul class="execution-verification-list">{#each selectedAgentReview.persisted.validated.result.verification as check}<li><span data-status={check.status}></span><div><strong>{check.stepId}</strong><small>{check.details}</small></div></li>{/each}</ul>
+                      <ul class="execution-verification-list">{#each selectedAgentReview.persisted.validated.result.verification as check}<li><span data-status={check.status}></span><div><strong>{check.stepId}</strong><small><ModelMarkdown source={check.details} /></small></div></li>{/each}</ul>
                     {:else}<p class="execution-result-empty">No verification records.</p>{/if}
                   </section>
                 </div>
@@ -2206,7 +2207,7 @@
                     </ul>
                   </div>
                 {/if}
-                {#if selectedAgentReview.persisted.validated.result.blockers.length}<div class="execution-blockers"><strong>Blockers</strong>{#each selectedAgentReview.persisted.validated.result.blockers as blocker}<p>{blocker}</p>{/each}</div>{/if}
+                {#if selectedAgentReview.persisted.validated.result.blockers.length}<div class="execution-blockers"><strong>Blockers</strong>{#each selectedAgentReview.persisted.validated.result.blockers as blocker}<p><ModelMarkdown source={blocker} /></p>{/each}</div>{/if}
               </section>
             {/if}
           </section>
