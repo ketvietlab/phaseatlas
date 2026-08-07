@@ -615,13 +615,19 @@
     errorMessage = "";
     try {
       const repository = await window.phaseatlas.repositories.refresh(checkoutId);
-      const [nextWorkspaces, nextTaskSnapshot] = await Promise.all([
+      // Provider availability is discovered, not static: a CLI can be installed,
+      // signed in, or upgraded while the repository stays open. Refresh has to
+      // re-probe, otherwise fixing a sign-in requires reopening the repository.
+      const [nextWorkspaces, nextTaskSnapshot, nextRunners] = await Promise.all([
         window.phaseatlas.workspaces.list(checkoutId),
         window.phaseatlas.tasks.snapshot(checkoutId),
+        window.phaseatlas.runners.list(checkoutId),
       ]);
       repositories = repositories.map((item) => item.checkoutId === checkoutId ? repository : item);
       workspaces = nextWorkspaces;
       taskSnapshot = nextTaskSnapshot;
+      runners = nextRunners;
+      applyRepositoryProviderSettings(checkoutId);
       const workspaceSlug = nextWorkspaces.some((item) => item.slug === selectedWorkspaceSlug)
         ? selectedWorkspaceSlug
         : nextWorkspaces[0]?.slug ?? "";
