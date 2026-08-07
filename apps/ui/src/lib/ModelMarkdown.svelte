@@ -35,12 +35,12 @@
   .model-markdown :global(li) { margin: 2px 0; }
   .model-markdown :global(code) { border: 1px solid var(--border); border-radius: 4px; padding: 1px 4px; background: var(--surface-soft); font-family: "SFMono-Regular",Consolas,monospace; font-size: .92em; overflow-wrap: anywhere; }
   .model-markdown :global(pre) { overflow-x: auto; margin: 0 0 8px; border: 1px solid var(--border); border-radius: var(--radius-xs); padding: 8px 10px; background: var(--surface-soft); }
-  .model-markdown :global(pre code) { border: 0; padding: 0; background: transparent; font-size: 11px; line-height: 1.5; overflow-wrap: normal; white-space: pre; }
+  .model-markdown :global(pre code) { border: 0; padding: 0; background: transparent; font-size: 12.5px; line-height: 1.55; overflow-wrap: normal; white-space: pre; }
   .model-markdown :global(strong) { font-weight: 750; }
   .model-markdown :global(h1),.model-markdown :global(h2),.model-markdown :global(h3),
   .model-markdown :global(h4),.model-markdown :global(h5),.model-markdown :global(h6) { margin: 10px 0 5px; font-size: 1.02em; font-weight: 780; }
   .model-markdown :global(blockquote) { margin: 0 0 8px; border-left: 2px solid var(--border); padding-left: 9px; color: var(--text-muted); }
-  .model-markdown :global(table) { display: block; overflow-x: auto; border-collapse: collapse; font-size: 11px; }
+  .model-markdown :global(table) { display: block; overflow-x: auto; border-collapse: collapse; font-size: 12.5px; }
   .model-markdown :global(th),.model-markdown :global(td) { border: 1px solid var(--border); padding: 4px 7px; text-align: left; }
   .model-markdown .rendered-link { color: var(--active-text); text-decoration: underline; }
   .model-markdown .rendered-image { color: var(--text-subtle); font-size: .92em; }

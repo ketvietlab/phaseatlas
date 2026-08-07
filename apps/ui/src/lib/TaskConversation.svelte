@@ -340,50 +340,50 @@
 <style>
   .task-conversation { display: flex; min-height: 0; flex: 1; flex-direction: column; gap: 8px; }
   .conversation-transcript { display: flex; min-height: 0; flex: 1; flex-direction: column; gap: 8px; overflow-y: auto; padding-right: 4px; }
-  .conversation-empty { margin: 18px 0; color: var(--text-subtle); font-size: 12px; text-align: center; }
+  .conversation-empty { margin: 18px 0; color: var(--text-subtle); font-size: 13.5px; text-align: center; }
 
   /* One column of turns, byline above text — the shape Claude Code, Cursor and
      Codex all use, so nothing competes with the message itself for attention. */
-  .turn { display: grid; grid-template-columns: 34px minmax(0,1fr); gap: 10px; padding: 2px 0; }
-  .turn-gutter { display: flex; height: 20px; align-items: center; justify-content: flex-end; color: var(--text-subtle); font-size: 9px; font-weight: 750; letter-spacing: .04em; text-transform: uppercase; }
+  .turn { display: grid; grid-template-columns: 38px minmax(0,1fr); gap: 11px; padding: 3px 0; }
+  .turn-gutter { display: flex; height: 22px; align-items: center; justify-content: flex-end; color: var(--text-subtle); font-size: 10.5px; font-weight: 750; letter-spacing: .04em; text-transform: uppercase; }
   .stage-dot { width: 7px; height: 7px; border-radius: 50%; background: var(--text-subtle); }
   .stage-dot[data-status="completed"] { background: var(--success-500); }
   .stage-dot[data-status="failed"] { background: #c44242; }
   .stage-dot[data-status="running"],.stage-dot[data-status="starting"] { background: var(--brand-500); }
   .turn-body { min-width: 0; }
-  .turn-byline { display: flex; flex-wrap: wrap; align-items: baseline; gap: 8px; margin: 0 0 3px; color: var(--text-subtle); font-size: 10px; }
-  .turn-byline strong { color: var(--text); font-size: 11px; font-weight: 780; }
+  .turn-byline { display: flex; flex-wrap: wrap; align-items: baseline; gap: 8px; margin: 0 0 3px; color: var(--text-subtle); font-size: 11.5px; }
+  .turn-byline strong { color: var(--text); font-size: 12.5px; font-weight: 780; }
   .turn-byline time { margin-left: auto; }
-  .turn-text { margin: 0; color: var(--text); font-size: 12.5px; line-height: 1.62; white-space: pre-wrap; overflow-wrap: anywhere; }
+  .turn-text { margin: 0; color: var(--text); font-size: 14px; line-height: 1.62; white-space: pre-wrap; overflow-wrap: anywhere; }
   .turn[data-role="user"] .turn-text { border-left: 2px solid var(--brand-300); padding-left: 9px; color: var(--text-muted); }
-  .turn-activity { margin: 5px 0 0; color: var(--text-subtle); font-size: 10.5px; }
-  .turn-failure { margin: 6px 0 0; border-radius: var(--radius-xs); padding: 6px 8px; background: color-mix(in srgb,#c44242 8%,var(--surface)); color: var(--text-muted); font-size: 11px; }
+  .turn-activity { margin: 5px 0 0; color: var(--text-subtle); font-size: 12px; }
+  .turn-failure { margin: 6px 0 0; border-radius: var(--radius-xs); padding: 6px 8px; background: color-mix(in srgb,#c44242 8%,var(--surface)); color: var(--text-muted); font-size: 12.5px; }
 
-  .conversation-status { margin: 2px 0 0; color: var(--text-subtle); font-size: 11px; }
-  .conversation-error { margin: 0; border-radius: var(--radius-xs); padding: 6px 8px; background: color-mix(in srgb,#c44242 8%,var(--surface)); color: var(--text-muted); font-size: 11px; }
+  .conversation-status { margin: 2px 0 0; color: var(--text-subtle); font-size: 12.5px; }
+  .conversation-error { margin: 0; border-radius: var(--radius-xs); padding: 6px 8px; background: color-mix(in srgb,#c44242 8%,var(--surface)); color: var(--text-muted); font-size: 12.5px; }
 
   .conversation-composer { border: 1px solid var(--border); border-radius: var(--radius); background: var(--surface); }
   .conversation-composer.disabled { opacity: .72; }
-  .conversation-composer textarea { display: block; width: 100%; min-height: 46px; border: 0; border-radius: var(--radius) var(--radius) 0 0; padding: 8px 10px; background: transparent; color: var(--text); font-family: inherit; font-size: 12px; line-height: 1.5; outline: none; resize: vertical; }
+  .conversation-composer textarea { display: block; width: 100%; min-height: 46px; border: 0; border-radius: var(--radius) var(--radius) 0 0; padding: 8px 10px; background: transparent; color: var(--text); font-family: inherit; font-size: 13.5px; line-height: 1.5; outline: none; resize: vertical; }
   .conversation-composer-actions { display: flex; align-items: center; justify-content: space-between; gap: 10px; border-top: 1px solid var(--border-soft); padding: 5px 7px; }
-  .conversation-composer-actions small { color: var(--text-subtle); font-size: 10px; }
+  .conversation-composer-actions small { color: var(--text-subtle); font-size: 11.5px; }
   .conversation-composer-actions small { margin-left: auto; }
   .composer-mode { display: inline-flex; align-items: center; border: 1px solid var(--border); border-radius: 8px; padding: 2px; background: var(--surface-soft); }
-  .composer-mode button { border: 0; border-radius: 6px; padding: 3px 9px; background: transparent; color: var(--text-subtle); font-size: 10.5px; font-weight: 750; }
+  .composer-mode button { border: 0; border-radius: 6px; padding: 3px 9px; background: transparent; color: var(--text-subtle); font-size: 12px; font-weight: 750; }
   .composer-mode button.active { background: var(--surface); color: var(--active-text); }
-  .composer-access select { border: 1px solid var(--border); border-radius: var(--radius-xs); padding: 3px 6px; background: var(--surface-soft); color: var(--text-muted); font-family: inherit; font-size: 10.5px; }
+  .composer-access select { border: 1px solid var(--border); border-radius: var(--radius-xs); padding: 3px 6px; background: var(--surface-soft); color: var(--text-muted); font-family: inherit; font-size: 12px; }
   .edit-confirm,.edit-review { border: 1px solid var(--brand-200); border-radius: var(--radius); padding: 9px 11px; background: var(--active-surface); }
-  .edit-confirm p,.edit-review p { margin: 0; font-size: 12px; }
-  .edit-review p span { margin-left: 8px; color: var(--text-subtle); font-size: 10.5px; }
+  .edit-confirm p,.edit-review p { margin: 0; font-size: 13.5px; }
+  .edit-review p span { margin-left: 8px; color: var(--text-subtle); font-size: 12px; }
   .edit-review-summary { margin-top: 5px !important; color: var(--text-muted); line-height: 1.55; }
   .edit-confirm dl { display: grid; gap: 3px; margin: 7px 0; }
   .edit-confirm dl div { display: flex; gap: 8px; }
-  .edit-confirm dt { color: var(--text-subtle); font-size: 10px; min-width: 78px; }
-  .edit-confirm dd { margin: 0; font-size: 11px; }
+  .edit-confirm dt { color: var(--text-subtle); font-size: 11.5px; min-width: 78px; }
+  .edit-confirm dd { margin: 0; font-size: 12.5px; }
   .edit-confirm-actions { display: flex; justify-content: flex-end; gap: 7px; margin-top: 8px; }
-  .edit-confirm-actions button { border: 1px solid var(--border); border-radius: var(--radius-sm); padding: 4px 10px; background: var(--surface); color: var(--text); font-size: 11px; font-weight: 700; }
+  .edit-confirm-actions button { border: 1px solid var(--border); border-radius: var(--radius-sm); padding: 4px 10px; background: var(--surface); color: var(--text); font-size: 12.5px; font-weight: 700; }
   .edit-confirm-actions button.primary { border-color: transparent; background: var(--brand-600); color: #fff; }
-  .conversation-composer-actions button.composer-send { display: flex; align-items: center; gap: 7px; border: 0; border-radius: var(--radius-sm); padding: 5px 9px; background: var(--brand-600); color: #fff; font-size: 11px; font-weight: 800; }
+  .conversation-composer-actions button.composer-send { display: flex; align-items: center; gap: 7px; border: 0; border-radius: var(--radius-sm); padding: 5px 9px; background: var(--brand-600); color: #fff; font-size: 12.5px; font-weight: 800; }
   .conversation-composer-actions button:disabled { opacity: .4; }
   .conversation-composer-actions kbd { border-left: 1px solid rgba(255,255,255,.28); padding-left: 6px; font: inherit; }
 </style>
