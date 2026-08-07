@@ -13,6 +13,7 @@ import {
   formatCodexJsonEvent,
   assertRunnerModel,
   assertRunnerSelection,
+  claudeJsonSchemaArgument,
   claudeReasoningEffortArguments,
   parseClaudeAuthStatus,
   parseClaudeModelHelp,
@@ -340,4 +341,16 @@ test("treats an installed but signed-out CLI as unavailable", () => {
   assert.equal(parseClaudeAuthStatus("not json"), true);
   assert.equal(parseClaudeAuthStatus(JSON.stringify({ status: "signed-in" })), true);
   assert.equal(parseClaudeAuthStatus(JSON.stringify([])), true);
+});
+
+test("strips the schema dialect key that suppresses Claude structured output", () => {
+  const projected = JSON.parse(claudeJsonSchemaArgument(AGENT_RUN_RESULT_SCHEMA)) as Record<string, unknown>;
+  assert.equal("$schema" in projected, false);
+  // Everything that actually constrains the result must survive.
+  const original = AGENT_RUN_RESULT_SCHEMA as Record<string, unknown>;
+  assert.deepEqual(projected.required, original.required);
+  assert.deepEqual(projected.properties, original.properties);
+  assert.equal(projected.additionalProperties, original.additionalProperties);
+  assert.equal(projected.type, original.type);
+  assert.equal(claudeJsonSchemaArgument(null), "null");
 });

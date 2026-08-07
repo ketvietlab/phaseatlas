@@ -28,6 +28,11 @@ may contain a documented breaking change.
 
 ### Fixed
 
+- Claude Code runs completed their work and then failed with a JSON parse error. The agent result
+  schema carries a `$schema` dialect key, and Claude Code silently abandons structured output when it
+  is present — the run returned prose instead. The key is now dropped before the schema is handed to
+  the CLI.
+
 - Claude Code always reported itself as signed out inside PhaseAtlas, even for a signed-in user. The
   repository worker's environment allowlist dropped `USER`, which the CLI needs to resolve its stored
   credentials, so no Claude Code run could ever authenticate.

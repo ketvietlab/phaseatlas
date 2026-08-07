@@ -282,6 +282,15 @@ export function parseClaudeModelHelp(value: string): RunnerModelDescriptor[] {
   }));
 }
 
+// Claude Code silently abandons structured output when the schema carries a
+// $schema declaration: the result arrives as prose with no structured_output at
+// all. Dropping the dialect key restores it; it never affected validation.
+export function claudeJsonSchemaArgument(schema: unknown): string {
+  if (!schema || typeof schema !== "object" || Array.isArray(schema)) return JSON.stringify(schema);
+  const { $schema: _dialect, ...rest } = schema as Record<string, unknown>;
+  return JSON.stringify(rest);
+}
+
 export function claudeReasoningEffortArguments(reasoningEffort?: string): string[] {
   return reasoningEffort ? ["--effort", reasoningEffort] : [];
 }
@@ -904,7 +913,7 @@ class ClaudeExecutionAdapter implements ProviderExecutionAdapter {
         "--output-format", "stream-json",
         "--verbose",
         "--include-partial-messages",
-        "--json-schema", JSON.stringify(AGENT_RUN_RESULT_SCHEMA),
+        "--json-schema", claudeJsonSchemaArgument(AGENT_RUN_RESULT_SCHEMA),
         "--permission-mode", context.spec.sandbox === "read-only" ? "plan" : "acceptEdits",
         "--tools", context.spec.sandbox === "read-only" ? "Read,Glob,Grep" : "Read,Glob,Grep,Edit,Write,Bash",
         "--no-session-persistence",
@@ -1185,7 +1194,7 @@ class ClaudePlanningAdapter implements PlanningRunnerAdapter {
       "--output-format", "stream-json",
       "--verbose",
       "--include-partial-messages",
-      "--json-schema", JSON.stringify(schema),
+      "--json-schema", claudeJsonSchemaArgument(schema),
       "--permission-mode", "plan",
       "--tools", "Read,Glob,Grep",
       "--no-session-persistence",
