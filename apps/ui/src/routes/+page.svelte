@@ -905,9 +905,9 @@
   function openRepositoryEditor(path = "") {
     contentPanelTaskKey = "";
     editorInitialPath = path;
-    // The Theia view is native and paints above every DOM surface, so it has to
-    // be put away before anything else claims this area.
-    if (ideOpen) closeIdeSurface();
+    // Like chat, the IDE panel is only deactivated by the explorer, not closed:
+    // it comes back when the explorer does. Being inactive reports an empty
+    // rectangle, which takes the native Theia view down with it.
     editorOpen = true;
   }
 
@@ -1821,10 +1821,12 @@
           <kbd>{chatShortcutLabel}</kbd>
         </button>
         <button
+          class:active={ideOpen && !editorOpen}
           class="terminal-toggle"
           type="button"
-          aria-label="Open the repository in the embedded IDE"
-          title={ideError || "Open the embedded IDE"}
+          aria-label={`${ideOpen ? "Close" : "Open"} the embedded IDE`}
+          aria-pressed={ideOpen}
+          title={ideError || `${ideOpen ? "Close" : "Open"} the embedded IDE`}
           onclick={openEmbeddedIde}
           disabled={!selectedCheckoutId || ideOpening}
         >
