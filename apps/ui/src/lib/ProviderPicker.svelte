@@ -20,7 +20,37 @@
   let query = "";
   let highlighted = 0;
   let rootElement: HTMLDivElement | undefined;
+  let triggerElement: HTMLButtonElement | undefined;
+  let popoverElement: HTMLDivElement | undefined;
   let searchElement: HTMLInputElement | undefined;
+  let popoverStyle = "visibility: hidden;";
+
+  const POPOVER_GAP = 6;
+  const VIEWPORT_MARGIN = 8;
+
+  // .composer-card and .chat-shell both clip with overflow: hidden, so an
+  // absolutely positioned popover is cut off inside the composer. Render it on
+  // body and position it against the trigger in viewport coordinates instead.
+  function portal(node: HTMLElement) {
+    document.body.appendChild(node);
+    return { destroy: () => node.remove() };
+  }
+
+  function positionPopover() {
+    if (!open || !triggerElement || !popoverElement) return;
+    const trigger = triggerElement.getBoundingClientRect();
+    const popover = popoverElement.getBoundingClientRect();
+    const maxLeft = window.innerWidth - popover.width - VIEWPORT_MARGIN;
+    const left = Math.max(VIEWPORT_MARGIN, Math.min(trigger.left, maxLeft));
+    const above = trigger.top - popover.height - POPOVER_GAP;
+    const below = trigger.bottom + POPOVER_GAP;
+    const fitsAbove = above >= VIEWPORT_MARGIN;
+    const fitsBelow = below + popover.height <= window.innerHeight - VIEWPORT_MARGIN;
+    const top = placement === "up"
+      ? fitsAbove ? above : below
+      : fitsBelow ? below : Math.max(VIEWPORT_MARGIN, above);
+    popoverStyle = `left: ${Math.round(left)}px; top: ${Math.round(top)}px;`;
+  }
 
   $: activeRunner = runners.find((runner) => runner.id === runnerId);
   $: activeModel = activeRunner?.models.find((model) => model.id === modelId);
@@ -57,15 +87,17 @@
     open = !open;
     if (!open) return;
     query = "";
+    popoverStyle = "visibility: hidden;";
     highlighted = Math.max(flattened.findIndex((choice) => choice.model.id === modelId), 0);
     await tick();
+    positionPopover();
     searchElement?.focus();
   }
 
   function close(restoreFocus = true) {
     if (!open) return;
     open = false;
-    if (restoreFocus) rootElement?.querySelector<HTMLButtonElement>(".provider-trigger")?.focus();
+    if (restoreFocus) triggerElement?.focus();
   }
 
   function chooseModel(choice: Choice) {
@@ -100,17 +132,24 @@
   }
 
   function handleWindowPointerDown(event: PointerEvent) {
-    if (!open || !rootElement) return;
-    if (!rootElement.contains(event.target as Node)) close(false);
+    if (!open) return;
+    const target = event.target as Node;
+    if (rootElement?.contains(target) || popoverElement?.contains(target)) return;
+    close(false);
   }
 </script>
 
-<svelte:window on:pointerdown={handleWindowPointerDown} />
+<svelte:window
+  on:pointerdown={handleWindowPointerDown}
+  on:resize={positionPopover}
+  on:scroll|capture={positionPopover}
+/>
 
 <div class="provider-picker" class:open bind:this={rootElement}>
   <button
     class="provider-trigger"
     type="button"
+    bind:this={triggerElement}
     {disabled}
     aria-haspopup="dialog"
     aria-expanded={open}
@@ -124,7 +163,16 @@
   </button>
 
   {#if open}
-    <div class="provider-popover" data-placement={placement} role="dialog" tabindex="-1" aria-label="Select agent model" onkeydown={handleKeydown}>
+    <div
+      class="provider-popover"
+      use:portal
+      bind:this={popoverElement}
+      style={popoverStyle}
+      role="dialog"
+      tabindex="-1"
+      aria-label="Select agent model"
+      onkeydown={handleKeydown}
+    >
       <div class="provider-search">
         <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="11" cy="11" r="6"/><path d="m16 16 4 4"/></svg>
         <input
@@ -195,9 +243,7 @@
   .provider-trigger-caret { flex: 0 0 auto; width: 5px; height: 5px; border-right: 1.2px solid currentColor; border-bottom: 1.2px solid currentColor; transform: translateY(-1px) rotate(45deg); }
   .provider-picker.open .provider-trigger-caret { transform: translateY(1px) rotate(225deg); }
 
-  .provider-popover { position: absolute; z-index: 40; display: flex; width: 268px; flex-direction: column; overflow: hidden; border: 1px solid var(--border); border-radius: var(--radius); background: var(--surface); box-shadow: var(--shadow-hover); }
-  .provider-popover[data-placement="up"] { bottom: calc(100% + 6px); left: 0; }
-  .provider-popover[data-placement="down"] { top: calc(100% + 6px); left: 0; }
+  .provider-popover { position: fixed; z-index: 150; display: flex; width: 268px; max-width: calc(100vw - 16px); flex-direction: column; overflow: hidden; border: 1px solid var(--border); border-radius: var(--radius); background: var(--surface); box-shadow: var(--shadow-hover); }
 
   .provider-search { display: flex; align-items: center; gap: 6px; border-bottom: 1px solid var(--border-soft); padding: 7px 9px; }
   .provider-search svg { width: 13px; height: 13px; flex: 0 0 13px; fill: none; stroke: var(--text-subtle); stroke-linecap: round; stroke-width: 1.8; }
