@@ -1,5 +1,5 @@
 import { contextBridge, ipcRenderer } from "electron";
-import type { PhaseAtlasDesktopApi, PhaseAtlasDesktopEvent } from "@phaseatlas/contracts";
+import type { IdeSurfaceState, PhaseAtlasDesktopApi, PhaseAtlasDesktopEvent } from "@phaseatlas/contracts";
 
 const api: PhaseAtlasDesktopApi = {
   repositories: {
@@ -116,7 +116,17 @@ const api: PhaseAtlasDesktopApi = {
   },
   ide: {
     open: (checkoutId, theme, runId) => ipcRenderer.invoke("phaseatlas:ide:open", checkoutId, theme, runId),
+    show: (key) => ipcRenderer.invoke("phaseatlas:ide:show", key),
+    hide: () => ipcRenderer.invoke("phaseatlas:ide:hide"),
+    close: (key) => ipcRenderer.invoke("phaseatlas:ide:close", key),
+    state: () => ipcRenderer.invoke("phaseatlas:ide:state"),
+    setInset: (top) => ipcRenderer.invoke("phaseatlas:ide:inset", top),
     setTheme: (theme) => ipcRenderer.invoke("phaseatlas:ide:theme:set", theme),
+    onStateChanged: (listener) => {
+      const handler = (_event: Electron.IpcRendererEvent, state: IdeSurfaceState) => listener(state);
+      ipcRenderer.on("phaseatlas:ide:state", handler);
+      return () => ipcRenderer.removeListener("phaseatlas:ide:state", handler);
+    },
   },
   runtime: {
     platform: () => ipcRenderer.invoke("phaseatlas:runtime:platform"),

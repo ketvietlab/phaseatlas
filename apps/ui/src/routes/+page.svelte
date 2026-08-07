@@ -8,12 +8,14 @@
   import ModelMarkdown from "$lib/ModelMarkdown.svelte";
   import TaskContentPanel from "$lib/TaskContentPanel.svelte";
   import TaskMap from "$lib/TaskMap.svelte";
+  import IdeSurfaceBar from "$lib/IdeSurfaceBar.svelte";
   import type {
     AgentResultReview,
     AgentRunAction,
     AgentRunActionAvailability,
     AgentRunSummary,
     CanonicalTask,
+    IdeSurfaceState,
     PersistedRunEvent,
     PlanningProposalSet,
     PlanningStatus,
@@ -121,6 +123,7 @@
   const PIPELINE_ACTIONS: AgentRunAction[] = ["analyze", "plan", "implement", "review"];
   let ideOpening = false;
   let ideError = "";
+  let ideState: IdeSurfaceState = { targets: [], visibleKey: null };
   let openedFilePath = "";
   let openedFileContent = "";
   let openedFileError = "";
@@ -295,6 +298,9 @@
       }
     });
     const unsubscribeCloseSurface = window.phaseatlas.runtime.onCloseSurface(closeCurrentSurface);
+    // The main process also changes this on its own — a Theia backend that dies
+    // has to disappear from the strip without the renderer having asked.
+    const unsubscribeIde = window.phaseatlas.ide.onStateChanged((state) => (ideState = state));
 
     void initialize();
     return () => {
@@ -302,6 +308,7 @@
       window.clearInterval(planningClockTimer);
       unsubscribe();
       unsubscribeCloseSurface();
+      unsubscribeIde();
     };
   });
 
@@ -644,15 +651,16 @@
     openedFileLoading = false;
   }
 
-  // The IDE is a separate window owned by the main process; the renderer only
-  // asks for it by checkout and hands over the current theme.
-  // Repo home opens the canonical checkout; a stage opens the worktree it produced.
+  // The IDE is a view the main process lays out inside this window, below the
+  // switcher strip; the renderer only asks for it by checkout and hands over
+  // the current theme. Repo home opens the canonical checkout; a stage opens
+  // the worktree it produced.
   async function openRunWorktreeInIde(runId: string) {
     if (!window.phaseatlas || !selectedCheckoutId || ideOpening) return;
     ideOpening = true;
     ideError = "";
     try {
-      await window.phaseatlas.ide.open(selectedCheckoutId, theme === "dark" ? "dark" : "light", runId);
+      ideState = await window.phaseatlas.ide.open(selectedCheckoutId, theme === "dark" ? "dark" : "light", runId);
     } catch (error) {
       ideError = error instanceof Error ? error.message : "The run worktree could not be opened.";
       executionError = ideError;
@@ -666,13 +674,57 @@
     ideOpening = true;
     ideError = "";
     try {
-      await window.phaseatlas.ide.open(selectedCheckoutId, theme === "dark" ? "dark" : "light");
+      ideState = await window.phaseatlas.ide.open(selectedCheckoutId, theme === "dark" ? "dark" : "light");
     } catch (error) {
       ideError = error instanceof Error ? error.message : "The embedded IDE could not be opened.";
       errorMessage = ideError;
     } finally {
       ideOpening = false;
     }
+  }
+
+  // Switching never stops a backend, so it is cheap and cannot fail loudly;
+  // stopping one is the deliberate act that frees the Theia process.
+  async function showIdeSurface(key: string) {
+    if (!window.phaseatlas || ideOpening) return;
+    ideOpening = true;
+    try {
+      ideState = await window.phaseatlas.ide.show(key);
+    } catch (error) {
+      ideError = error instanceof Error ? error.message : "That IDE workspace could not be shown.";
+      ideState = await window.phaseatlas.ide.state();
+    } finally {
+      ideOpening = false;
+    }
+  }
+
+  async function hideIdeSurface() {
+    if (!window.phaseatlas) return;
+    ideState = await window.phaseatlas.ide.hide();
+  }
+
+  async function closeIdeSurface(key: string) {
+    if (!window.phaseatlas || ideOpening) return;
+    ideOpening = true;
+    try {
+      ideState = await window.phaseatlas.ide.close(key);
+    } catch (error) {
+      ideError = error instanceof Error ? error.message : "That IDE workspace could not be stopped.";
+      ideState = await window.phaseatlas.ide.state();
+    } finally {
+      ideOpening = false;
+    }
+  }
+
+  // The strip only exists while an IDE does, so the layout offset has to go
+  // away with it or the whole app stays pushed down by a bar that is gone.
+  $: if (typeof document !== "undefined" && ideState.targets.length === 0) {
+    document.documentElement.style.removeProperty("--ide-strip-height");
+  }
+
+  function reportIdeInset(height: number) {
+    document.documentElement.style.setProperty("--ide-strip-height", `${Math.round(height)}px`);
+    void window.phaseatlas?.ide.setInset(height).catch(() => undefined);
   }
 
   async function revealAgentConfiguration() {
@@ -1670,6 +1722,18 @@
 <svelte:window onkeydown={handleWindowKeydown} />
 
 <a class="skip-link" href="#main-content">Skip to main content</a>
+
+{#if ideState.targets.length > 0}
+  <IdeSurfaceBar
+    state={ideState}
+    {platform}
+    busy={ideOpening}
+    onShow={showIdeSurface}
+    onHide={hideIdeSurface}
+    onClose={closeIdeSurface}
+    onMeasure={reportIdeInset}
+  />
+{/if}
 
 <div class="app-shell">
   <aside class:mobile-open={menuOpen} class="sidebar" aria-label="Repository navigation">

@@ -2,7 +2,7 @@ import { fileURLToPath } from "node:url";
 import { readFileSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { TheiaIdeManager } from "./theia-ide-manager.js";
-import { assertPhaseAtlasTheme } from "./theia-ide-policy.js";
+import { assertIdeInset, assertPhaseAtlasTheme } from "./theia-ide-policy.js";
 import { app, BrowserWindow, dialog, ipcMain, shell } from "electron";
 import { RepositoryProcessManager } from "./repository-process-manager.js";
 
@@ -124,6 +124,7 @@ const embeddedIde = new TheiaIdeManager(
   theiaPreloadEntry,
   theiaDefaultExtensionsRoot,
   applicationSupportRoot,
+  (host, state) => host.webContents.send("phaseatlas:ide:state", state),
 );
 const repositories = new RepositoryProcessManager(workerEntry, applicationSupportRoot, (event) => {
   for (const window of BrowserWindow.getAllWindows()) {
@@ -186,19 +187,22 @@ async function createWindow(): Promise<BrowserWindow> {
   return window;
 }
 
+function ideHost(event: Electron.IpcMainInvokeEvent): BrowserWindow {
+  const host = BrowserWindow.fromWebContents(event.sender);
+  if (!host) throw new Error("The IDE surface has no PhaseAtlas window to live in.");
+  return host;
+}
+
 function registerIpc(): void {
-  ipcMain.on("phaseatlas:ide:close", (event) => {
-    embeddedIde.closeForWebContents(event.sender.id);
-  });
   ipcMain.on("phaseatlas:ide:theme:get", (event) => {
     event.returnValue = embeddedIde.themeForWebContents(event.sender.id);
   });
   ipcMain.handle("phaseatlas:ide:open", async (event, checkoutId: string, theme: string, runId?: string) => {
     assertPhaseAtlasTheme(theme);
     const repository = repositories.describe(checkoutId);
-    const owner = BrowserWindow.fromWebContents(event.sender) ?? undefined;
+    const host = ideHost(event);
     if (runId === undefined) {
-      return embeddedIde.open({ checkoutId: repository.checkoutId }, repository.path, repository.name, theme, owner);
+      return embeddedIde.open({ checkoutId: repository.checkoutId }, repository.path, repository.name, theme, host);
     }
     // A run's worktree is only a workspace while its lease is retained. Opening
     // one that is about to be removed would discard whatever the user typed.
@@ -212,8 +216,16 @@ function registerIpc(): void {
       lease.worktreePath,
       `${repository.name} · ${lease.branch}`,
       theme,
-      owner,
+      host,
     );
+  });
+  ipcMain.handle("phaseatlas:ide:show", (event, key: string) => embeddedIde.show(ideHost(event), key));
+  ipcMain.handle("phaseatlas:ide:hide", (event) => embeddedIde.hide(ideHost(event)));
+  ipcMain.handle("phaseatlas:ide:close", (event, key: string) => embeddedIde.close(ideHost(event), key));
+  ipcMain.handle("phaseatlas:ide:state", (event) => embeddedIde.state(ideHost(event)));
+  ipcMain.handle("phaseatlas:ide:inset", (event, top: number) => {
+    assertIdeInset(top);
+    return embeddedIde.setInset(ideHost(event), top);
   });
   ipcMain.handle("phaseatlas:ide:theme:set", (_event, theme: string) => {
     assertPhaseAtlasTheme(theme);

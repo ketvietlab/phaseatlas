@@ -5,8 +5,10 @@ import { access, mkdir } from "node:fs/promises";
 import http from "node:http";
 import net from "node:net";
 import path from "node:path";
-import { BrowserWindow, shell } from "electron";
+import { BrowserWindow, WebContentsView, shell } from "electron";
+import type { IdeSurfaceState, IdeSurfaceTarget } from "@phaseatlas/contracts";
 import {
+  DEFAULT_IDE_INSET,
   assertTheiaLaunchIdentity,
   isAllowedTheiaNavigation,
   theiaBackendArguments,
@@ -18,85 +20,30 @@ import {
 
 const STARTUP_TIMEOUT_MS = 20_000;
 const DIAGNOSTIC_LIMIT = 4_000;
-const CLOSE_BUTTON_ID = "phaseatlas-ide-close";
-
-const CLOSE_BUTTON_CSS = `
-  #theia-top-panel { padding-right: 52px !important; }
-  #${CLOSE_BUTTON_ID} {
-    position: fixed;
-    top: max(2px, env(safe-area-inset-top));
-    right: max(6px, env(safe-area-inset-right));
-    z-index: 2147483647;
-    display: grid;
-    place-items: center;
-    width: 40px;
-    height: 40px;
-    padding: 0 0 2px;
-    border: 1px solid transparent;
-    border-radius: 8px;
-    background: transparent;
-    color: var(--theia-titleBar-activeForeground, currentColor);
-    font: 400 22px/1 Inter, ui-sans-serif, system-ui, sans-serif;
-    cursor: default;
-    -webkit-app-region: no-drag;
-    transition: background-color 120ms ease, border-color 120ms ease, color 120ms ease;
-  }
-  #${CLOSE_BUTTON_ID}:hover {
-    border-color: var(--theia-titleBar-border, currentColor);
-    background: var(--theia-toolbar-hoverBackground, var(--theia-list-hoverBackground, transparent));
-  }
-  #${CLOSE_BUTTON_ID}:focus-visible {
-    outline: 2px solid var(--theia-focusBorder, #637ad5);
-    outline-offset: -2px;
-  }
-`;
-
-// Theia owns its own chrome, so PhaseAtlas injects the one control it needs:
-// a way back out of the IDE.
-function closeButtonBootstrap(): string {
-  return `(() => {
-    const buttonId = ${JSON.stringify(CLOSE_BUTTON_ID)};
-    const styleId = "phaseatlas-ide-window-controls";
-    if (!document.getElementById(styleId)) {
-      const style = document.createElement("style");
-      style.id = styleId;
-      style.textContent = ${JSON.stringify(CLOSE_BUTTON_CSS)};
-      document.head.append(style);
-    }
-    if (!document.getElementById(buttonId)) {
-      const button = document.createElement("button");
-      button.id = buttonId;
-      button.type = "button";
-      button.setAttribute("aria-label", "Close PhaseAtlas IDE");
-      button.title = "Close IDE";
-      button.textContent = "×";
-      button.addEventListener("click", () => {
-        const request = new CustomEvent("phaseatlas:ide:request-close", { cancelable: true });
-        if (window.dispatchEvent(request)) window.phaseatlasIde?.close();
-      });
-      document.body.append(button);
-    }
-  })();`;
-}
 
 interface TheiaInstance {
   key: string;
   target: TheiaTarget;
   checkoutId: string;
   repositoryPath: string;
+  title: string;
   port: number;
   process: ChildProcessByStdio<null, Readable, Readable>;
   stderrTail: string;
   stopping: boolean;
   theme: PhaseAtlasTheme;
+  host: BrowserWindow;
+  visible: boolean;
   startupError?: Error;
-  window?: BrowserWindow;
+  view?: WebContentsView;
 }
 
-export interface TheiaOpenResult {
-  checkoutId: string;
-  opened: true;
-  reused: boolean;
+// Electron drops the webContents reference once the view is gone, so reaching
+// straight through `view.webContents` throws on a crashed or closed IDE rather
+// than reporting it. Every access goes through here instead.
+function liveContents(view: WebContentsView | undefined): Electron.WebContents | undefined {
+  const contents = view?.webContents as Electron.WebContents | undefined;
+  return contents && !contents.isDestroyed() ? contents : undefined;
 }
 
 async function reserveTargetPort(target: TheiaTarget): Promise<number> {
@@ -144,79 +91,113 @@ async function waitForBackend(instance: TheiaInstance): Promise<void> {
 
 export class TheiaIdeManager {
   private readonly instances = new Map<string, TheiaInstance>();
-  private readonly starts = new Map<string, Promise<TheiaOpenResult>>();
+  private readonly starts = new Map<string, Promise<void>>();
+  private readonly insets = new WeakMap<BrowserWindow, number>();
+  private readonly hosts = new Set<BrowserWindow>();
 
   constructor(
     private readonly backendEntry: string,
     private readonly preloadEntry: string,
     private readonly defaultExtensionsRoot: string,
     private readonly runtimeRoot: string,
+    private readonly publishState: (host: BrowserWindow, state: IdeSurfaceState) => void,
   ) {}
 
   async open(
     target: TheiaTarget,
     repositoryPath: string,
-    repositoryName: string,
+    title: string,
     theme: PhaseAtlasTheme,
-    ownerWindow?: BrowserWindow,
-  ): Promise<TheiaOpenResult> {
-    const checkoutId = target.checkoutId;
+    host: BrowserWindow,
+  ): Promise<IdeSurfaceState> {
+    assertTheiaLaunchIdentity(target.checkoutId, repositoryPath);
     const key = theiaTargetKey(target);
-    assertTheiaLaunchIdentity(checkoutId, repositoryPath);
     const existing = this.instances.get(key);
     if (existing) {
       if (existing.repositoryPath !== repositoryPath) {
         throw new Error("The IDE workspace path no longer matches its registered identity.");
       }
       this.applyTheme(existing, theme);
-      if (ownerWindow && !ownerWindow.isDestroyed() && existing.window && !existing.window.isDestroyed()) {
-        existing.window.setBounds(ownerWindow.getBounds(), false);
-      }
-      existing.window?.show();
-      existing.window?.focus();
-      return { checkoutId, opened: true, reused: true };
+      return this.show(host, key);
     }
     // Two clicks before the backend is ready must not spawn two backends.
     const pending = this.starts.get(key);
     if (pending) {
-      const result = await pending;
-      const pendingInstance = this.instances.get(key);
-      if (pendingInstance) this.applyTheme(pendingInstance, theme);
-      const pendingWindow = pendingInstance?.window;
-      if (ownerWindow && !ownerWindow.isDestroyed() && pendingWindow && !pendingWindow.isDestroyed()) {
-        pendingWindow.setBounds(ownerWindow.getBounds(), false);
-      }
-      pendingWindow?.focus();
-      return { ...result, opened: true, reused: true };
+      await pending;
+      return this.show(host, key);
     }
-    const start = this.start(target, repositoryPath, repositoryName, theme, ownerWindow);
+    const start = this.start(target, repositoryPath, title, theme, host);
     this.starts.set(key, start);
     try {
-      return await start;
+      await start;
     } finally {
       this.starts.delete(key);
     }
+    return this.show(host, key);
+  }
+
+  // Switching hides a view rather than tearing it down: the Theia backend keeps
+  // its editors, terminals and language servers, so coming back is immediate.
+  show(host: BrowserWindow, key: string): IdeSurfaceState {
+    const instance = this.instances.get(key);
+    if (!instance || instance.host !== host) throw new Error("That IDE workspace is not open.");
+    for (const candidate of this.instances.values()) {
+      if (candidate.host !== host) continue;
+      candidate.visible = candidate.key === key;
+      if (liveContents(candidate.view)) candidate.view?.setVisible(candidate.visible);
+    }
+    this.layout(host);
+    liveContents(instance.view)?.focus();
+    return this.state(host);
+  }
+
+  hide(host: BrowserWindow): IdeSurfaceState {
+    for (const instance of this.instances.values()) {
+      if (instance.host !== host || !instance.visible) continue;
+      instance.visible = false;
+      if (liveContents(instance.view)) instance.view?.setVisible(false);
+    }
+    if (!host.isDestroyed()) host.webContents.focus();
+    return this.state(host);
+  }
+
+  close(host: BrowserWindow, key: string): IdeSurfaceState {
+    const instance = this.instances.get(key);
+    if (!instance || instance.host !== host) throw new Error("That IDE workspace is not open.");
+    this.stop(key);
+    if (!host.isDestroyed()) host.webContents.focus();
+    return this.state(host);
+  }
+
+  state(host: BrowserWindow): IdeSurfaceState {
+    const targets: IdeSurfaceTarget[] = [];
+    let visibleKey: string | null = null;
+    for (const instance of this.instances.values()) {
+      if (instance.host !== host) continue;
+      targets.push({
+        key: instance.key,
+        checkoutId: instance.checkoutId,
+        ...(instance.target.leaseId ? { leaseId: instance.target.leaseId } : {}),
+        title: instance.title,
+      });
+      if (instance.visible) visibleKey = instance.key;
+    }
+    return { targets, visibleKey };
+  }
+
+  setInset(host: BrowserWindow, top: number): IdeSurfaceState {
+    this.insets.set(host, Math.round(top));
+    this.layout(host);
+    return this.state(host);
   }
 
   stopAll(): void {
-    for (const [key, instance] of [...this.instances]) {
-      if (instance.window && !instance.window.isDestroyed()) instance.window.close();
-      else this.stop(key);
-    }
-  }
-
-  closeForWebContents(webContentsId: number): boolean {
-    for (const instance of this.instances.values()) {
-      if (instance.window?.webContents.id !== webContentsId) continue;
-      instance.window.close();
-      return true;
-    }
-    return false;
+    for (const key of [...this.instances.keys()]) this.stop(key);
   }
 
   themeForWebContents(webContentsId: number): PhaseAtlasTheme {
     for (const instance of this.instances.values()) {
-      if (instance.window?.webContents.id === webContentsId) return instance.theme;
+      if (liveContents(instance.view)?.id === webContentsId) return instance.theme;
     }
     return "light";
   }
@@ -228,10 +209,10 @@ export class TheiaIdeManager {
   private async start(
     target: TheiaTarget,
     repositoryPath: string,
-    repositoryName: string,
+    title: string,
     theme: PhaseAtlasTheme,
-    ownerWindow?: BrowserWindow,
-  ): Promise<TheiaOpenResult> {
+    host: BrowserWindow,
+  ): Promise<void> {
     await Promise.all([
       access(this.backendEntry),
       access(this.preloadEntry),
@@ -239,7 +220,7 @@ export class TheiaIdeManager {
     ]);
     const checkoutId = target.checkoutId;
     const key = theiaTargetKey(target);
-    // Config and plugins are per target, or two windows overwrite each other.
+    // Config and plugins are per target, or two workspaces overwrite each other.
     const checkoutRuntime = target.leaseId
       ? path.join(this.runtimeRoot, "checkouts", checkoutId, "ide-worktrees", target.leaseId)
       : path.join(this.runtimeRoot, "checkouts", checkoutId, "ide");
@@ -265,13 +246,17 @@ export class TheiaIdeManager {
       target,
       checkoutId,
       repositoryPath,
+      title,
       port,
       process: child,
       stderrTail: "",
       stopping: false,
       theme,
+      host,
+      visible: false,
     };
     this.instances.set(key, instance);
+    this.adoptHost(host);
     child.stdout.resume();
     child.once("error", (error) => {
       instance.startupError = error;
@@ -280,50 +265,40 @@ export class TheiaIdeManager {
     child.stderr.on("data", (chunk: string) => {
       instance.stderrTail = `${instance.stderrTail}${chunk}`.slice(-DIAGNOSTIC_LIMIT);
     });
+    // A backend that dies on its own must not leave a dead tab in the switcher.
     child.once("exit", () => {
-      if (this.instances.get(key) === instance) this.instances.delete(key);
-      if (!instance.window?.isDestroyed()) instance.window?.destroy();
+      if (this.instances.get(key) !== instance) return;
+      this.stop(key);
+      if (!host.isDestroyed()) this.publishState(host, this.state(host));
     });
     try {
       await waitForBackend(instance);
-      if (this.instances.get(key) !== instance) throw new Error("Theia IDE stopped before its window could open.");
-      instance.window = await this.createWindow(instance, repositoryName, ownerWindow);
-      return { checkoutId, opened: true, reused: false };
+      if (this.instances.get(key) !== instance) throw new Error("Theia IDE stopped before its view could open.");
+      if (host.isDestroyed()) throw new Error("The PhaseAtlas window closed before the IDE could open.");
+      await this.createView(instance, host);
     } catch (error) {
       this.stop(key);
       throw error;
     }
   }
 
-  private async createWindow(
-    instance: TheiaInstance,
-    repositoryName: string,
-    ownerWindow?: BrowserWindow,
-  ): Promise<BrowserWindow> {
-    const origin = `http://localhost:${instance.port}`;
-    const owner = ownerWindow && !ownerWindow.isDestroyed() ? ownerWindow : undefined;
-    const initialBounds = owner?.getBounds() ?? { width: 1480, height: 940 };
-    const window = new BrowserWindow({
-      ...initialBounds,
-      minWidth: 920,
-      minHeight: 640,
-      show: false,
-      ...(owner ? { parent: owner } : {}),
-      title: `${repositoryName} — PhaseAtlas IDE`,
-      backgroundColor: instance.theme === "dark" ? "#2e3034" : "#ffffff",
-      frame: process.platform !== "darwin",
+  private async createView(instance: TheiaInstance, host: BrowserWindow): Promise<void> {
+    const partition = `persist:phaseatlas-theia-${instance.key.replace(":", "-")}`;
+    const view = new WebContentsView({
       webPreferences: {
         preload: this.preloadEntry,
         contextIsolation: true,
         nodeIntegration: false,
         sandbox: true,
         webSecurity: true,
-        partition: `persist:phaseatlas-theia-${instance.key.replace(":", "-")}`,
+        partition,
       },
     });
-    instance.window = window;
-    window.webContents.session.setPermissionRequestHandler((_webContents, _permission, callback) => callback(false));
-    window.webContents.setWindowOpenHandler(({ url }) => {
+    instance.view = view;
+    view.setBackgroundColor(instance.theme === "dark" ? "#2e3034" : "#ffffff");
+    view.setVisible(false);
+    view.webContents.session.setPermissionRequestHandler((_webContents, _permission, callback) => callback(false));
+    view.webContents.setWindowOpenHandler(({ url }) => {
       if (isAllowedTheiaNavigation(url, instance.port)) {
         return {
           action: "allow",
@@ -334,7 +309,7 @@ export class TheiaIdeManager {
               nodeIntegration: false,
               sandbox: true,
               webSecurity: true,
-              partition: `persist:phaseatlas-theia-${instance.key.replace(":", "-")}`,
+              partition,
             },
           },
         };
@@ -342,38 +317,60 @@ export class TheiaIdeManager {
       if (url.startsWith("https://")) void shell.openExternal(url);
       return { action: "deny" };
     });
-    window.webContents.on("will-navigate", (event, url) => {
+    view.webContents.on("will-navigate", (event, url) => {
       if (!isAllowedTheiaNavigation(url, instance.port)) event.preventDefault();
     });
-    window.webContents.on("did-finish-load", () => {
-      void window.webContents.executeJavaScript(closeButtonBootstrap(), true).catch(() => undefined);
+    // The switcher strip is the way back, but the IDE fills the window, so the
+    // keyboard needs its own escape that Theia never sees.
+    view.webContents.on("before-input-event", (event, input) => {
+      if (input.key.toLowerCase() !== "p" || !input.alt || !input.shift || input.control || input.meta) return;
+      event.preventDefault();
+      if (input.type !== "keyDown" || input.isAutoRepeat) return;
+      const state = this.hide(host);
+      if (!host.isDestroyed()) this.publishState(host, state);
     });
-    const fitToOwner = () => {
-      if (owner && !owner.isDestroyed() && !window.isDestroyed()) window.setBounds(owner.getBounds(), false);
-    };
-    const ownerClosed = () => this.stop(instance.key);
-    owner?.on("move", fitToOwner);
-    owner?.on("resize", fitToOwner);
-    owner?.once("closed", ownerClosed);
-    window.once("ready-to-show", () => {
-      fitToOwner();
-      window.show();
-    });
-    window.once("closed", () => {
-      owner?.removeListener("move", fitToOwner);
-      owner?.removeListener("resize", fitToOwner);
-      owner?.removeListener("closed", ownerClosed);
+    // A crashed IDE renderer leaves a live backend behind a blank rectangle;
+    // tear the whole target down so the strip stops offering it.
+    view.webContents.once("render-process-gone", () => {
       this.stop(instance.key);
+      if (!host.isDestroyed()) this.publishState(host, this.state(host));
     });
-    await window.loadURL(origin);
-    return window;
+    host.contentView.addChildView(view);
+    this.layout(host);
+    await view.webContents.loadURL(`http://localhost:${instance.port}`);
+  }
+
+  private adoptHost(host: BrowserWindow): void {
+    if (this.hosts.has(host)) return;
+    this.hosts.add(host);
+    const relayout = () => this.layout(host);
+    host.on("resize", relayout);
+    host.on("enter-full-screen", relayout);
+    host.on("leave-full-screen", relayout);
+    host.once("closed", () => {
+      this.hosts.delete(host);
+      for (const instance of [...this.instances.values()]) {
+        if (instance.host === host) this.stop(instance.key);
+      }
+    });
+  }
+
+  private layout(host: BrowserWindow): void {
+    if (host.isDestroyed()) return;
+    const inset = this.insets.get(host) ?? DEFAULT_IDE_INSET;
+    const { width, height } = host.getContentBounds();
+    for (const instance of this.instances.values()) {
+      if (instance.host !== host || !liveContents(instance.view)) continue;
+      instance.view?.setBounds({ x: 0, y: inset, width, height: Math.max(0, height - inset) });
+    }
   }
 
   private applyTheme(instance: TheiaInstance, theme: PhaseAtlasTheme): void {
     instance.theme = theme;
-    if (!instance.window || instance.window.isDestroyed()) return;
-    instance.window.setBackgroundColor(theme === "dark" ? "#2e3034" : "#ffffff");
-    instance.window.webContents.send("phaseatlas:ide:theme-changed", theme);
+    const contents = liveContents(instance.view);
+    if (!contents) return;
+    instance.view?.setBackgroundColor(theme === "dark" ? "#2e3034" : "#ffffff");
+    contents.send("phaseatlas:ide:theme-changed", theme);
   }
 
   private stop(key: string): void {
@@ -381,7 +378,11 @@ export class TheiaIdeManager {
     if (!instance || instance.stopping) return;
     instance.stopping = true;
     this.instances.delete(key);
-    if (!instance.window?.isDestroyed()) instance.window?.destroy();
+    const view = instance.view;
+    if (view) {
+      if (!instance.host.isDestroyed()) instance.host.contentView.removeChildView(view);
+      liveContents(view)?.close();
+    }
     if (instance.process.exitCode !== null || instance.process.signalCode !== null) return;
     instance.process.kill("SIGTERM");
     const forceTimer = setTimeout(() => {

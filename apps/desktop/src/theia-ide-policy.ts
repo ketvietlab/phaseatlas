@@ -41,6 +41,18 @@ export function theiaPortForTarget(target: TheiaTarget): number {
   return THEIA_PORT_BASE + hash % THEIA_PORT_RANGE;
 }
 
+// The IDE is a view inside the PhaseAtlas window, laid out below the switcher
+// strip the renderer draws. The renderer reports the strip's measured height;
+// this is only what the first frame uses before that report arrives.
+export const DEFAULT_IDE_INSET = 44;
+const MAX_IDE_INSET = 400;
+
+export function assertIdeInset(value: unknown): asserts value is number {
+  if (typeof value !== "number" || !Number.isFinite(value) || value < 0 || value > MAX_IDE_INSET) {
+    throw new Error("The IDE viewport inset is invalid.");
+  }
+}
+
 export function theiaBackendArguments(repositoryPath: string, port: number, pluginsPath: string): string[] {
   if (!Number.isInteger(port) || port < 1 || port > 65_535) throw new Error("The IDE port is invalid.");
   if (!path.isAbsolute(pluginsPath)) throw new Error("The IDE plugin path must be absolute.");

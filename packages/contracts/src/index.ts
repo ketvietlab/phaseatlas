@@ -980,6 +980,21 @@ export type PhaseAtlasDesktopEvent =
   | RepositoryChatDesktopEvent
   | ChatEditDesktopEvent;
 
+// One IDE surface per workspace the user opened: the canonical checkout, or a
+// run's retained worktree. The key is opaque to the renderer — it only ever
+// hands one back that the main process already published.
+export interface IdeSurfaceTarget {
+  key: string;
+  checkoutId: string;
+  leaseId?: string;
+  title: string;
+}
+
+export interface IdeSurfaceState {
+  targets: IdeSurfaceTarget[];
+  visibleKey: string | null;
+}
+
 export interface PhaseAtlasDesktopApi {
   repositories: {
     open(): Promise<RepositorySummary | null>;
@@ -1056,8 +1071,16 @@ export interface PhaseAtlasDesktopApi {
   };
   ide: {
     // runId opens that run's retained worktree; omitting it opens the canonical checkout.
-    open(checkoutId: string, theme: "light" | "dark", runId?: string): Promise<{ checkoutId: string; opened: true; reused: boolean }>;
+    open(checkoutId: string, theme: "light" | "dark", runId?: string): Promise<IdeSurfaceState>;
+    // Switching only changes which view is painted; every backend stays alive,
+    // so returning to an IDE costs nothing. Closing is what stops one.
+    show(key: string): Promise<IdeSurfaceState>;
+    hide(): Promise<IdeSurfaceState>;
+    close(key: string): Promise<IdeSurfaceState>;
+    state(): Promise<IdeSurfaceState>;
+    setInset(top: number): Promise<IdeSurfaceState>;
     setTheme(theme: "light" | "dark"): Promise<void>;
+    onStateChanged(listener: (state: IdeSurfaceState) => void): () => void;
   };
   runtime: {
     platform(): Promise<string>;
