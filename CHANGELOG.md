@@ -20,6 +20,11 @@ may contain a documented breaking change.
 - `chat.setSessionProvider`, which retargets an open conversation after validating the selection
   against the discovered catalog. Past turns keep the provider they were recorded with.
 
+### Removed
+
+- The chat composer's "Files & folders" and "Images" buttons. Context is attached by typing `@` and
+  by pasting images, which both already worked and are the only supported mechanisms now.
+
 ### Changed
 
 - Split the repository agent selector into separate model and reasoning-effort controls instead of one
