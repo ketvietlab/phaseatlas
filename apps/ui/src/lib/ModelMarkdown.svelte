@@ -2,6 +2,19 @@
   import SvelteMarkdown from "@humanspeak/svelte-markdown";
 
   export let source = "";
+  export let onOpenPath: ((path: string) => void) | null = null;
+
+  // Inline code is where the model puts repository paths. Recognise the ones that
+  // look like a file in this repository so they can be opened, and leave anything
+  // else — a flag, a state name, a shell word — as ordinary code.
+  const PATH_LIKE = /^[A-Za-z0-9._+@-]+(?:\/[A-Za-z0-9._+@-]+)+\/?(?::\d+(?:-\d+)?(?:,\d+(?:-\d+)?)*)?$/;
+
+  function repositoryPath(text: string): string {
+    const candidate = text.trim();
+    if (!PATH_LIKE.test(candidate) || candidate.startsWith("/")) return "";
+    // Evidence cites line ranges; the file is what can be opened.
+    return candidate.replace(/:\d+(?:-\d+)?(?:,\d+(?:-\d+)?)*$/, "").replace(/\/$/, "");
+  }
 
   // Model output is untrusted: links never resolve and images are never fetched,
   // matching how the chat transcript already renders the same kind of text.
@@ -24,6 +37,15 @@
   <SvelteMarkdown source={rendered} sanitizeUrl={() => ""}>
     {#snippet link({ children })}<span class="rendered-link">{@render children?.()}</span>{/snippet}
     {#snippet image({ text })}<span class="rendered-image">[Image omitted: {text}]</span>{/snippet}
+    {#snippet codespan({ raw, text })}
+      {@const label = text ?? raw.replaceAll("`", "")}
+      {@const target = onOpenPath ? repositoryPath(label) : ""}
+      {#if target}
+        <button class="path-link" type="button" title={`Open ${target}`} onclick={() => onOpenPath?.(target)}>{label}</button>
+      {:else}
+        <code>{label}</code>
+      {/if}
+    {/snippet}
   </SvelteMarkdown>
 </div>
 
@@ -42,6 +64,8 @@
   .model-markdown :global(blockquote) { margin: 0 0 8px; border-left: 2px solid var(--border); padding-left: 9px; color: var(--text-muted); }
   .model-markdown :global(table) { display: block; overflow-x: auto; border-collapse: collapse; font-size: 12.5px; }
   .model-markdown :global(th),.model-markdown :global(td) { border: 1px solid var(--border); padding: 4px 7px; text-align: left; }
+  .model-markdown .path-link { border: 1px solid var(--brand-200); border-radius: 4px; padding: 1px 4px; background: var(--active-surface); color: var(--active-text); font-family: "SFMono-Regular",Consolas,monospace; font-size: .92em; overflow-wrap: anywhere; text-align: left; }
+  .model-markdown .path-link:hover { border-color: var(--brand-400,var(--brand-300)); text-decoration: underline; }
   .model-markdown .rendered-link { color: var(--active-text); text-decoration: underline; }
   .model-markdown .rendered-image { color: var(--text-subtle); font-size: .92em; }
 </style>

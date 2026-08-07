@@ -19,6 +19,7 @@
   export let runs: AgentRunSummary[] = [];
   export let runEvents: Record<string, PersistedRunEvent[]> = {};
   export let providerReady = false;
+  export let onOpenPath: (path: string) => void = () => undefined;
 
   type StageEntry = {
     kind: "stage";
@@ -244,7 +245,7 @@
               <span>{entry.run.runnerId}{entry.run.model ? ` · ${entry.run.model}` : ""}</span>
               <time>{relativeTime(entry.run.createdAt)}</time>
             </p>
-            {#if entry.narration}<div class="turn-text"><ModelMarkdown source={entry.narration} /></div>{/if}
+            {#if entry.narration}<div class="turn-text"><ModelMarkdown source={entry.narration} onOpenPath={onOpenPath} /></div>{/if}
             {#if entry.commands}
               <p class="turn-activity">Ran {entry.commands} repository {entry.commands === 1 ? "command" : "commands"}</p>
             {/if}
@@ -256,7 +257,7 @@
           <div class="turn-gutter" aria-hidden="true">{entry.message.role === "user" ? "You" : ""}</div>
           <div class="turn-body">
             <p class="turn-byline"><strong>{entry.message.role === "user" ? "You" : "Agent"}</strong><time>{relativeTime(entry.message.createdAt)}</time></p>
-            {#if entry.message.role === "assistant"}<div class="turn-text"><ModelMarkdown source={entry.message.content} /></div>{:else}<p class="turn-text">{entry.message.content}</p>{/if}
+            {#if entry.message.role === "assistant"}<div class="turn-text"><ModelMarkdown source={entry.message.content} onOpenPath={onOpenPath} /></div>{:else}<p class="turn-text">{entry.message.content}</p>{/if}
           </div>
         </article>
       {/if}
@@ -289,7 +290,7 @@
   {#if reviewEdit}
     <div class="edit-review">
       <p><strong>Edit ready for review</strong><span>{reviewEdit.changedFiles.length} changed {reviewEdit.changedFiles.length === 1 ? "file" : "files"}</span></p>
-      <div class="edit-review-summary"><ModelMarkdown source={reviewEdit.summary} /></div>
+      <div class="edit-review-summary"><ModelMarkdown source={reviewEdit.summary} onOpenPath={onOpenPath} /></div>
       <div class="edit-confirm-actions">
         <button type="button" disabled={editBusy} onclick={() => resolveEdit(reviewEdit.editId, "discard")}>Discard</button>
         <button class="primary" type="button" disabled={editBusy} onclick={() => resolveEdit(reviewEdit.editId, "accept")}>Accept</button>
@@ -360,6 +361,13 @@
   .turn-failure { margin: 6px 0 0; border-radius: var(--radius-xs); padding: 6px 8px; background: color-mix(in srgb,#c44242 8%,var(--surface)); color: var(--text-muted); font-size: 12.5px; }
 
   .conversation-status { margin: 2px 0 0; color: var(--text-subtle); font-size: 12.5px; }
+  
+  
+  
+  
+  
+  
+  
   .conversation-error { margin: 0; border-radius: var(--radius-xs); padding: 6px 8px; background: color-mix(in srgb,#c44242 8%,var(--surface)); color: var(--text-muted); font-size: 12.5px; }
 
   .conversation-composer { border: 1px solid var(--border); border-radius: var(--radius); background: var(--surface); }

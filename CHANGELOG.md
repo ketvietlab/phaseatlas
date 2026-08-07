@@ -10,6 +10,10 @@ may contain a documented breaking change.
 
 ### Added
 
+- File paths cited by the model are clickable. A path in a result summary, next action, verification
+  note, blocker, evidence reference, or conversation reply opens that file in the run panel, so a
+  claim about the repository can be checked where it is made.
+
 - The task conversation can change the repository: an Ask/Edit toggle in its composer runs the
   existing confirmed, isolated, reviewed edit path, with accept and discard offered inline once the
   edit completes.

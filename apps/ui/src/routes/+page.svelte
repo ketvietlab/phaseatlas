@@ -119,6 +119,11 @@
   let openEditorAfterTask: Record<string, boolean> = {};
   let executionOpen = false;
   const PIPELINE_ACTIONS: AgentRunAction[] = ["analyze", "plan", "implement", "review"];
+  let openedFilePath = "";
+  let openedFileContent = "";
+  let openedFileError = "";
+  let openedFileLoading = false;
+  let openedFileRequest = 0;
   let executionActions: AgentRunActionAvailability[] = [];
   let executionActionsLoading = false;
   let executionError = "";
@@ -602,6 +607,36 @@
     plannerReasoningEffort = reasoningEffort;
     persistRepositoryProviderSettings();
     if (executionOpen && selectedTask) void loadExecutionActions(selectedTask);
+  }
+
+  // A path cited in a result or an answer is a claim about this repository; opening
+  // it lets the user check the claim without leaving the run panel.
+  async function openRepositoryPathInEditor(repositoryPath: string) {
+    if (!window.phaseatlas || !selectedCheckoutId || !repositoryPath) return;
+    const requestId = ++openedFileRequest;
+    openedFilePath = repositoryPath;
+    openedFileContent = "";
+    openedFileError = "";
+    openedFileLoading = true;
+    try {
+      const document = await window.phaseatlas.files.read(selectedCheckoutId, repositoryPath);
+      if (requestId !== openedFileRequest) return;
+      openedFilePath = document.path;
+      openedFileContent = document.content;
+    } catch (error) {
+      if (requestId !== openedFileRequest) return;
+      openedFileError = error instanceof Error ? error.message : "The file could not be opened.";
+    } finally {
+      if (requestId === openedFileRequest) openedFileLoading = false;
+    }
+  }
+
+  function closeOpenedFile() {
+    openedFileRequest += 1;
+    openedFilePath = "";
+    openedFileContent = "";
+    openedFileError = "";
+    openedFileLoading = false;
   }
 
   async function revealAgentConfiguration() {
@@ -2120,7 +2155,23 @@
               runs={pipelineRuns}
               runEvents={agentEvents}
               providerReady={providerSelectionReady}
+              onOpenPath={openRepositoryPathInEditor}
             />
+            {#if openedFilePath}
+              <div class="opened-file">
+                <header>
+                  <code>{openedFilePath}</code>
+                  <button type="button" aria-label="Close file" onclick={closeOpenedFile}>×</button>
+                </header>
+                {#if openedFileLoading}
+                  <p class="opened-file-state">Reading {openedFilePath}…</p>
+                {:else if openedFileError}
+                  <p class="opened-file-state">{openedFileError}</p>
+                {:else}
+                  <pre>{openedFileContent}</pre>
+                {/if}
+              </div>
+            {/if}
           </div>
         {/if}
 
@@ -2177,11 +2228,11 @@
                 </header>
                 <!-- The summary is prose, often several hundred words. Heading
                      typography made it a wall; it belongs in body text. -->
-                <div class="execution-result-summary"><ModelMarkdown source={selectedAgentReview.persisted.validated.result.summary} /></div>
+                <div class="execution-result-summary"><ModelMarkdown source={selectedAgentReview.persisted.validated.result.summary} onOpenPath={openRepositoryPathInEditor} /></div>
                 {#if selectedAgentReview.reason}<p class="execution-result-warning">{selectedAgentReview.reason}</p>{/if}
                 <div class="execution-result-grid">
                   <section><span>Outcome</span><strong>{selectedAgentReview.persisted.validated.result.outcome}</strong><small>{selectedAgentReview.promotable ? "Eligible for separate promotion review" : "Not promotable"}</small></section>
-                  <section><span>Next action</span><strong><ModelMarkdown source={selectedAgentReview.persisted.validated.result.nextAction} /></strong><small>{selectedAgentReview.persisted.validated.result.requiresHumanReview ? "Human review required" : "No review requested"}</small></section>
+                  <section><span>Next action</span><strong><ModelMarkdown source={selectedAgentReview.persisted.validated.result.nextAction} onOpenPath={openRepositoryPathInEditor} /></strong><small>{selectedAgentReview.persisted.validated.result.requiresHumanReview ? "Human review required" : "No review requested"}</small></section>
                 </div>
                 <div class="execution-result-columns">
                   <section>
@@ -2193,7 +2244,7 @@
                   <section>
                     <header><strong>Verification</strong><span>{selectedAgentReview.persisted.validated.result.verification.length}</span></header>
                     {#if selectedAgentReview.persisted.validated.result.verification.length}
-                      <ul class="execution-verification-list">{#each selectedAgentReview.persisted.validated.result.verification as check}<li><span data-status={check.status}></span><div><strong>{check.stepId}</strong><small><ModelMarkdown source={check.details} /></small></div></li>{/each}</ul>
+                      <ul class="execution-verification-list">{#each selectedAgentReview.persisted.validated.result.verification as check}<li><span data-status={check.status}></span><div><strong>{check.stepId}</strong><small><ModelMarkdown source={check.details} onOpenPath={openRepositoryPathInEditor} /></small></div></li>{/each}</ul>
                     {:else}<p class="execution-result-empty">No verification records.</p>{/if}
                   </section>
                 </div>
@@ -2202,12 +2253,12 @@
                     <strong>Produced evidence</strong>
                     <ul>
                       {#each selectedAgentReview.persisted.validated.result.producedEvidence as evidence}
-                        <li><span>{evidence.type.replaceAll("_", " ")}</span><code>{evidence.reference}</code></li>
+                        <li><span>{evidence.type.replaceAll("_", " ")}</span><ModelMarkdown source={`\`${evidence.reference}\``} onOpenPath={openRepositoryPathInEditor} /></li>
                       {/each}
                     </ul>
                   </div>
                 {/if}
-                {#if selectedAgentReview.persisted.validated.result.blockers.length}<div class="execution-blockers"><strong>Blockers</strong>{#each selectedAgentReview.persisted.validated.result.blockers as blocker}<p><ModelMarkdown source={blocker} /></p>{/each}</div>{/if}
+                {#if selectedAgentReview.persisted.validated.result.blockers.length}<div class="execution-blockers"><strong>Blockers</strong>{#each selectedAgentReview.persisted.validated.result.blockers as blocker}<p><ModelMarkdown source={blocker} onOpenPath={openRepositoryPathInEditor} /></p>{/each}</div>{/if}
               </section>
             {/if}
           </section>
