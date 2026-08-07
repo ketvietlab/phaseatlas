@@ -3,6 +3,7 @@
   import RepositoryWorkbench from "$lib/RepositoryWorkbench.svelte";
   import RepositoryChatWorkspace from "$lib/RepositoryChatWorkspace.svelte";
   import TerminalPanel from "$lib/TerminalPanel.svelte";
+  import ProviderPicker from "$lib/ProviderPicker.svelte";
   import TaskContentPanel from "$lib/TaskContentPanel.svelte";
   import TaskMap from "$lib/TaskMap.svelte";
   import type {
@@ -115,6 +116,7 @@
   let contentFailures: Record<string, string> = {};
   let openEditorAfterTask: Record<string, boolean> = {};
   let executionOpen = false;
+  const PIPELINE_ACTIONS: AgentRunAction[] = ["analyze", "plan", "implement", "review"];
   let executionActions: AgentRunActionAvailability[] = [];
   let executionActionsLoading = false;
   let executionError = "";
@@ -167,6 +169,46 @@
   $: selectedProviderModel = selectedModels.find((model) => model.id === plannerModel);
   $: selectedReasoningEfforts = selectedProviderModel?.reasoningEfforts ?? [];
   $: reasoningEffortSupported = selectedReasoningEfforts.length > 0;
+  // One ordered pipeline per task. A stage counts as done only when a completed
+  // run exists for this exact task revision — an older revision is a stale claim,
+  // not progress. The entry point is the first stage that is not yet done.
+  $: pipelineRuns = selectedTask
+    ? agentRuns.filter((run) => run.taskKey === canonicalTaskKey(selectedTask))
+    : [];
+  $: pipelineDraft = PIPELINE_ACTIONS.map((action) => {
+    const availability = executionActions.find((candidate) => candidate.action === action)
+      ?? { action, sandbox: action === "implement" ? "workspace-write" as const : "read-only" as const, available: false, blockingReasons: [] };
+    const runs = pipelineRuns.filter((run) => run.action === action);
+    const active = runs.some((run) => run.status === "starting" || run.status === "running");
+    const done = runs.some((run) => run.status === "completed" && run.taskRevision === selectedTask?.revision);
+    const stale = !done && runs.some((run) => run.status === "completed");
+    const state = active ? "running" : done ? "done" : stale ? "stale" : availability.available ? "ready" : "blocked";
+    return {
+      action,
+      availability,
+      state,
+      stateLabel: active
+        ? "Running"
+        : done
+          ? "Completed"
+          : stale
+            ? "Superseded by a task edit"
+            : availability.available
+              ? availability.sandbox === "workspace-write" ? "Ready · isolated worktree" : "Ready · read-only"
+              : availability.blockingReasons[0] ?? "Not available",
+      isEntry: false,
+    };
+  });
+  // A superseded stage still needs redoing, so it is a valid entry. While a stage
+  // is running there is no entry at all — pointing further down the pipeline would
+  // invite the user to start the next stage without its input.
+  $: entryStageIndex = pipelineDraft.some((stage) => stage.state === "running")
+    ? -1
+    : pipelineDraft.findIndex((stage) => stage.state === "ready" || stage.state === "stale");
+  $: pipelineStages = pipelineDraft.map((stage, index) => ({ ...stage, isEntry: index === entryStageIndex }));
+  $: pipelineBlocker = entryStageIndex < 0
+    ? pipelineStages.find((stage) => stage.state === "blocked")?.availability.blockingReasons[0] ?? ""
+    : "";
   $: providerSelectionReady = Boolean(
     selectedRunner?.available && selectedProviderModel &&
     (!plannerReasoningEffort || selectedReasoningEfforts.includes(plannerReasoningEffort)),
@@ -1994,31 +2036,58 @@
               <div><p class="eyebrow">Selected task</p><h3 id="execution-task-title">{selectedTask.key.taskId} · {selectedTask.title}</h3><p>{selectedTask.objective}</p></div>
               <code>{selectedTask.revision.slice(0, 10)}</code>
             </header>
-            <div class="execution-action-grid" aria-busy={executionActionsLoading}>
+            <div class="pipeline-provider">
+              <span>Agent</span>
+              <ProviderPicker
+                {runners}
+                runnerId={plannerRunnerId}
+                modelId={plannerModel}
+                reasoningEffort={plannerReasoningEffort}
+                disabled={Boolean(executionStartingAction)}
+                placement="down"
+                onSelect={applyProviderSelection}
+              />
+              <small>Applies to this run and to every repository selection</small>
+            </div>
+            <ol class="pipeline" aria-busy={executionActionsLoading} aria-label="Task run pipeline">
               {#if executionActionsLoading}
-                <div class="execution-actions-loading"><span class="task-content-spinner"></span>Evaluating provider and task policy…</div>
+                <li class="execution-actions-loading"><span class="task-content-spinner"></span>Evaluating provider and task policy…</li>
               {:else}
-                {#each executionActions as availability}
-                  <div class="execution-action-slot">
+                {#each pipelineStages as stage, index}
+                  <li class="pipeline-stage" data-state={stage.state}>
+                    {#if index > 0}<span class="pipeline-arrow" aria-hidden="true"></span>{/if}
                     <button
-                      class:write-action={availability.sandbox === "workspace-write"}
-                      class="execution-action"
+                      class="pipeline-node"
                       type="button"
-                      disabled={!availability.available || Boolean(executionStartingAction)}
-                      title={availability.blockingReasons.join(" ")}
-                      onclick={() => requestAgentAction(availability)}
+                      disabled={!stage.availability.available || Boolean(executionStartingAction)}
+                      aria-label={`${actionLabel(stage.action)} — ${stage.stateLabel}`}
+                      title={stage.availability.blockingReasons.join(" ") || stage.stateLabel}
+                      onclick={() => requestAgentAction(stage.availability)}
                     >
-                      <span class="execution-action-icon" aria-hidden="true"><svg class="icon" viewBox="0 0 24 24"><path d={availability.action === "implement" ? "M5 19 19 5M14 5h5v5M5 14v5h5" : availability.action === "review" ? "M4 5h16v14H4zM8 10l2 2 5-5" : availability.action === "plan" ? "M5 6h14M5 12h9M5 18h11" : "M4 12h16M12 4v16M7 7l10 10M17 7 7 17"}/></svg></span>
-                      <span><strong>{executionStartingAction === availability.action ? "Starting…" : actionLabel(availability.action)}</strong><small>{availability.sandbox === "workspace-write" ? "Isolated worktree" : "Read-only checkout"}</small></span>
-                      <i data-available={availability.available}></i>
+                      <span class="pipeline-mark" aria-hidden="true">
+                        {#if stage.state === "done"}
+                          <svg viewBox="0 0 24 24"><path d="m5 13 4 4 10-10"/></svg>
+                        {:else if stage.state === "running"}
+                          <span class="task-content-spinner"></span>
+                        {:else if stage.state === "blocked"}
+                          <svg viewBox="0 0 24 24"><rect x="5" y="11" width="14" height="9" rx="1"/><path d="M8 11V8a4 4 0 0 1 8 0v3"/></svg>
+                        {:else}
+                          <span class="pipeline-index">{index + 1}</span>
+                        {/if}
+                      </span>
+                      <span class="pipeline-copy">
+                        <strong>{executionStartingAction === stage.action ? "Starting…" : actionLabel(stage.action)}</strong>
+                        <small>{stage.stateLabel}</small>
+                      </span>
                     </button>
-                    {#if !availability.available && availability.blockingReasons.length}
-                      <p class="execution-action-reason"><strong>Blocked:</strong> {availability.blockingReasons[0]}</p>
-                    {/if}
-                  </div>
+                    {#if stage.isEntry}<span class="pipeline-entry">Start here</span>{/if}
+                  </li>
                 {/each}
               {/if}
-            </div>
+            </ol>
+            {#if pipelineBlocker}
+              <p class="execution-action-reason"><strong>Blocked:</strong> {pipelineBlocker}</p>
+            {/if}
           </section>
         {/if}
 

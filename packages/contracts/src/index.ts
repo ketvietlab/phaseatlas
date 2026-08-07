@@ -473,6 +473,13 @@ export interface WorktreeLeaseRecord {
   disposition?: string;
 }
 
+export interface AgentRunStageResult {
+  readonly runId: string;
+  readonly action: AgentRunAction;
+  readonly recordedAt: string;
+  readonly result: ValidatedAgentRunResult;
+}
+
 export interface AgentRunSpec {
   readonly schemaVersion: "phaseatlas.run/v1";
   readonly runId: string;
@@ -489,6 +496,7 @@ export interface AgentRunSpec {
   readonly acceptanceCriteria: ReadonlyArray<AcceptanceCriterion>;
   readonly verification: ReadonlyArray<VerificationStep>;
   readonly sandbox: AgentSandbox;
+  readonly priorResults: ReadonlyArray<AgentRunStageResult>;
   readonly createdAt: string;
 }
 

@@ -5,6 +5,7 @@ import type { DatabaseSync as DatabaseSyncType } from "node:sqlite";
 import type {
   AgentResultRevalidationRecord,
   AgentRunAction,
+  AgentRunStageResult,
   AgentRunCommandOutputPage,
   AgentSandbox,
   PersistedAgentRunResult,
@@ -451,6 +452,25 @@ export class CheckoutOperationalStore {
       recordedAt: String(row.recorded_at),
       validated: parseValidatedResult(row.result_json),
     };
+  }
+
+  // Completed results for one task at one revision, oldest first. Feeds the
+  // pipeline: a later stage receives what the earlier stages concluded.
+  listAgentResultsForTask(taskKey: string, taskRevision: string): AgentRunStageResult[] {
+    const rows = this.database.prepare(`
+      SELECT results.run_id, results.recorded_at, results.result_json, specs.action
+      FROM agent_run_results AS results
+      JOIN agent_run_specs AS specs ON specs.run_id = results.run_id
+      JOIN runs ON runs.run_id = results.run_id
+      WHERE results.task_key = ? AND results.task_revision = ? AND runs.status = 'completed'
+      ORDER BY results.recorded_at, results.run_id
+    `).all(taskKey, taskRevision) as Array<Record<string, unknown>>;
+    return rows.map((row) => ({
+      runId: String(row.run_id),
+      action: String(row.action) as AgentRunAction,
+      recordedAt: String(row.recorded_at),
+      result: parseValidatedResult(row.result_json),
+    }));
   }
 
   recordResultRevalidation(input: AgentResultRevalidationRecord): AgentResultRevalidationRecord {

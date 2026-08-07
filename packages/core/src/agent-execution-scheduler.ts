@@ -61,7 +61,17 @@ export class AgentExecutionScheduler {
     let lease: WorktreeLeaseRecord | undefined;
     try {
       if (sandbox === "workspace-write") lease = await this.leases.acquire(runId);
-      const spec = createAgentRunSpec({ runId, request, repository, snapshot, ...(lease ? { lease } : {}) });
+      const spec = createAgentRunSpec({
+        runId,
+        request,
+        repository,
+        snapshot,
+        ...(lease ? { lease } : {}),
+        // Same task, same revision only: a result from a superseded contract is
+        // not context, it is a stale claim.
+        priorResults: this.store.listAgentResultsForTask(taskKey, task.revision)
+          .filter((stage) => stage.action !== request.action),
+      });
       this.store.recordAgentSpec({
         runId,
         taskKey: spec.taskKey,

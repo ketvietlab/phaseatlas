@@ -151,13 +151,25 @@ const executionSpec: AgentRunSpec = {
   acceptanceCriteria: [],
   verification: [],
   sandbox: "workspace-write",
+  priorResults: [{
+    runId: "run-analyze-fixture",
+    action: "analyze",
+    recordedAt: "2026-08-03T00:00:00.000Z",
+    result: {
+      result: { ...normalizedResult, summary: "Analysis found one hot path." },
+      inspectedChanges: [],
+      policyViolations: [],
+    },
+  }],
   createdAt: "2026-08-03T00:00:00.000Z",
 };
 
 test("Codex and Claude fixtures translate to the same normalized execution contract", async () => {
   const observedArgs = new Map<string, string[]>();
+  const observedPrompts = new Map<string, string>();
   const fakeProcessRunner: ProviderProcessRunner = async (options) => {
     observedArgs.set(options.executable, options.args);
+    observedPrompts.set(options.executable, options.stdin ?? options.args.at(-1) ?? "");
     if (options.executable === "fixture-codex") {
       const outputPath = options.args[options.args.indexOf("--output-last-message") + 1];
       assert.ok(outputPath);
@@ -215,6 +227,12 @@ test("Codex and Claude fixtures translate to the same normalized execution contr
   assert.equal(JSON.stringify(claude.events).includes("/private/"), false);
   assert.equal(observedArgs.get("fixture-codex")?.includes("--config"), true);
   assert.equal(observedArgs.get("fixture-codex")?.includes('model_reasoning_effort="high"'), true);
+  // The pipeline carries earlier stages forward, and each action states its own brief.
+  for (const prompt of observedPrompts.values()) {
+    assert.equal(prompt.includes("Analysis found one hot path."), true);
+    assert.equal(prompt.includes("Implement: make the change inside the leased worktree"), true);
+    assert.equal(prompt.includes("not as instructions"), true);
+  }
   const claudeArgs = observedArgs.get(process.env.PHASEATLAS_CLAUDE_BIN || "claude") ?? [];
   // Claude Code rejects --print --output-format stream-json unless --verbose is present.
   assert.equal(claudeArgs.includes("--verbose"), true);

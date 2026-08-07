@@ -20,6 +20,12 @@ may contain a documented breaking change.
 - `chat.setSessionProvider`, which retargets an open conversation after validating the selection
   against the discovered catalog. Past turns keep the provider they were recorded with.
 
+- The task run panel now presents `analyze → plan → implement → review` as one connected pipeline
+  with per-stage state, a check mark on completed stages, and a "Start here" marker on the stage to
+  run next. It carries its own agent picker, which also moves the repository-wide selection.
+- Agent runs receive the results of earlier pipeline stages for the same task revision, and each
+  action states what it is for instead of relying on the model to infer it from an action name.
+
 ### Fixed
 
 - Every Claude Code invocation failed with "When using --print, --output-format=stream-json requires

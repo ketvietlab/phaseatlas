@@ -1,6 +1,7 @@
 import path from "node:path";
 import type {
   AgentRunCreateInput,
+  AgentRunStageResult,
   AgentRunSpec,
   AgentSandbox,
   CanonicalTask,
@@ -59,6 +60,7 @@ export function createAgentRunSpec(input: {
   repository: RepositorySummary;
   snapshot: TaskSnapshot;
   lease?: WorktreeLeaseRecord;
+  priorResults?: ReadonlyArray<AgentRunStageResult>;
   createdAt?: string;
 }): AgentRunSpec {
   if (!input.runId.trim()) throw new Error("runId is required.");
@@ -105,6 +107,7 @@ export function createAgentRunSpec(input: {
     acceptanceCriteria: structuredClone(task.acceptanceCriteria),
     verification: structuredClone(task.verification),
     sandbox,
+    priorResults: structuredClone(input.priorResults ?? []),
     createdAt: input.createdAt ?? new Date().toISOString(),
   };
   return deepFreeze(spec);
