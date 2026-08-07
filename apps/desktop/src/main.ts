@@ -388,6 +388,16 @@ app.on("before-quit", () => {
   embeddedIde.stopAll();
   repositories.stopAll();
 });
+
+// before-quit does not fire when the process is signalled, which leaves Theia
+// backends alive holding their ports; the next launch then fails to bind.
+for (const signal of ["SIGINT", "SIGTERM", "SIGHUP"] as const) {
+  process.once(signal, () => {
+    embeddedIde.stopAll();
+    repositories.stopAll();
+    app.exit(0);
+  });
+}
 app.on("window-all-closed", () => {
   if (process.platform !== "darwin") app.quit();
 });

@@ -10,6 +10,10 @@ may contain a documented breaking change.
 
 ### Added
 
+- The macOS bundle ships the IDE: the Theia build as `theia-ide`, the pinned extensions as
+  `theia-default-extensions`, and the IDE preload beside the desktop one. Packaging fails with an
+  actionable message when those inputs are missing, and bundle verification asserts all three.
+
 - The embedded IDE opens two kinds of workspace. The button beside Chat opens the canonical checkout;
   a finished implementation run offers its retained worktree, which is where the agent's work and its
   base revision actually are. Each target gets its own window, port and configuration, and a worktree
@@ -47,6 +51,12 @@ may contain a documented breaking change.
   action states what it is for instead of relying on the model to infer it from an action name.
 
 ### Fixed
+
+- The embedded IDE refused to start with EADDRINUSE. Its port reservation bound `localhost`, which
+  resolves to IPv6 here, while Theia binds `127.0.0.1` — so the check passed on a port that was
+  taken and the backend then died. It now reserves the address Theia actually uses.
+- A Theia backend outlived an app that was signalled rather than quit, and kept its port. The main
+  process now stops the IDE on SIGINT, SIGTERM and SIGHUP as well as before-quit.
 
 - Model prose that arrived with double-escaped newlines rendered as one paragraph with literal `\n`
   sequences in it. Such a field is now repaired at render time, leaving the persisted result

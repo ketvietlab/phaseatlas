@@ -1,6 +1,6 @@
 import { execFile } from "node:child_process";
 import { createRequire } from "node:module";
-import { cp, mkdir, mkdtemp, readFile, rename, rm, stat, writeFile } from "node:fs/promises";
+import { access, cp, mkdir, mkdtemp, readFile, rename, rm, stat, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { promisify } from "node:util";
@@ -131,6 +131,22 @@ const nodePtyPrebuild = `${process.platform}-${process.arch}`;
 await mkdir(path.join(packagedNodePty, "prebuilds"), { recursive: true });
 await cp(path.join(repositoryRoot, "apps", "desktop", "dist", "main.js"), path.join(resourcesPath, "app", "desktop", "main.js"));
 await cp(path.join(repositoryRoot, "apps", "desktop", "dist", "preload.cjs"), path.join(resourcesPath, "app", "desktop", "preload.cjs"));
+await cp(path.join(repositoryRoot, "apps", "desktop", "dist", "theia-preload.cjs"), path.join(resourcesPath, "app", "desktop", "theia-preload.cjs"));
+// The IDE build is a required input, not an optional extra: main.ts resolves it
+// unconditionally and the IDE button fails at access() without it. It lands
+// beside app/ rather than inside it, so Node keeps treating its CommonJS as
+// CommonJS instead of inheriting app/package.json's type: module.
+const ideBuild = path.join(repositoryRoot, "ide", "lib");
+const ideExtensions = path.join(repositoryRoot, "ide", "default-extensions");
+for (const [label, source] of [["ide/lib", ideBuild], ["ide/default-extensions", ideExtensions]]) {
+  try {
+    await access(source);
+  } catch {
+    throw new Error(`${label} is missing. Run "pnpm build:ide" and "pnpm fetch:ide-extensions" before packaging.`);
+  }
+}
+await cp(ideBuild, path.join(resourcesPath, "theia-ide", "lib"), { recursive: true, verbatimSymlinks: true });
+await cp(ideExtensions, path.join(resourcesPath, "theia-default-extensions"), { recursive: true });
 await cp(path.join(repositoryRoot, "apps", "repository-worker", "dist", "index.js"), path.join(resourcesPath, "repository-worker", "index.js"));
 await cp(path.join(repositoryRoot, "apps", "ui", "build"), path.join(resourcesPath, "ui", "build"), { recursive: true });
 await cp(path.join(repositoryRoot, "LICENSE"), path.join(resourcesPath, "LICENSE"));

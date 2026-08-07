@@ -106,7 +106,10 @@ async function reserveTargetPort(target: TheiaTarget): Promise<number> {
     server.once("error", (error) => {
       reject(new Error(`The saved IDE port ${port} for this workspace is unavailable.`, { cause: error }));
     });
-    server.listen(port, "localhost", () => {
+    // Theia binds 127.0.0.1. Reserving on "localhost" resolves to ::1 on this
+    // platform and succeeds while IPv4 is taken, so the check passed and the
+    // backend then died with EADDRINUSE.
+    server.listen(port, "127.0.0.1", () => {
       server.close((error) => error ? reject(error) : resolve(port));
     });
   });
@@ -114,7 +117,7 @@ async function reserveTargetPort(target: TheiaTarget): Promise<number> {
 
 function backendIsReady(port: number): Promise<boolean> {
   return new Promise((resolve) => {
-    const request = http.get({ hostname: "localhost", port, path: "/", timeout: 500 }, (response) => {
+    const request = http.get({ hostname: "127.0.0.1", port, path: "/", timeout: 500 }, (response) => {
       response.resume();
       resolve(Boolean(response.statusCode && response.statusCode < 500));
     });
