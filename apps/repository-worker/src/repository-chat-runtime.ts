@@ -83,9 +83,17 @@ export class RepositoryChatRuntime {
     private readonly repositoryRoot: string,
     private readonly checkoutId: string,
     private readonly publish: (event: PersistedRepositoryChatEvent) => void = () => undefined,
+    // Supplied by the worker, which owns the task snapshot. A task conversation
+    // needs the canonical contract and what earlier pipeline stages concluded.
+    private readonly resolveTaskContext: (taskKey: string) => Promise<string | undefined> = async () => undefined,
   ) {}
 
   async createSession(input: RepositoryChatCreateInput): Promise<RepositoryChatSession> {
+    // One conversation per task, reused: reopening a task must not fork the thread.
+    if (input.taskKey) {
+      const existing = this.store.findChatSessionForTask(input.taskKey);
+      if (existing) return existing;
+    }
     const runnerId = boundedId(input.runnerId, "runnerId");
     const model = boundedId(input.model, "model");
     const reasoningEffort = input.reasoningEffort
@@ -100,6 +108,7 @@ export class RepositoryChatRuntime {
       runnerId,
       model,
       ...(reasoningEffort ? { reasoningEffort } : {}),
+      ...(input.taskKey ? { taskKey: input.taskKey } : {}),
       title: input.title ? publicText(input.title, 120) : "New repository chat",
       state: "open",
       createdAt: timestamp,
@@ -312,9 +321,12 @@ export class RepositoryChatRuntime {
       const baseline = await captureGitState({ worktreePath: this.repositoryRoot });
       const allMessages = this.store.listChatMessages(turn.sessionId);
       const contextPrompt = this.sessionContextPrompt(turn, allMessages);
+      const session = this.store.getChatSession(turn.sessionId);
+      const taskContext = session.taskKey ? await this.resolveTaskContext(session.taskKey) : undefined;
       const answer = await adapter.execute({
         repositoryRoot: this.repositoryRoot,
         model: turn.model,
+        ...(taskContext ? { taskContext } : {}),
         ...(turn.reasoningEffort ? { reasoningEffort: turn.reasoningEffort } : {}),
         messages: contextPrompt.messages,
         ...(contextPrompt.summary ? { summary: contextPrompt.summary } : {}),

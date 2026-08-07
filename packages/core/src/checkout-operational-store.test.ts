@@ -579,5 +579,5 @@ test("migrates schema version 4 into chat context snapshots", async (context) =>
   const reopenedDatabase = new DatabaseSync(databasePath);
   const meta = reopenedDatabase.prepare("SELECT value FROM store_meta WHERE key = 'schema_version'").get() as { value?: string } | undefined;
   reopenedDatabase.close();
-  assert.equal(meta?.value, "5");
+  assert.equal(meta?.value, "6");
 });

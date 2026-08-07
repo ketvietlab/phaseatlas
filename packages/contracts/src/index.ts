@@ -654,6 +654,7 @@ export interface RepositoryChatSession {
   runnerId: string;
   model: string;
   reasoningEffort?: string;
+  taskKey?: string;
   title: string;
   state: RepositoryChatSessionState;
   createdAt: string;
@@ -689,6 +690,7 @@ export interface RepositoryChatCreateInput {
   runnerId: string;
   model: string;
   reasoningEffort?: string;
+  taskKey?: string;
   title?: string;
 }
 

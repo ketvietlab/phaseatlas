@@ -24,7 +24,7 @@ import type {
   ValidatedAgentRunResult,
 } from "@phaseatlas/contracts";
 
-const SCHEMA_VERSION = "5";
+const SCHEMA_VERSION = "6";
 const RUN_KINDS = new Set<PersistedRunKind>(["planning", "task_content", "agent"]);
 const RUN_STATUSES = new Set<PersistedRunStatus>(["starting", "running", "completed", "failed", "cancelled", "interrupted"]);
 const TERMINAL_RUN_STATUSES = new Set<PersistedRunStatus>(["completed", "failed", "cancelled", "interrupted"]);
@@ -517,8 +517,8 @@ export class CheckoutOperationalStore {
     }
     this.database.prepare(`
       INSERT INTO chat_sessions (
-        session_id, checkout_id, runner_id, model_id, reasoning_effort, title, state, created_at, updated_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        session_id, checkout_id, runner_id, model_id, reasoning_effort, title, state, task_key, created_at, updated_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `).run(
       input.sessionId,
       input.checkoutId,
@@ -527,6 +527,7 @@ export class CheckoutOperationalStore {
       input.reasoningEffort ?? null,
       input.title,
       input.state,
+      input.taskKey ?? null,
       input.createdAt,
       input.updatedAt,
     );
@@ -538,6 +539,15 @@ export class CheckoutOperationalStore {
       SELECT * FROM chat_sessions ORDER BY updated_at DESC, session_id
     `).all() as Array<Record<string, unknown>>;
     return rows.map((row) => this.chatSessionFromRow(row));
+  }
+
+  // One conversation per task: the pipeline stages and the user's questions must
+  // land in the same thread rather than spawning a session per run.
+  findChatSessionForTask(taskKey: string): RepositoryChatSession | null {
+    const row = this.database.prepare(`
+      SELECT * FROM chat_sessions WHERE task_key = ? AND state = 'open' ORDER BY created_at LIMIT 1
+    `).get(taskKey) as Record<string, unknown> | undefined;
+    return row ? this.chatSessionFromRow(row) : null;
   }
 
   getChatSession(sessionId: string): RepositoryChatSession {
@@ -974,6 +984,7 @@ export class CheckoutOperationalStore {
       ...(typeof row.reasoning_effort === "string" ? { reasoningEffort: row.reasoning_effort } : {}),
       title: String(row.title),
       state: state as RepositoryChatSession["state"],
+      ...(typeof row.task_key === "string" && row.task_key ? { taskKey: row.task_key } : {}),
       createdAt: String(row.created_at),
       updatedAt: String(row.updated_at),
     };
@@ -1110,6 +1121,7 @@ export class CheckoutOperationalStore {
         reasoning_effort TEXT,
         title TEXT NOT NULL,
         state TEXT NOT NULL CHECK(state IN ('open', 'closed')),
+        task_key TEXT,
         created_at TEXT NOT NULL,
         updated_at TEXT NOT NULL
       );
@@ -1171,6 +1183,10 @@ export class CheckoutOperationalStore {
       this.migrateVersionFour();
       schemaVersion = "5";
     }
+    if (schemaVersion === "5") {
+      this.migrateVersionFive();
+      schemaVersion = "6";
+    }
     if (schemaVersion && schemaVersion !== SCHEMA_VERSION) {
       this.failInitialization(`Unsupported checkout store schema version ${schemaVersion}.`);
     }
@@ -1179,6 +1195,8 @@ export class CheckoutOperationalStore {
     if (identity?.value && identity.value !== this.checkoutId) {
       this.failInitialization("Checkout store identity does not match its worker checkout.");
     }
+    // Indexes on migrated columns belong after the chain, never in the base DDL.
+    this.database.exec("CREATE INDEX IF NOT EXISTS chat_sessions_task_key ON chat_sessions(task_key);");
     this.database.prepare("INSERT OR IGNORE INTO store_meta (key, value) VALUES ('schema_version', ?)").run(SCHEMA_VERSION);
     this.database.prepare("INSERT OR IGNORE INTO store_meta (key, value) VALUES ('checkout_id', ?)").run(this.checkoutId);
   }
@@ -1262,6 +1280,28 @@ export class CheckoutOperationalStore {
         WHERE event_type = 'chat.tool.output';
 
         UPDATE store_meta SET value = '4' WHERE key = 'schema_version';
+      `);
+      this.database.exec("COMMIT");
+    } catch (error) {
+      this.database.exec("ROLLBACK");
+      throw error;
+    }
+  }
+
+  // A task conversation is one durable chat session bound to a canonical task, so
+  // the four pipeline stages and the user's own questions share a single thread.
+  private migrateVersionFive(): void {
+    this.database.exec("BEGIN IMMEDIATE");
+    try {
+      // A database older than 4 has no chat_sessions table at all, so the base DDL
+      // creates it already carrying task_key. Only add the column when it is absent.
+      const columns = this.database.prepare("PRAGMA table_info(chat_sessions)").all() as Array<{ name?: unknown }>;
+      if (!columns.some((column) => String(column.name) === "task_key")) {
+        this.database.exec("ALTER TABLE chat_sessions ADD COLUMN task_key TEXT;");
+      }
+      this.database.exec(`
+        CREATE INDEX IF NOT EXISTS chat_sessions_task_key ON chat_sessions(task_key);
+        UPDATE store_meta SET value = '6' WHERE key = 'schema_version';
       `);
       this.database.exec("COMMIT");
     } catch (error) {

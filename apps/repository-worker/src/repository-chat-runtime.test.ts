@@ -139,7 +139,23 @@ test("persists provider-neutral chat sessions, messages, replay, and cancellatio
     title: "Architecture",
   });
   const second = await runtime.createSession({ runnerId: "codex-cli", model: "gpt-fixture" });
-  assert.equal(runtime.listSessions().length, 2);
+  // A task conversation is one thread: asking again returns the same session so the
+  // four pipeline stages and the user's questions never fork apart.
+  const taskSession = await runtime.createSession({
+    runnerId: "codex-cli",
+    model: "gpt-fixture",
+    taskKey: "core/PHA-100",
+    title: "Task thread",
+  });
+  assert.equal(taskSession.taskKey, "core/PHA-100");
+  const reopenedTaskSession = await runtime.createSession({
+    runnerId: "codex-cli",
+    model: "gpt-fixture",
+    taskKey: "core/PHA-100",
+  });
+  assert.equal(reopenedTaskSession.sessionId, taskSession.sessionId);
+  assert.equal(runtime.listSessions().filter((item) => item.taskKey === "core/PHA-100").length, 1);
+  assert.equal(runtime.listSessions().length, 3);
   assert.equal("taskKey" in first, false);
   assert.equal("workspaceSlug" in first, false);
   assert.equal(first.reasoningEffort, "high");
@@ -237,7 +253,7 @@ test("persists provider-neutral chat sessions, messages, replay, and cancellatio
 
   store.close();
   const reopened = new CheckoutOperationalStore(databasePath, checkoutId);
-  assert.equal(reopened.listChatSessions().length, 2);
+  assert.equal(reopened.listChatSessions().length, 3);
   assert.equal(reopened.getChatSession(first.sessionId).reasoningEffort, "high");
   assert.equal(reopened.listChatMessages(first.sessionId).length, 4);
   assert.equal(reopened.getChatTurn(blocked.turnId).status, "cancelled");
