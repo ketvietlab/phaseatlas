@@ -119,6 +119,8 @@
   let openEditorAfterTask: Record<string, boolean> = {};
   let executionOpen = false;
   const PIPELINE_ACTIONS: AgentRunAction[] = ["analyze", "plan", "implement", "review"];
+  let ideOpening = false;
+  let ideError = "";
   let openedFilePath = "";
   let openedFileContent = "";
   let openedFileError = "";
@@ -640,6 +642,22 @@
     openedFileContent = "";
     openedFileError = "";
     openedFileLoading = false;
+  }
+
+  // The IDE is a separate window owned by the main process; the renderer only
+  // asks for it by checkout and hands over the current theme.
+  async function openEmbeddedIde() {
+    if (!window.phaseatlas || !selectedCheckoutId || ideOpening) return;
+    ideOpening = true;
+    ideError = "";
+    try {
+      await window.phaseatlas.ide.open(selectedCheckoutId, theme === "dark" ? "dark" : "light");
+    } catch (error) {
+      ideError = error instanceof Error ? error.message : "The embedded IDE could not be opened.";
+      errorMessage = ideError;
+    } finally {
+      ideOpening = false;
+    }
   }
 
   async function revealAgentConfiguration() {
@@ -1529,6 +1547,7 @@
   function setTheme(nextTheme: "light" | "dark") {
     theme = nextTheme;
     document.documentElement.dataset.theme = nextTheme;
+    void window.phaseatlas?.ide.setTheme(nextTheme === "dark" ? "dark" : "light").catch(() => undefined);
     localStorage.setItem("phaseatlas-theme", nextTheme);
   }
 
@@ -1712,6 +1731,17 @@
           <svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M5 5h14v10H9l-4 4z"/><path d="M9 9h6M9 12h4"/></svg>
           <span>Chat</span>
           <kbd>{chatShortcutLabel}</kbd>
+        </button>
+        <button
+          class="terminal-toggle"
+          type="button"
+          aria-label="Open the repository in the embedded IDE"
+          title={ideError || "Open the embedded IDE"}
+          onclick={openEmbeddedIde}
+          disabled={!selectedCheckoutId || ideOpening}
+        >
+          <svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="4" width="18" height="16" rx="2"/><path d="M3 9h18"/><path d="m8 13 2 2-2 2M13 17h4"/></svg>
+          <span>{ideOpening ? "Opening…" : "IDE"}</span>
         </button>
         <button
           class:active={editorOpen}

@@ -417,6 +417,14 @@ export class RepositoryProcessManager {
     return this.catalog.get(checkoutId) as RepositorySummary;
   }
 
+  // The IDE needs the canonical path and name of a registered checkout without
+  // starting or touching its worker.
+  describe(checkoutId: string): RepositorySummary {
+    const entry = this.catalog.get(checkoutId);
+    if (!entry) throw new Error("Repository is not in the local catalog.");
+    return entry;
+  }
+
   list(): RepositorySummary[] {
     return this.catalog.listVisible();
   }

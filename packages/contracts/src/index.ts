@@ -1053,6 +1053,10 @@ export interface PhaseAtlasDesktopApi {
   events: {
     subscribe(listener: (event: PhaseAtlasDesktopEvent) => void): () => void;
   };
+  ide: {
+    open(checkoutId: string, theme: "light" | "dark"): Promise<{ checkoutId: string; opened: true; reused: boolean }>;
+    setTheme(theme: "light" | "dark"): Promise<void>;
+  };
   runtime: {
     platform(): Promise<string>;
     onCloseSurface(listener: () => void): () => void;

@@ -114,6 +114,10 @@ const api: PhaseAtlasDesktopApi = {
       return () => ipcRenderer.removeListener("phaseatlas:event", handler);
     },
   },
+  ide: {
+    open: (checkoutId, theme) => ipcRenderer.invoke("phaseatlas:ide:open", checkoutId, theme),
+    setTheme: (theme) => ipcRenderer.invoke("phaseatlas:ide:theme:set", theme),
+  },
   runtime: {
     platform: () => ipcRenderer.invoke("phaseatlas:runtime:platform"),
     onCloseSurface: (listener) => {

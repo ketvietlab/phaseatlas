@@ -1,6 +1,8 @@
 import { fileURLToPath } from "node:url";
 import { readFileSync, writeFileSync } from "node:fs";
 import path from "node:path";
+import { TheiaIdeManager } from "./theia-ide-manager.js";
+import { assertPhaseAtlasTheme } from "./theia-ide-policy.js";
 import { app, BrowserWindow, dialog, ipcMain, shell } from "electron";
 import { RepositoryProcessManager } from "./repository-process-manager.js";
 
@@ -103,11 +105,25 @@ const packagedReleasePolicy = releasePolicy();
 writeReleaseSmokeResult({ ok: false, stage: "release-policy-loaded" });
 
 const currentDirectory = path.dirname(fileURLToPath(import.meta.url));
+const theiaBackendEntry = process.env.PHASEATLAS_THEIA_BACKEND_ENTRY ||
+  (app.isPackaged
+    ? path.join(process.resourcesPath, "theia-ide", "lib", "backend", "main.js")
+    : path.resolve(currentDirectory, "../../ide/lib/backend/main.js"));
+const theiaPreloadEntry = path.join(currentDirectory, "theia-preload.cjs");
+const theiaDefaultExtensionsRoot = app.isPackaged
+  ? path.join(process.resourcesPath, "theia-default-extensions")
+  : path.resolve(currentDirectory, "../../ide/default-extensions");
 const workerEntry = process.env.PHASEATLAS_WORKER_ENTRY ||
   (app.isPackaged
     ? path.join(process.resourcesPath, "repository-worker", "index.js")
     : path.resolve(currentDirectory, "../../repository-worker/dist/index.js"));
 const applicationSupportRoot = path.join(app.getPath("userData"), "runtime");
+const embeddedIde = new TheiaIdeManager(
+  theiaBackendEntry,
+  theiaPreloadEntry,
+  theiaDefaultExtensionsRoot,
+  applicationSupportRoot,
+);
 const repositories = new RepositoryProcessManager(workerEntry, applicationSupportRoot, (event) => {
   for (const window of BrowserWindow.getAllWindows()) {
     if (!window.isDestroyed()) window.webContents.send("phaseatlas:event", event);
@@ -170,6 +186,22 @@ async function createWindow(): Promise<BrowserWindow> {
 }
 
 function registerIpc(): void {
+  ipcMain.on("phaseatlas:ide:close", (event) => {
+    embeddedIde.closeForWebContents(event.sender.id);
+  });
+  ipcMain.on("phaseatlas:ide:theme:get", (event) => {
+    event.returnValue = embeddedIde.themeForWebContents(event.sender.id);
+  });
+  ipcMain.handle("phaseatlas:ide:open", async (event, checkoutId: string, theme: string) => {
+    assertPhaseAtlasTheme(theme);
+    const repository = repositories.describe(checkoutId);
+    const owner = BrowserWindow.fromWebContents(event.sender) ?? undefined;
+    return embeddedIde.open(repository.checkoutId, repository.path, repository.name, theme, owner);
+  });
+  ipcMain.handle("phaseatlas:ide:theme:set", (_event, theme: string) => {
+    assertPhaseAtlasTheme(theme);
+    embeddedIde.setTheme(theme);
+  });
   ipcMain.handle("phaseatlas:runtime:platform", () => process.platform);
   ipcMain.handle("phaseatlas:repositories:list", () => repositories.list());
   ipcMain.handle("phaseatlas:repositories:refresh", (event, checkoutId: string) => {
@@ -335,7 +367,10 @@ app.whenReady().then(async () => {
   if (process.env.PHASEATLAS_RELEASE_SMOKE === "1") app.exit(1);
 });
 
-app.on("before-quit", () => repositories.stopAll());
+app.on("before-quit", () => {
+  embeddedIde.stopAll();
+  repositories.stopAll();
+});
 app.on("window-all-closed", () => {
   if (process.platform !== "darwin") app.quit();
 });
