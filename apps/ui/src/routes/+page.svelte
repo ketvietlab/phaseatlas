@@ -2109,6 +2109,18 @@
               <p class="execution-action-reason"><strong>Blocked:</strong> {pipelineBlocker}</p>
             {/if}
           </section>
+          <div class="execution-journal">
+            <TaskConversation
+              checkoutId={selectedCheckoutId}
+              taskKey={canonicalTaskKey(selectedTask)}
+              runnerId={plannerRunnerId}
+              modelId={plannerModel}
+              reasoningEffort={plannerReasoningEffort}
+              runs={pipelineRuns}
+              runEvents={agentEvents}
+              providerReady={providerSelectionReady}
+            />
+          </div>
         {/if}
 
         {#if executionConfirmAction && selectedTask}
@@ -2155,18 +2167,6 @@
               <span><small>Freshness</small>{selectedAgentRun.freshness ?? "pending"}</span>
             </div>
 
-            <div class="execution-journal">
-              <TaskConversation
-                checkoutId={selectedCheckoutId}
-                taskKey={canonicalTaskKey(selectedTask)}
-                runnerId={plannerRunnerId}
-                modelId={plannerModel}
-                reasoningEffort={plannerReasoningEffort}
-                runs={pipelineRuns}
-                runEvents={agentEvents}
-                providerReady={providerSelectionReady}
-              />
-            </div>
 
             {#if selectedAgentReview}
               <section class="execution-result" data-freshness={selectedAgentReview.freshness}>
