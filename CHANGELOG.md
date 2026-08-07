@@ -19,10 +19,11 @@ may contain a documented breaking change.
   base revision actually are. Each target gets its own view, port and configuration, and a worktree
   can only be opened while its lease is retained.
 
-- A switcher strip across the top of the window moves between PhaseAtlas and every open IDE. Switching
-  only changes which surface is painted, so each Theia backend keeps its editors, terminals and
-  language servers and returning costs nothing; stopping an IDE is a separate, deliberate act. When the
-  IDE has the keyboard, `Alt+Shift+P` returns to PhaseAtlas.
+- The IDE opens as a panel over the workspace, beside the sidebar, the way agent chat does — same
+  header, same close button, same `Esc`. Closing it only puts it away: each Theia backend keeps its
+  editors, terminals and language servers, so reopening is immediate, and stopping one is a separate,
+  deliberate act from the panel header. Several open workspaces appear as tabs in that header. When the
+  IDE has the keyboard, `Alt+Shift+P` closes the panel from inside it.
 
 - File paths cited by the model are clickable. A path in a result summary, next action, verification
   note, blocker, evidence reference, or conversation reply opens that file in a panel on the right of
@@ -97,8 +98,8 @@ may contain a documented breaking change.
 - The close button PhaseAtlas injected into Theia's DOM, and the IDE's separate always-on-top child
   window. The button landed on top of Theia's own top-right controls, the padding meant to reserve
   room for it applied to a panel Theia hides by default, and both the injection and the close call
-  failed silently — leaving no way out of an IDE that covers the window it is parented to. The
-  switcher strip replaces it, so nothing is injected into Theia at all.
+  failed silently — leaving no way out of an IDE that covers the window it is parented to. The IDE
+  panel replaces it, so nothing is injected into Theia at all.
 
 - The chat composer's "Files & folders" and "Images" buttons. Context is attached by typing `@` and
   by pasting images, which both already worked and are the only supported mechanisms now.

@@ -8,7 +8,7 @@
   import ModelMarkdown from "$lib/ModelMarkdown.svelte";
   import TaskContentPanel from "$lib/TaskContentPanel.svelte";
   import TaskMap from "$lib/TaskMap.svelte";
-  import IdeSurfaceBar from "$lib/IdeSurfaceBar.svelte";
+  import IdeWorkspaceLayer from "$lib/IdeWorkspaceLayer.svelte";
   import type {
     AgentResultReview,
     AgentRunAction,
@@ -16,6 +16,7 @@
     AgentRunSummary,
     CanonicalTask,
     IdeSurfaceState,
+    IdeViewportRect,
     PersistedRunEvent,
     PlanningProposalSet,
     PlanningStatus,
@@ -124,6 +125,7 @@
   let ideOpening = false;
   let ideError = "";
   let ideState: IdeSurfaceState = { targets: [], visibleKey: null };
+  let ideOpen = false;
   let openedFilePath = "";
   let openedFileContent = "";
   let openedFileError = "";
@@ -651,15 +653,19 @@
     openedFileLoading = false;
   }
 
-  // The IDE is a view the main process lays out inside this window, below the
-  // switcher strip; the renderer only asks for it by checkout and hands over
-  // the current theme. Repo home opens the canonical checkout; a stage opens
-  // the worktree it produced.
+  // The IDE panel is a surface like chat: it opens over the workspace, right of
+  // the sidebar. The Theia view itself is native, so the panel only reserves the
+  // rectangle and the main process paints into it. Repo home opens the canonical
+  // checkout; a stage opens the worktree it produced.
   async function openRunWorktreeInIde(runId: string) {
     if (!window.phaseatlas || !selectedCheckoutId || ideOpening) return;
+    revealIdeSurface();
     ideOpening = true;
     ideError = "";
     try {
+      // The panel measures itself first, so the view has somewhere to go before
+      // it exists and never appears at the wrong size.
+      await tick();
       ideState = await window.phaseatlas.ide.open(selectedCheckoutId, theme === "dark" ? "dark" : "light", runId);
     } catch (error) {
       ideError = error instanceof Error ? error.message : "The run worktree could not be opened.";
@@ -671,60 +677,63 @@
 
   async function openEmbeddedIde() {
     if (!window.phaseatlas || !selectedCheckoutId || ideOpening) return;
+    if (ideOpen) {
+      closeIdeSurface();
+      return;
+    }
+    revealIdeSurface();
     ideOpening = true;
     ideError = "";
     try {
+      await tick();
       ideState = await window.phaseatlas.ide.open(selectedCheckoutId, theme === "dark" ? "dark" : "light");
     } catch (error) {
       ideError = error instanceof Error ? error.message : "The embedded IDE could not be opened.";
-      errorMessage = ideError;
     } finally {
       ideOpening = false;
     }
   }
 
-  // Switching never stops a backend, so it is cheap and cannot fail loudly;
-  // stopping one is the deliberate act that frees the Theia process.
-  async function showIdeSurface(key: string) {
-    if (!window.phaseatlas || ideOpening) return;
-    ideOpening = true;
+  // The IDE covers the same area as chat and the explorer, so opening it closes
+  // them, exactly as opening either of those closes the others.
+  function revealIdeSurface() {
+    chatOpen = false;
+    ideError = "";
+    ideOpen = true;
+  }
+
+  // Closing the panel never stops a backend — reopening it is immediate. The
+  // header's Stop button is the deliberate act that frees the Theia process.
+  function closeIdeSurface() {
+    ideOpen = false;
+    void window.phaseatlas?.ide.hide().then((state) => (ideState = state)).catch(() => undefined);
+  }
+
+  async function showIdeTarget(key: string) {
+    if (!window.phaseatlas) return;
     try {
       ideState = await window.phaseatlas.ide.show(key);
     } catch (error) {
       ideError = error instanceof Error ? error.message : "That IDE workspace could not be shown.";
       ideState = await window.phaseatlas.ide.state();
-    } finally {
-      ideOpening = false;
     }
   }
 
-  async function hideIdeSurface() {
+  async function stopIdeTarget(key: string) {
     if (!window.phaseatlas) return;
-    ideState = await window.phaseatlas.ide.hide();
-  }
-
-  async function closeIdeSurface(key: string) {
-    if (!window.phaseatlas || ideOpening) return;
-    ideOpening = true;
     try {
       ideState = await window.phaseatlas.ide.close(key);
     } catch (error) {
       ideError = error instanceof Error ? error.message : "That IDE workspace could not be stopped.";
       ideState = await window.phaseatlas.ide.state();
-    } finally {
-      ideOpening = false;
     }
+    // Nothing left to show means the panel is an empty frame; close it.
+    if (ideState.targets.length === 0) ideOpen = false;
+    else if (ideState.visibleKey === null && ideState.targets[0]) await showIdeTarget(ideState.targets[0].key);
   }
 
-  // The strip only exists while an IDE does, so the layout offset has to go
-  // away with it or the whole app stays pushed down by a bar that is gone.
-  $: if (typeof document !== "undefined" && ideState.targets.length === 0) {
-    document.documentElement.style.removeProperty("--ide-strip-height");
-  }
-
-  function reportIdeInset(height: number) {
-    document.documentElement.style.setProperty("--ide-strip-height", `${Math.round(height)}px`);
-    void window.phaseatlas?.ide.setInset(height).catch(() => undefined);
+  function reportIdeViewport(rect: IdeViewportRect) {
+    void window.phaseatlas?.ide.setViewport(rect).catch(() => undefined);
   }
 
   async function revealAgentConfiguration() {
@@ -896,6 +905,9 @@
   function openRepositoryEditor(path = "") {
     contentPanelTaskKey = "";
     editorInitialPath = path;
+    // The Theia view is native and paints above every DOM surface, so it has to
+    // be put away before anything else claims this area.
+    if (ideOpen) closeIdeSurface();
     editorOpen = true;
   }
 
@@ -1619,7 +1631,11 @@
   }
 
   function closeCurrentSurface() {
-    if (terminalOpen && terminalPanel?.hasFocus()) {
+    // The IDE goes first: it is the only surface that can hold the keyboard
+    // itself, so a close request arriving while it is open came from inside it.
+    if (ideOpen) {
+      closeIdeSurface();
+    } else if (terminalOpen && terminalPanel?.hasFocus()) {
       void closeTerminal();
     } else if (editorOpen) {
       repositoryWorkbench?.closeActiveSurface();
@@ -1662,6 +1678,7 @@
     if (chatShortcut && !event.repeat && selectedCheckoutId) {
       if (!editorOpen && (chatOpen || (!executionOpen && !plannerOpen && !contentPanelTask))) {
         event.preventDefault();
+        if (!chatOpen && ideOpen) closeIdeSurface();
         chatOpen = !chatOpen;
       }
       return;
@@ -1698,7 +1715,8 @@
     if (event.key !== "Escape") return;
     if (terminalOpen && terminalPanel?.hasFocus()) return;
     if (editorOpen) return;
-    if (chatOpen) chatOpen = false;
+    if (ideOpen) closeIdeSurface();
+    else if (chatOpen) chatOpen = false;
     else if (executionConfirmAction) {
       executionConfirmAction = null;
       executionScopeConfirmed = false;
@@ -1722,18 +1740,6 @@
 <svelte:window onkeydown={handleWindowKeydown} />
 
 <a class="skip-link" href="#main-content">Skip to main content</a>
-
-{#if ideState.targets.length > 0}
-  <IdeSurfaceBar
-    state={ideState}
-    {platform}
-    busy={ideOpening}
-    onShow={showIdeSurface}
-    onHide={hideIdeSurface}
-    onClose={closeIdeSurface}
-    onMeasure={reportIdeInset}
-  />
-{/if}
 
 <div class="app-shell">
   <aside class:mobile-open={menuOpen} class="sidebar" aria-label="Repository navigation">
@@ -1804,7 +1810,10 @@
           aria-label={`${chatActive ? "Close" : "Open"} repository agent chat`}
           aria-pressed={chatActive}
           title={`Toggle agent chat (${chatShortcutLabel})`}
-          onclick={() => chatOpen = !chatOpen}
+          onclick={() => {
+            if (!chatOpen && ideOpen) closeIdeSurface();
+            chatOpen = !chatOpen;
+          }}
           disabled={!selectedCheckoutId}
         >
           <svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M5 5h14v10H9l-4 4z"/><path d="M9 9h6M9 12h4"/></svg>
@@ -2573,6 +2582,23 @@
       {/if}
     </div>
   </div>
+{/if}
+
+{#if ideOpen && selectedCheckoutId && selectedRepository}
+  <IdeWorkspaceLayer
+    state={ideState}
+    repositoryName={selectedRepository.name}
+    {platform}
+    active={!editorOpen}
+    {terminalOpen}
+    {terminalHeight}
+    starting={ideOpening}
+    errorMessage={ideError}
+    onShow={showIdeTarget}
+    onStop={stopIdeTarget}
+    onClose={closeIdeSurface}
+    onViewport={reportIdeViewport}
+  />
 {/if}
 
 {#if chatOpen && selectedCheckoutId && selectedRepository}

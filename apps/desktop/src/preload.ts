@@ -120,7 +120,7 @@ const api: PhaseAtlasDesktopApi = {
     hide: () => ipcRenderer.invoke("phaseatlas:ide:hide"),
     close: (key) => ipcRenderer.invoke("phaseatlas:ide:close", key),
     state: () => ipcRenderer.invoke("phaseatlas:ide:state"),
-    setInset: (top) => ipcRenderer.invoke("phaseatlas:ide:inset", top),
+    setViewport: (rect) => ipcRenderer.invoke("phaseatlas:ide:viewport", rect),
     setTheme: (theme) => ipcRenderer.invoke("phaseatlas:ide:theme:set", theme),
     onStateChanged: (listener) => {
       const handler = (_event: Electron.IpcRendererEvent, state: IdeSurfaceState) => listener(state);

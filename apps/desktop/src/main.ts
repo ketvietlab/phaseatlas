@@ -2,7 +2,7 @@ import { fileURLToPath } from "node:url";
 import { readFileSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { TheiaIdeManager } from "./theia-ide-manager.js";
-import { assertIdeInset, assertPhaseAtlasTheme } from "./theia-ide-policy.js";
+import { assertIdeViewport, assertPhaseAtlasTheme } from "./theia-ide-policy.js";
 import { app, BrowserWindow, dialog, ipcMain, shell } from "electron";
 import { RepositoryProcessManager } from "./repository-process-manager.js";
 
@@ -125,6 +125,9 @@ const embeddedIde = new TheiaIdeManager(
   theiaDefaultExtensionsRoot,
   applicationSupportRoot,
   (host, state) => host.webContents.send("phaseatlas:ide:state", state),
+  // Leaving the IDE from inside it closes the surface the same way ⌘W does, so
+  // the renderer keeps a single notion of "the surface on top".
+  (host) => host.webContents.send("phaseatlas:shortcut:close-surface"),
 );
 const repositories = new RepositoryProcessManager(workerEntry, applicationSupportRoot, (event) => {
   for (const window of BrowserWindow.getAllWindows()) {
@@ -223,9 +226,9 @@ function registerIpc(): void {
   ipcMain.handle("phaseatlas:ide:hide", (event) => embeddedIde.hide(ideHost(event)));
   ipcMain.handle("phaseatlas:ide:close", (event, key: string) => embeddedIde.close(ideHost(event), key));
   ipcMain.handle("phaseatlas:ide:state", (event) => embeddedIde.state(ideHost(event)));
-  ipcMain.handle("phaseatlas:ide:inset", (event, top: number) => {
-    assertIdeInset(top);
-    return embeddedIde.setInset(ideHost(event), top);
+  ipcMain.handle("phaseatlas:ide:viewport", (event, rect: unknown) => {
+    assertIdeViewport(rect);
+    return embeddedIde.setViewport(ideHost(event), rect);
   });
   ipcMain.handle("phaseatlas:ide:theme:set", (_event, theme: string) => {
     assertPhaseAtlasTheme(theme);

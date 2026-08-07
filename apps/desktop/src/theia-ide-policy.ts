@@ -41,15 +41,30 @@ export function theiaPortForTarget(target: TheiaTarget): number {
   return THEIA_PORT_BASE + hash % THEIA_PORT_RANGE;
 }
 
-// The IDE is a view inside the PhaseAtlas window, laid out below the switcher
-// strip the renderer draws. The renderer reports the strip's measured height;
-// this is only what the first frame uses before that report arrives.
-export const DEFAULT_IDE_INSET = 44;
-const MAX_IDE_INSET = 400;
+// The IDE is a native view painted over the body of a PhaseAtlas panel, so only
+// the renderer knows where it belongs: it measures the panel and reports the
+// rectangle in window-content coordinates. Until it does, the view stays hidden
+// rather than guessing and flashing at the wrong size.
+export interface IdeViewportRect {
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+}
 
-export function assertIdeInset(value: unknown): asserts value is number {
-  if (typeof value !== "number" || !Number.isFinite(value) || value < 0 || value > MAX_IDE_INSET) {
-    throw new Error("The IDE viewport inset is invalid.");
+const MAX_VIEWPORT_EXTENT = 32_000;
+
+export function assertIdeViewport(value: unknown): asserts value is IdeViewportRect {
+  const rect = value as Partial<IdeViewportRect> | null;
+  if (!rect || typeof rect !== "object") throw new Error("The IDE viewport is invalid.");
+  for (const key of ["x", "y", "width", "height"] as const) {
+    const side = rect[key];
+    if (typeof side !== "number" || !Number.isFinite(side) || Math.abs(side) > MAX_VIEWPORT_EXTENT) {
+      throw new Error("The IDE viewport is invalid.");
+    }
+  }
+  if ((rect.width as number) < 0 || (rect.height as number) < 0) {
+    throw new Error("The IDE viewport is invalid.");
   }
 }
 

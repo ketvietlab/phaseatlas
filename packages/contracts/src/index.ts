@@ -995,6 +995,16 @@ export interface IdeSurfaceState {
   visibleKey: string | null;
 }
 
+// The IDE is a native view painted over the body of a PhaseAtlas panel, so the
+// renderer measures that panel and reports where the view belongs, in CSS
+// pixels relative to the window's content area.
+export interface IdeViewportRect {
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+}
+
 export interface PhaseAtlasDesktopApi {
   repositories: {
     open(): Promise<RepositorySummary | null>;
@@ -1078,7 +1088,7 @@ export interface PhaseAtlasDesktopApi {
     hide(): Promise<IdeSurfaceState>;
     close(key: string): Promise<IdeSurfaceState>;
     state(): Promise<IdeSurfaceState>;
-    setInset(top: number): Promise<IdeSurfaceState>;
+    setViewport(rect: IdeViewportRect): Promise<IdeSurfaceState>;
     setTheme(theme: "light" | "dark"): Promise<void>;
     onStateChanged(listener: (state: IdeSurfaceState) => void): () => void;
   };

@@ -8,12 +8,12 @@ import path from "node:path";
 import { BrowserWindow, WebContentsView, shell } from "electron";
 import type { IdeSurfaceState, IdeSurfaceTarget } from "@phaseatlas/contracts";
 import {
-  DEFAULT_IDE_INSET,
   assertTheiaLaunchIdentity,
   isAllowedTheiaNavigation,
   theiaBackendArguments,
   theiaPortForTarget,
   theiaTargetKey,
+  type IdeViewportRect,
   type PhaseAtlasTheme,
   type TheiaTarget,
 } from "./theia-ide-policy.js";
@@ -92,7 +92,7 @@ async function waitForBackend(instance: TheiaInstance): Promise<void> {
 export class TheiaIdeManager {
   private readonly instances = new Map<string, TheiaInstance>();
   private readonly starts = new Map<string, Promise<void>>();
-  private readonly insets = new WeakMap<BrowserWindow, number>();
+  private readonly viewports = new WeakMap<BrowserWindow, IdeViewportRect>();
   private readonly hosts = new Set<BrowserWindow>();
 
   constructor(
@@ -101,6 +101,7 @@ export class TheiaIdeManager {
     private readonly defaultExtensionsRoot: string,
     private readonly runtimeRoot: string,
     private readonly publishState: (host: BrowserWindow, state: IdeSurfaceState) => void,
+    private readonly requestLeave: (host: BrowserWindow) => void,
   ) {}
 
   async open(
@@ -142,9 +143,7 @@ export class TheiaIdeManager {
     const instance = this.instances.get(key);
     if (!instance || instance.host !== host) throw new Error("That IDE workspace is not open.");
     for (const candidate of this.instances.values()) {
-      if (candidate.host !== host) continue;
-      candidate.visible = candidate.key === key;
-      if (liveContents(candidate.view)) candidate.view?.setVisible(candidate.visible);
+      if (candidate.host === host) candidate.visible = candidate.key === key;
     }
     this.layout(host);
     liveContents(instance.view)?.focus();
@@ -153,10 +152,9 @@ export class TheiaIdeManager {
 
   hide(host: BrowserWindow): IdeSurfaceState {
     for (const instance of this.instances.values()) {
-      if (instance.host !== host || !instance.visible) continue;
-      instance.visible = false;
-      if (liveContents(instance.view)) instance.view?.setVisible(false);
+      if (instance.host === host) instance.visible = false;
     }
+    this.layout(host);
     if (!host.isDestroyed()) host.webContents.focus();
     return this.state(host);
   }
@@ -185,8 +183,13 @@ export class TheiaIdeManager {
     return { targets, visibleKey };
   }
 
-  setInset(host: BrowserWindow, top: number): IdeSurfaceState {
-    this.insets.set(host, Math.round(top));
+  setViewport(host: BrowserWindow, rect: IdeViewportRect): IdeSurfaceState {
+    this.viewports.set(host, {
+      x: Math.round(rect.x),
+      y: Math.round(rect.y),
+      width: Math.round(rect.width),
+      height: Math.round(rect.height),
+    });
     this.layout(host);
     return this.state(host);
   }
@@ -320,14 +323,18 @@ export class TheiaIdeManager {
     view.webContents.on("will-navigate", (event, url) => {
       if (!isAllowedTheiaNavigation(url, instance.port)) event.preventDefault();
     });
-    // The switcher strip is the way back, but the IDE fills the window, so the
-    // keyboard needs its own escape that Theia never sees.
+    // The panel header is the way back, but the IDE covers it while it has the
+    // keyboard, so the keyboard needs its own escape that Theia never sees. The
+    // view is hidden here and the renderer is asked to close the panel around
+    // it, so a wedged renderer still cannot trap the user inside the IDE.
     view.webContents.on("before-input-event", (event, input) => {
       if (input.key.toLowerCase() !== "p" || !input.alt || !input.shift || input.control || input.meta) return;
       event.preventDefault();
       if (input.type !== "keyDown" || input.isAutoRepeat) return;
       const state = this.hide(host);
-      if (!host.isDestroyed()) this.publishState(host, state);
+      if (host.isDestroyed()) return;
+      this.publishState(host, state);
+      this.requestLeave(host);
     });
     // A crashed IDE renderer leaves a live backend behind a blank rectangle;
     // tear the whole target down so the strip stops offering it.
@@ -355,13 +362,16 @@ export class TheiaIdeManager {
     });
   }
 
+  // Bounds and visibility are decided together: a view with nowhere to go is
+  // hidden rather than painted at whatever size it happened to be left with.
   private layout(host: BrowserWindow): void {
     if (host.isDestroyed()) return;
-    const inset = this.insets.get(host) ?? DEFAULT_IDE_INSET;
-    const { width, height } = host.getContentBounds();
+    const rect = this.viewports.get(host);
     for (const instance of this.instances.values()) {
       if (instance.host !== host || !liveContents(instance.view)) continue;
-      instance.view?.setBounds({ x: 0, y: inset, width, height: Math.max(0, height - inset) });
+      const placed = Boolean(rect && rect.width > 0 && rect.height > 0);
+      if (rect && placed) instance.view?.setBounds(rect);
+      instance.view?.setVisible(instance.visible && placed);
     }
   }
 
