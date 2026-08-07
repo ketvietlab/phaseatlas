@@ -7,7 +7,7 @@ import type { WorktreeLeaseRecord, WorktreeLeaseStatus } from "@phaseatlas/contr
 import type { CheckoutOperationalStore } from "./checkout-operational-store.js";
 
 const execFileAsync = promisify(execFile);
-const LEASE_EVENT_TYPES = new Set(["lease.allocating", "lease.active", "lease.releasing", "lease.released", "lease.abandoned"]);
+const LEASE_EVENT_TYPES = new Set(["lease.allocating", "lease.active", "lease.retained", "lease.releasing", "lease.released", "lease.abandoned"]);
 
 export type LeaseGitCommand = (args: string[], cwd: string) => Promise<string>;
 
@@ -19,6 +19,7 @@ const defaultGitCommand: LeaseGitCommand = async (args, cwd) => {
 function leaseStatus(type: string): WorktreeLeaseStatus {
   if (type === "lease.allocating") return "allocating";
   if (type === "lease.active") return "active";
+  if (type === "lease.retained") return "retained";
   if (type === "lease.releasing") return "releasing";
   if (type === "lease.released") return "released";
   return "abandoned";
@@ -119,11 +120,32 @@ export class WorktreeLeaseManager {
     });
   }
 
+  // A finished implementation run keeps its worktree and branch: the work is the
+  // point of the run, and the user decides whether it is pushed, turned into a
+  // pull request, or discarded.
+  async retain(runId: string, reason = "run_finished"): Promise<WorktreeLeaseRecord | null> {
+    return this.exclusive(async () => {
+      const lease = this.list().find((candidate) => candidate.runId === runId);
+      if (!lease) return null;
+      if (lease.status === "retained") return lease;
+      if (lease.status !== "active") throw new Error(`Lease ${lease.leaseId} cannot be retained from ${lease.status}.`);
+      this.assertManagedLease(lease);
+      return this.appendLeaseEvent({
+        ...lease,
+        status: "retained",
+        updatedAt: new Date().toISOString(),
+        disposition: reason,
+      });
+    });
+  }
+
   async release(runId: string, reason = "run_finished"): Promise<WorktreeLeaseRecord | null> {
     return this.exclusive(async () => {
       const lease = this.list().find((candidate) => candidate.runId === runId);
       if (!lease || lease.status === "released") return lease ?? null;
-      if (lease.status !== "active") throw new Error(`Lease ${lease.leaseId} requires explicit recovery.`);
+      if (!["active", "retained"].includes(lease.status)) {
+        throw new Error(`Lease ${lease.leaseId} requires explicit recovery.`);
+      }
       this.assertManagedLease(lease);
       const releasing = this.appendLeaseEvent({ ...lease, status: "releasing", updatedAt: new Date().toISOString() });
       try {

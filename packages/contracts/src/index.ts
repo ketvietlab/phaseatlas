@@ -458,7 +458,9 @@ export interface AgentCheckoutIdentity {
   canonicalPath: string;
 }
 
-export type WorktreeLeaseStatus = "allocating" | "active" | "releasing" | "released" | "abandoned";
+// "retained" is a finished run whose worktree is deliberately kept so the user can
+// push it or open a pull request. It is not reclaimed on worker restart.
+export type WorktreeLeaseStatus = "allocating" | "active" | "retained" | "releasing" | "released" | "abandoned";
 
 export interface WorktreeLeaseRecord {
   leaseId: string;
