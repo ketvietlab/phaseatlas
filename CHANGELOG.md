@@ -10,6 +10,10 @@ may contain a documented breaking change.
 
 ### Added
 
+- The task conversation can change the repository: an Ask/Edit toggle in its composer runs the
+  existing confirmed, isolated, reviewed edit path, with accept and discard offered inline once the
+  edit completes.
+
 - A task conversation: one durable chat session bound to a canonical task, so the four pipeline
   stages and the user's own questions share a single thread. Turns in that thread receive the task
   contract and the results of completed stages as context. The run panel now shows that thread —

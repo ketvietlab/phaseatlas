@@ -2,6 +2,8 @@
   import { onMount, tick } from "svelte";
   import type {
     AgentRunSummary,
+    ChatEditConfirmation,
+    ChatEditResult,
     PersistedRunEvent,
     RepositoryChatMessage,
     RepositoryChatSession,
@@ -41,6 +43,11 @@
   let messages: RepositoryChatMessage[] = [];
   let turns: RepositoryChatTurn[] = [];
   let composer = "";
+  let chatMode: "ask" | "edit" = "ask";
+  let editAccessMode: "ask_for_approval" | "full_access" = "ask_for_approval";
+  let preparedEdit: ChatEditConfirmation | null = null;
+  let edits: ChatEditResult[] = [];
+  let editBusy = false;
   let sending = false;
   let errorMessage = "";
   let transcriptElement: HTMLDivElement | undefined;
@@ -49,7 +56,9 @@
   $: activeTurn = [...turns].reverse().find((turn) => ACTIVE_TURN.has(turn.status)) ?? null;
   // A stage in flight owns the thread: its narration is still arriving and its
   // result is what the next question would be asked about.
-  $: composerBlocked = Boolean(activeRun || activeTurn || sending || !providerReady || !session);
+  $: activeEdit = edits.find((edit) => edit.status === "running") ?? null;
+  $: reviewEdit = edits.find((edit) => edit.status === "completed" && edit.disposition === "pending_review") ?? null;
+  $: composerBlocked = Boolean(activeRun || activeTurn || activeEdit || editBusy || sending || !providerReady || !session);
   $: canSend = Boolean(composer.trim()) && !composerBlocked;
 
   $: stageEntries = runs.map((run) => {
@@ -103,6 +112,7 @@
         title: `Task ${taskKey}`,
       });
       await reload();
+      await refreshEdits();
     } catch (error) {
       errorMessage = error instanceof Error ? error.message : "The task conversation could not be opened.";
     }
@@ -120,6 +130,63 @@
     if (transcriptElement) transcriptElement.scrollTop = transcriptElement.scrollHeight;
   }
 
+  async function refreshEdits() {
+    if (!window.phaseatlas || !session) return;
+    edits = await window.phaseatlas.chat.listEdits(checkoutId, session.sessionId);
+  }
+
+  // Edit mode is the existing confirmed, isolated, reviewed write path — the
+  // conversation gets it rather than a second way to change the repository.
+  async function prepareEdit() {
+    if (!window.phaseatlas || !session || !composer.trim() || editBusy) return;
+    editBusy = true;
+    errorMessage = "";
+    try {
+      const confirmation = await window.phaseatlas.chat.prepareEdit(checkoutId, {
+        sessionId: session.sessionId,
+        prompt: composer.trim(),
+        accessMode: editAccessMode,
+      });
+      if (editAccessMode === "full_access") await startPreparedEdit(confirmation);
+      else preparedEdit = confirmation;
+    } catch (error) {
+      errorMessage = error instanceof Error ? error.message : "The edit could not be prepared.";
+    } finally {
+      editBusy = false;
+    }
+  }
+
+  async function startPreparedEdit(confirmation: ChatEditConfirmation) {
+    if (!window.phaseatlas) return;
+    await window.phaseatlas.chat.startEdit(checkoutId, {
+      editId: confirmation.editId,
+      confirmationDigest: confirmation.confirmationDigest,
+    });
+    composer = "";
+    preparedEdit = null;
+    await refreshEdits();
+  }
+
+  async function resolveEdit(editId: string, action: "accept" | "discard") {
+    if (!window.phaseatlas || editBusy) return;
+    editBusy = true;
+    errorMessage = "";
+    try {
+      if (action === "accept") await window.phaseatlas.chat.acceptEdit(checkoutId, editId);
+      else await window.phaseatlas.chat.discardEdit(checkoutId, editId);
+      await refreshEdits();
+    } catch (error) {
+      errorMessage = error instanceof Error ? error.message : "The edit could not be resolved.";
+    } finally {
+      editBusy = false;
+    }
+  }
+
+  async function submit() {
+    if (chatMode === "edit") await prepareEdit();
+    else await send();
+  }
+
   async function send() {
     if (!window.phaseatlas || !session || !canSend) return;
     sending = true;
@@ -129,6 +196,7 @@
     try {
       await window.phaseatlas.chat.send(checkoutId, { sessionId: session.sessionId, text });
       await reload();
+      await refreshEdits();
     } catch (error) {
       composer = text;
       errorMessage = error instanceof Error ? error.message : "The message could not be sent.";
@@ -140,7 +208,7 @@
   function handleKeydown(event: KeyboardEvent) {
     if (event.key !== "Enter" || event.shiftKey || event.isComposing) return;
     event.preventDefault();
-    void send();
+    void submit();
   }
 
   function stageStatusLabel(run: AgentRunSummary): string {
@@ -202,6 +270,32 @@
     {/if}
   </div>
 
+  {#if preparedEdit}
+    <div class="edit-confirm" role="alertdialog" aria-label="Confirm isolated edit">
+      <p><strong>Confirm isolated edit</strong></p>
+      <dl>
+        <div><dt>Repository</dt><dd>{preparedEdit.repositoryName} · {preparedEdit.baseRevision.slice(0, 8)}</dd></div>
+        <div><dt>Provider</dt><dd>{preparedEdit.runnerId} · {preparedEdit.model}</dd></div>
+        <div><dt>Boundary</dt><dd>Isolated worktree · review required before anything is applied</dd></div>
+      </dl>
+      <div class="edit-confirm-actions">
+        <button type="button" onclick={() => preparedEdit = null}>Cancel</button>
+        <button class="primary" type="button" disabled={editBusy} onclick={() => preparedEdit && startPreparedEdit(preparedEdit)}>Start edit</button>
+      </div>
+    </div>
+  {/if}
+
+  {#if reviewEdit}
+    <div class="edit-review">
+      <p><strong>Edit ready for review</strong><span>{reviewEdit.changedFiles.length} changed {reviewEdit.changedFiles.length === 1 ? "file" : "files"}</span></p>
+      <p class="edit-review-summary">{reviewEdit.summary}</p>
+      <div class="edit-confirm-actions">
+        <button type="button" disabled={editBusy} onclick={() => resolveEdit(reviewEdit.editId, "discard")}>Discard</button>
+        <button class="primary" type="button" disabled={editBusy} onclick={() => resolveEdit(reviewEdit.editId, "accept")}>Accept</button>
+      </div>
+    </div>
+  {/if}
+
   {#if errorMessage}
     <p class="conversation-error" role="alert">{errorMessage}</p>
   {/if}
@@ -216,13 +310,28 @@
       placeholder={providerReady
         ? activeRun
           ? "A stage is running…"
-          : "Ask about this task — the agent sees the contract and every completed stage"
+          : chatMode === "edit"
+            ? "Describe the change — it runs in an isolated worktree and waits for your review"
+            : "Ask about this task — the agent sees the contract and every completed stage"
         : "Choose an available CLI and model first"}
       disabled={composerBlocked}
     ></textarea>
     <div class="conversation-composer-actions">
-      <small>Read-only · shares this task's thread</small>
-      <button type="button" onclick={send} disabled={!canSend}>Send<kbd>↵</kbd></button>
+      <div class="composer-mode" aria-label="Agent mode">
+        <button class:active={chatMode === "ask"} type="button" aria-pressed={chatMode === "ask"} onclick={() => chatMode = "ask"} disabled={editBusy}>Ask</button>
+        <button class:active={chatMode === "edit"} type="button" aria-pressed={chatMode === "edit"} onclick={() => chatMode = "edit"} disabled={editBusy}>Edit</button>
+      </div>
+      {#if chatMode === "edit"}
+        <label class="composer-access">
+          <span class="sr-only">Edit access mode</span>
+          <select bind:value={editAccessMode} disabled={editBusy}>
+            <option value="ask_for_approval">Ask for approval</option>
+            <option value="full_access">Full access</option>
+          </select>
+        </label>
+      {/if}
+      <small>{chatMode === "edit" ? "Isolated worktree · review before apply" : "Read-only"}</small>
+      <button class="composer-send" type="button" onclick={submit} disabled={!canSend}>{chatMode === "edit" ? "Start edit" : "Send"}<kbd>↵</kbd></button>
     </div>
   </div>
 </section>
@@ -257,7 +366,23 @@
   .conversation-composer textarea { display: block; width: 100%; min-height: 46px; border: 0; border-radius: var(--radius) var(--radius) 0 0; padding: 8px 10px; background: transparent; color: var(--text); font-family: inherit; font-size: 12px; line-height: 1.5; outline: none; resize: vertical; }
   .conversation-composer-actions { display: flex; align-items: center; justify-content: space-between; gap: 10px; border-top: 1px solid var(--border-soft); padding: 5px 7px; }
   .conversation-composer-actions small { color: var(--text-subtle); font-size: 10px; }
-  .conversation-composer-actions button { display: flex; align-items: center; gap: 7px; border: 0; border-radius: var(--radius-sm); padding: 5px 9px; background: var(--brand-600); color: #fff; font-size: 11px; font-weight: 800; }
+  .conversation-composer-actions small { margin-left: auto; }
+  .composer-mode { display: inline-flex; align-items: center; border: 1px solid var(--border); border-radius: 8px; padding: 2px; background: var(--surface-soft); }
+  .composer-mode button { border: 0; border-radius: 6px; padding: 3px 9px; background: transparent; color: var(--text-subtle); font-size: 10.5px; font-weight: 750; }
+  .composer-mode button.active { background: var(--surface); color: var(--active-text); }
+  .composer-access select { border: 1px solid var(--border); border-radius: var(--radius-xs); padding: 3px 6px; background: var(--surface-soft); color: var(--text-muted); font-family: inherit; font-size: 10.5px; }
+  .edit-confirm,.edit-review { border: 1px solid var(--brand-200); border-radius: var(--radius); padding: 9px 11px; background: var(--active-surface); }
+  .edit-confirm p,.edit-review p { margin: 0; font-size: 12px; }
+  .edit-review p span { margin-left: 8px; color: var(--text-subtle); font-size: 10.5px; }
+  .edit-review-summary { margin-top: 5px !important; color: var(--text-muted); line-height: 1.55; }
+  .edit-confirm dl { display: grid; gap: 3px; margin: 7px 0; }
+  .edit-confirm dl div { display: flex; gap: 8px; }
+  .edit-confirm dt { color: var(--text-subtle); font-size: 10px; min-width: 78px; }
+  .edit-confirm dd { margin: 0; font-size: 11px; }
+  .edit-confirm-actions { display: flex; justify-content: flex-end; gap: 7px; margin-top: 8px; }
+  .edit-confirm-actions button { border: 1px solid var(--border); border-radius: var(--radius-sm); padding: 4px 10px; background: var(--surface); color: var(--text); font-size: 11px; font-weight: 700; }
+  .edit-confirm-actions button.primary { border-color: transparent; background: var(--brand-600); color: #fff; }
+  .conversation-composer-actions button.composer-send { display: flex; align-items: center; gap: 7px; border: 0; border-radius: var(--radius-sm); padding: 5px 9px; background: var(--brand-600); color: #fff; font-size: 11px; font-weight: 800; }
   .conversation-composer-actions button:disabled { opacity: .4; }
   .conversation-composer-actions kbd { border-left: 1px solid rgba(255,255,255,.28); padding-left: 6px; font: inherit; }
 </style>
