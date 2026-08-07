@@ -637,7 +637,11 @@ function sanitizePublicText(value: string, privateValues: string[] = []): string
     .replace(/\bpid\s*[:=]\s*\d+/gi, "pid=<redacted>")
     .replace(/--permission-mode\s+[^\s]+/gi, "<permission:redacted>")
     .replace(/--dangerously-[^\s]+(?:\s+[^\s]+)?/gi, "<permission:redacted>")
-    .replace(/(?:[A-Za-z]:[\\/]|\/)[^\s"'`]+/g, "<path>")
+    // Anchored: an absolute path starts a token. Unanchored, this matched the
+    // slash inside "Legal/Compliance" and "docs/01-pilot.md" and redacted the
+    // rest of the word — destroying the repository-relative paths the run
+    // contract requires results to carry.
+    .replace(/(?<![\w.-])(?:[A-Za-z]:[\\/]|\/)[^\s"'`)\]]+/g, "<path>")
     .trim();
   return sanitized.length > 8_000 ? `${sanitized.slice(0, 8_000)}…` : sanitized;
 }

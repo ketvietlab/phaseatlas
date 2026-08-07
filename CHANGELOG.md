@@ -34,6 +34,11 @@ may contain a documented breaking change.
 
 ### Fixed
 
+- Agent narration and chat answers were mangled: the sanitizer treated a slash anywhere in a word as
+  the start of an absolute path, so `Legal/Compliance` became `Legal<path>` and `docs/01-pilot.md`
+  became `docs<path>` — redacting exactly the repository-relative paths the run contract requires a
+  result to carry. Redaction is now anchored to the start of a token.
+
 - Claude Code runs completed their work and then failed with a JSON parse error. The agent result
   schema carries a `$schema` dialect key, and Claude Code silently abandons structured output when it
   is present — the run returned prose instead. The key is now dropped before the schema is handed to

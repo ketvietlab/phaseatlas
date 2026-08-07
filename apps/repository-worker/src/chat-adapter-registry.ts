@@ -37,7 +37,11 @@ function sanitizeText(value: string, privateValues: string[] = [], trim = true):
   }
   sanitized = sanitized
     .replace(/\b(?:api[_-]?key|token|secret|password|authorization|cookie)\b\s*[:=]\s*[^\s]+/gi, "<credential:redacted>")
-    .replace(/(?:[A-Za-z]:[\\/]|\/)[^\s"'`]+/g, "<path>");
+    // Anchored: an absolute path starts a token. Unanchored, this matched the
+    // slash inside "Legal/Compliance" and "docs/01-pilot.md" and redacted the
+    // rest of the word — destroying the repository-relative paths the run
+    // contract requires results to carry.
+    .replace(/(?<![\w.-])(?:[A-Za-z]:[\\/]|\/)[^\s"'`)\]]+/g, "<path>");
   const bounded = sanitized.slice(0, 16_000);
   return trim ? bounded.trim() : bounded;
 }

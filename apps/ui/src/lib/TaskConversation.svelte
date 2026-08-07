@@ -166,27 +166,29 @@
 
     {#each entries as entry (entry.id)}
       {#if entry.kind === "stage"}
-        <article class="stage-entry" data-status={entry.run.status}>
-          <header>
-            <strong>{ACTION_LABEL[entry.run.action] ?? entry.run.action}</strong>
-            <span class="stage-status">{stageStatusLabel(entry.run)}</span>
-            <span class="stage-provider">{entry.run.runnerId}{entry.run.model ? ` · ${entry.run.model}` : ""}</span>
-            <time>{relativeTime(entry.run.createdAt)}</time>
-          </header>
-          {#if entry.narration}
-            <p class="stage-narration">{entry.narration}</p>
-          {/if}
-          {#if entry.commands}
-            <p class="stage-activity">{entry.commands} repository {entry.commands === 1 ? "command" : "commands"}</p>
-          {/if}
-          {#if entry.failure}
-            <p class="stage-failure">{entry.failure}</p>
-          {/if}
+        <article class="turn" data-role="assistant">
+          <div class="turn-gutter" aria-hidden="true"><span class="stage-dot" data-status={entry.run.status}></span></div>
+          <div class="turn-body">
+            <p class="turn-byline">
+              <strong>{ACTION_LABEL[entry.run.action] ?? entry.run.action}</strong>
+              <span>{stageStatusLabel(entry.run)}</span>
+              <span>{entry.run.runnerId}{entry.run.model ? ` · ${entry.run.model}` : ""}</span>
+              <time>{relativeTime(entry.run.createdAt)}</time>
+            </p>
+            {#if entry.narration}<p class="turn-text">{entry.narration}</p>{/if}
+            {#if entry.commands}
+              <p class="turn-activity">Ran {entry.commands} repository {entry.commands === 1 ? "command" : "commands"}</p>
+            {/if}
+            {#if entry.failure}<p class="turn-failure">{entry.failure}</p>{/if}
+          </div>
         </article>
       {:else}
-        <article class="message-entry" data-role={entry.message.role}>
-          <header><strong>{entry.message.role === "user" ? "You" : "Agent"}</strong><time>{relativeTime(entry.message.createdAt)}</time></header>
-          <p>{entry.message.content}</p>
+        <article class="turn" data-role={entry.message.role}>
+          <div class="turn-gutter" aria-hidden="true">{entry.message.role === "user" ? "You" : ""}</div>
+          <div class="turn-body">
+            <p class="turn-byline"><strong>{entry.message.role === "user" ? "You" : "Agent"}</strong><time>{relativeTime(entry.message.createdAt)}</time></p>
+            <p class="turn-text">{entry.message.content}</p>
+          </div>
         </article>
       {/if}
     {/each}
@@ -230,24 +232,22 @@
   .conversation-transcript { display: flex; min-height: 0; flex: 1; flex-direction: column; gap: 8px; overflow-y: auto; padding-right: 4px; }
   .conversation-empty { margin: 18px 0; color: var(--text-subtle); font-size: 12px; text-align: center; }
 
-  .stage-entry { border: 1px solid var(--border); border-left-width: 3px; border-radius: var(--radius); padding: 8px 10px; background: var(--surface); }
-  .stage-entry[data-status="completed"] { border-left-color: var(--success-500); }
-  .stage-entry[data-status="failed"] { border-left-color: #c44242; }
-  .stage-entry[data-status="running"],.stage-entry[data-status="starting"] { border-left-color: var(--brand-500); }
-  .stage-entry header { display: flex; align-items: baseline; gap: 8px; }
-  .stage-entry header strong { font-size: 12px; font-weight: 780; }
-  .stage-status { color: var(--text-muted); font-size: 10px; font-weight: 700; }
-  .stage-provider { overflow: hidden; color: var(--text-subtle); font-size: 10px; text-overflow: ellipsis; white-space: nowrap; }
-  .stage-entry time,.message-entry time { margin-left: auto; color: var(--text-subtle); font-size: 10px; }
-  .stage-narration { margin: 6px 0 0; color: var(--text); font-size: 12px; line-height: 1.55; white-space: pre-wrap; }
-  .stage-activity { margin: 5px 0 0; color: var(--text-subtle); font-size: 10px; }
-  .stage-failure { margin: 6px 0 0; border-radius: var(--radius-xs); padding: 5px 7px; background: color-mix(in srgb,#c44242 9%,var(--surface)); color: var(--text-muted); font-size: 11px; }
-
-  .message-entry { border-radius: var(--radius); padding: 7px 10px; background: var(--surface-soft); }
-  .message-entry[data-role="user"] { align-self: flex-end; max-width: 82%; background: var(--active-surface); color: var(--active-text); }
-  .message-entry header { display: flex; align-items: baseline; gap: 8px; }
-  .message-entry header strong { font-size: 10px; font-weight: 750; text-transform: uppercase; letter-spacing: .05em; }
-  .message-entry p { margin: 4px 0 0; font-size: 12px; line-height: 1.55; white-space: pre-wrap; }
+  /* One column of turns, byline above text — the shape Claude Code, Cursor and
+     Codex all use, so nothing competes with the message itself for attention. */
+  .turn { display: grid; grid-template-columns: 34px minmax(0,1fr); gap: 10px; padding: 2px 0; }
+  .turn-gutter { display: flex; height: 20px; align-items: center; justify-content: flex-end; color: var(--text-subtle); font-size: 9px; font-weight: 750; letter-spacing: .04em; text-transform: uppercase; }
+  .stage-dot { width: 7px; height: 7px; border-radius: 50%; background: var(--text-subtle); }
+  .stage-dot[data-status="completed"] { background: var(--success-500); }
+  .stage-dot[data-status="failed"] { background: #c44242; }
+  .stage-dot[data-status="running"],.stage-dot[data-status="starting"] { background: var(--brand-500); }
+  .turn-body { min-width: 0; }
+  .turn-byline { display: flex; flex-wrap: wrap; align-items: baseline; gap: 8px; margin: 0 0 3px; color: var(--text-subtle); font-size: 10px; }
+  .turn-byline strong { color: var(--text); font-size: 11px; font-weight: 780; }
+  .turn-byline time { margin-left: auto; }
+  .turn-text { margin: 0; color: var(--text); font-size: 12.5px; line-height: 1.62; white-space: pre-wrap; overflow-wrap: anywhere; }
+  .turn[data-role="user"] .turn-text { border-left: 2px solid var(--brand-300); padding-left: 9px; color: var(--text-muted); }
+  .turn-activity { margin: 5px 0 0; color: var(--text-subtle); font-size: 10.5px; }
+  .turn-failure { margin: 6px 0 0; border-radius: var(--radius-xs); padding: 6px 8px; background: color-mix(in srgb,#c44242 8%,var(--surface)); color: var(--text-muted); font-size: 11px; }
 
   .conversation-status { margin: 2px 0 0; color: var(--text-subtle); font-size: 11px; }
   .conversation-error { margin: 0; border-radius: var(--radius-xs); padding: 6px 8px; background: color-mix(in srgb,#c44242 8%,var(--surface)); color: var(--text-muted); font-size: 11px; }

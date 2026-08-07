@@ -354,3 +354,37 @@ test("strips the schema dialect key that suppresses Claude structured output", (
   assert.equal(projected.type, original.type);
   assert.equal(claudeJsonSchemaArgument(null), "null");
 });
+
+test("redacts absolute paths without eating repository-relative ones", async () => {
+  const events: Array<Omit<AgentEvent, "sequence">> = [];
+  const runner: ProviderProcessRunner = async (options) => {
+    options.onStdout(`${JSON.stringify({
+      type: "stream_event",
+      event: {
+        type: "content_block_delta",
+        delta: {
+          text: "Legal/Compliance and Security/Privacy sign off on docs/01-pilot.md; worktree /private/worktree/x",
+        },
+      },
+    })}\n`);
+    options.onStdout(`${JSON.stringify({ type: "result", structured_output: normalizedResult, is_error: false })}\n`);
+    return { stdout: "", stderr: "" };
+  };
+  const registry = new RunnerRegistry({
+    processRunner: runner,
+    codexExecutableResolver: async () => ({ executable: "fixture-codex", version: "fixture" }),
+    codexModelDiscovery: async () => [],
+  });
+  await registry.getExecution("claude-code", "analyze", "read-only").execute({
+    spec: { ...executionSpec, action: "analyze", sandbox: "read-only" },
+    workingDirectory: "/private/worktree",
+    modelId: "sonnet",
+    signal: new AbortController().signal,
+    emit: (event) => events.push(event),
+  });
+  const delta = events.find((event) => event.type === "agent.delta") as { text?: string } | undefined;
+  assert.equal(delta?.text?.includes("Legal/Compliance"), true);
+  assert.equal(delta?.text?.includes("Security/Privacy"), true);
+  assert.equal(delta?.text?.includes("docs/01-pilot.md"), true);
+  assert.equal(delta?.text?.includes("/private/worktree"), false);
+});
