@@ -108,11 +108,12 @@ const currentDirectory = path.dirname(fileURLToPath(import.meta.url));
 const theiaBackendEntry = process.env.PHASEATLAS_THEIA_BACKEND_ENTRY ||
   (app.isPackaged
     ? path.join(process.resourcesPath, "theia-ide", "lib", "backend", "main.js")
-    : path.resolve(currentDirectory, "../../ide/lib/backend/main.js"));
+    // dist lives at apps/desktop/dist, so the repository root is three levels up.
+    : path.resolve(currentDirectory, "../../../ide/lib/backend/main.js"));
 const theiaPreloadEntry = path.join(currentDirectory, "theia-preload.cjs");
 const theiaDefaultExtensionsRoot = app.isPackaged
   ? path.join(process.resourcesPath, "theia-default-extensions")
-  : path.resolve(currentDirectory, "../../ide/default-extensions");
+  : path.resolve(currentDirectory, "../../../ide/default-extensions");
 const workerEntry = process.env.PHASEATLAS_WORKER_ENTRY ||
   (app.isPackaged
     ? path.join(process.resourcesPath, "repository-worker", "index.js")
