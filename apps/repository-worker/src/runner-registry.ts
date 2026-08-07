@@ -78,6 +78,7 @@ async function detectRunner(options: {
   executable: string;
   discoverModels: (executable: string) => Promise<RunnerModelDescriptor[]>;
   checkAuthentication?: (executable: string) => Promise<boolean>;
+  signInCommand?: string;
 }): Promise<RunnerDescriptor> {
   try {
     const { stdout, stderr } = await execFileAsync(options.executable, ["--version"], {
@@ -91,7 +92,7 @@ async function detectRunner(options: {
       ? await options.checkAuthentication(options.executable).catch(() => true)
       : true;
     if (!authenticated) {
-      const unavailableReason = `${options.name} is installed but not signed in. Run its login command, then reopen the repository.`;
+      const unavailableReason = `${options.name} is installed but not signed in. Run \`${options.signInCommand ?? "its login command"}\` in a terminal, then reopen the repository. Signing in to a desktop application does not authenticate the command line.`;
       return {
         id: options.id,
         provider: options.provider,
@@ -1168,6 +1169,7 @@ class ClaudePlanningAdapter implements PlanningRunnerAdapter {
       executable: this.executable,
       discoverModels: discoverClaudeModels,
       checkAuthentication: checkClaudeAuthentication,
+      signInCommand: "claude auth login",
     });
   }
 
