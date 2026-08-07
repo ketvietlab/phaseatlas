@@ -5,10 +5,23 @@
 
   // Model output is untrusted: links never resolve and images are never fetched,
   // matching how the chat transcript already renders the same kind of text.
+
+  // Providers sometimes double-escape when asked for JSON, so the field arrives
+  // holding the two characters \ and n instead of a newline. Only repair a string
+  // that has no real newline at all — that is the double-escaped case. A text that
+  // already breaks lines and also mentions \n is describing the sequence, and
+  // rewriting it there would corrupt the meaning. Persisted evidence is untouched;
+  // this is a rendering repair.
+  function readable(value: string): string {
+    if (!value.includes("\\n") || /\r|\n/.test(value)) return value;
+    return value.replace(/\\r\\n|\\n/g, "\n").replace(/\\t/g, "  ");
+  }
+
+  $: rendered = readable(source);
 </script>
 
 <div class="model-markdown">
-  <SvelteMarkdown {source} sanitizeUrl={() => ""}>
+  <SvelteMarkdown source={rendered} sanitizeUrl={() => ""}>
     {#snippet link({ children })}<span class="rendered-link">{@render children?.()}</span>{/snippet}
     {#snippet image({ text })}<span class="rendered-image">[Image omitted: {text}]</span>{/snippet}
   </SvelteMarkdown>

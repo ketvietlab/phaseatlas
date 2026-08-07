@@ -38,6 +38,11 @@ may contain a documented breaking change.
 
 ### Fixed
 
+- Model prose that arrived with double-escaped newlines rendered as one paragraph with literal `\n`
+  sequences in it. Such a field is now repaired at render time, leaving the persisted result
+  untouched, and only when the text contains no real newline at all — a text that already breaks
+  lines and also mentions the sequence is describing it, not escaping it.
+
 - Agent narration and chat answers were mangled: the sanitizer treated a slash anywhere in a word as
   the start of an absolute path, so `Legal/Compliance` became `Legal<path>` and `docs/01-pilot.md`
   became `docs<path>` — redacting exactly the repository-relative paths the run contract requires a
