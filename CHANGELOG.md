@@ -12,7 +12,9 @@ may contain a documented breaking change.
 
 - A task conversation: one durable chat session bound to a canonical task, so the four pipeline
   stages and the user's own questions share a single thread. Turns in that thread receive the task
-  contract and the results of completed stages as context.
+  contract and the results of completed stages as context. The run panel now shows that thread —
+  stages and questions interleaved in one transcript with a composer — in place of the per-run
+  command list.
 
 - Reasoning effort for Claude Code, discovered from the installed CLI's `--effort` levels and applied
   to planning, execution, chat, and isolated chat edits. CLI builds without `--effort` keep the

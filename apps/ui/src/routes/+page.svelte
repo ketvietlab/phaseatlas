@@ -4,6 +4,7 @@
   import RepositoryChatWorkspace from "$lib/RepositoryChatWorkspace.svelte";
   import TerminalPanel from "$lib/TerminalPanel.svelte";
   import ProviderPicker from "$lib/ProviderPicker.svelte";
+  import TaskConversation from "$lib/TaskConversation.svelte";
   import TaskContentPanel from "$lib/TaskContentPanel.svelte";
   import TaskMap from "$lib/TaskMap.svelte";
   import type {
@@ -632,7 +633,10 @@
         ? selectedWorkspaceSlug
         : nextWorkspaces[0]?.slug ?? "";
       selectWorkspace(workspaceSlug, selectedTaskKey);
-      if (executionOpen) await loadAgentRuns(selectedAgentRunId);
+      if (executionOpen) {
+        await loadAgentRuns(selectedAgentRunId);
+        await loadTaskConversationEvents();
+      }
     } catch (error) {
       errorMessage = error instanceof Error ? error.message : "The repository could not be refreshed.";
     } finally {
@@ -814,6 +818,7 @@
       task ? loadExecutionActions(task) : Promise.resolve(),
     ]);
     if (selectedAgentRunId) await selectAgentRun(selectedAgentRunId);
+    await loadTaskConversationEvents();
   }
 
   function closeExecutionWorkbench() {
@@ -922,6 +927,15 @@
       if (selectedTask) await loadExecutionActions(selectedTask);
     } finally {
       executionStartingAction = "";
+    }
+  }
+
+  // The task conversation renders every stage, not just the selected run, so the
+  // transcript needs each stage's events rather than only the focused one.
+  async function loadTaskConversationEvents() {
+    for (const run of pipelineRuns) {
+      if (agentEvents[run.runId]?.length) continue;
+      await reconcileAgentEvents(run.runId).catch(() => undefined);
     }
   }
 
@@ -2142,73 +2156,16 @@
             </div>
 
             <div class="execution-journal">
-              <section class="execution-narrative" aria-live={isAgentRunActive(selectedAgentRun) ? "polite" : "off"}>
-                <header class="execution-section-heading">
-                  <div><span class="narrative-mark" aria-hidden="true"></span><div><strong>Agent response</strong><p>Reasoning summaries and final guidance from {selectedAgentRun.runnerId}.</p></div></div>
-                  <span>{selectedNarrativeEvents.length}</span>
-                </header>
-                <div class="execution-timeline">
-              {#if selectedNarrativeEvents.length}
-                {#each selectedNarrativeEvents as event}
-                  <article class="execution-event" data-type={event.type}>
-                    <span class="execution-event-sequence">{String(event.sequence).padStart(2, "0")}</span>
-                    <div class="execution-event-content">
-                      <header><strong>{eventHeading(event)}</strong><time>{formatRunTime(event.timestamp)}</time></header>
-                      {#if eventBody(event)}
-                        <p>{eventBody(event)}</p>
-                      {/if}
-                    </div>
-                  </article>
-                {/each}
-              {:else}
-                <div class="execution-timeline-empty"><span class="run-waiting-signal" aria-hidden="true"><i></i><i></i><i></i></span><div><strong>{isAgentRunActive(selectedAgentRun) ? "Agent is working" : "No agent response"}</strong><p>{isAgentRunActive(selectedAgentRun) ? "Provider responses will appear here without terminal noise." : "This run did not persist a provider response."}</p></div></div>
-              {/if}
-                </div>
-              </section>
-
-              {#if selectedCommandCards.length}
-                <section class="execution-activity" aria-label="Command activity">
-                  <header class="execution-section-heading">
-                    <div><span class="activity-mark" aria-hidden="true"></span><div><strong>Command activity</strong><p>Output stays in SQLite until you request it.</p></div></div>
-                    <span>{selectedCommandCards.length}</span>
-                  </header>
-                  <div class="command-disclosures">
-                    {#each selectedCommandCards as command}
-                      {@const outputKey = commandOutputKey(selectedAgentRun.runId, command.commandId)}
-                      {@const expanded = expandedCommandKeys.has(outputKey)}
-                      {@const output = commandOutputs[outputKey]}
-                      <article class="command-disclosure" data-expanded={expanded} data-exit={command.exitCode ?? "running"}>
-                        <button type="button" aria-expanded={expanded} onclick={() => toggleCommandOutput(selectedAgentRun.runId, command.commandId)}>
-                          <span class="command-chevron" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="m9 6 6 6-6 6"/></svg></span>
-                          <span class="command-copy"><code>{command.command}</code><small>{command.exitCode === undefined ? "Running" : `Exit ${command.exitCode}`} · {formatCharacterCount(command.outputCharacters)}</small></span>
-                          <span class="command-fetch-label">{expanded ? "Close output" : "Fetch output"}</span>
-                        </button>
-                        {#if expanded}
-                          <div class="command-output-panel">
-                            {#if output?.loading && !output.text}
-                              <div class="command-output-loading"><span></span>Reading a bounded page from SQLite…</div>
-                            {:else if output?.error}
-                              <div class="command-output-error"><span>{output.error}</span><button type="button" onclick={() => loadCommandOutput(selectedAgentRun.runId, command.commandId, output.offset)}>Retry</button></div>
-                            {:else if output?.text}
-                              <pre>{output.text}</pre>
-                              <footer>
-                                <span>Showing {formatCharacterPosition(output.offset + 1)}–{formatCharacterPosition(output.nextOffset)} of {formatCharacterPosition(output.totalCharacters)} characters</span>
-                                <div class="command-page-actions">
-                                  {#if output.offset > 0}<button type="button" disabled={output.loading} onclick={() => loadCommandOutput(selectedAgentRun.runId, command.commandId, Math.max(0, output.offset - 20_000))}>Previous</button>{/if}
-                                  {#if output.hasMore}<button type="button" disabled={output.loading} onclick={() => loadCommandOutput(selectedAgentRun.runId, command.commandId, output.nextOffset)}>{output.loading ? "Loading…" : "Next 20k"}</button>{/if}
-                                  {#if command.exitCode === undefined}<button type="button" disabled={output.loading} onclick={() => loadCommandOutput(selectedAgentRun.runId, command.commandId, output.offset)}>Refresh</button>{/if}
-                                </div>
-                              </footer>
-                            {:else}
-                              <div class="command-output-empty"><span>No output has been persisted for this command.</span>{#if command.exitCode === undefined}<button type="button" onclick={() => loadCommandOutput(selectedAgentRun.runId, command.commandId, 0)}>Check again</button>{/if}</div>
-                            {/if}
-                          </div>
-                        {/if}
-                      </article>
-                    {/each}
-                  </div>
-                </section>
-              {/if}
+              <TaskConversation
+                checkoutId={selectedCheckoutId}
+                taskKey={canonicalTaskKey(selectedTask)}
+                runnerId={plannerRunnerId}
+                modelId={plannerModel}
+                reasoningEffort={plannerReasoningEffort}
+                runs={pipelineRuns}
+                runEvents={agentEvents}
+                providerReady={providerSelectionReady}
+              />
             </div>
 
             {#if selectedAgentReview}
