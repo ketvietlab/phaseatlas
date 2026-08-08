@@ -13,7 +13,11 @@ import {
   formatCodexJsonEvent,
   assertRunnerModel,
   assertRunnerSelection,
+  claudeJsonSchemaArgument,
+  claudeReasoningEffortArguments,
+  parseClaudeAuthStatus,
   parseClaudeModelHelp,
+  parseClaudeReasoningEfforts,
   parseCodexModelCatalog,
   RunnerRegistry,
   runChildProcess,
@@ -81,11 +85,25 @@ test("projects provider model catalogs without accepting arbitrary model text", 
     reasoningEfforts: ["low", "high"],
     defaultReasoningEffort: "high",
   }]);
-  assert.deepEqual(parseClaudeModelHelp("Model. Provide an alias for the latest model (e.g. 'fable', 'opus', or 'sonnet') or full name."), [
-    { id: "fable", displayName: "Fable", isDefault: false, reasoningEfforts: [] },
-    { id: "opus", displayName: "Opus", isDefault: false, reasoningEfforts: [] },
-    { id: "sonnet", displayName: "Sonnet", isDefault: false, reasoningEfforts: [] },
+  const claudeHelp = [
+    "  --effort <level>    Effort level for the current session",
+    "                      (low, medium, high, xhigh, max)",
+    "  --model <model>     Model. Provide an alias for the latest model (e.g. 'fable', 'opus', or 'sonnet') or full name.",
+  ].join("\n");
+  assert.deepEqual(parseClaudeReasoningEfforts(claudeHelp), ["low", "medium", "high", "xhigh", "max"]);
+  assert.deepEqual(parseClaudeModelHelp(claudeHelp), [
+    { id: "fable", displayName: "Fable", isDefault: false, reasoningEfforts: ["low", "medium", "high", "xhigh", "max"] },
+    { id: "opus", displayName: "Opus", isDefault: false, reasoningEfforts: ["low", "medium", "high", "xhigh", "max"] },
+    { id: "sonnet", displayName: "Sonnet", isDefault: false, reasoningEfforts: ["low", "medium", "high", "xhigh", "max"] },
   ]);
+  // A CLI build without --effort must keep the control disabled rather than
+  // offering levels the installed binary would reject.
+  assert.deepEqual(
+    parseClaudeModelHelp("Model. Provide an alias for the latest model (e.g. 'opus') or full name."),
+    [{ id: "opus", displayName: "Opus", isDefault: false, reasoningEfforts: [] }],
+  );
+  assert.deepEqual(claudeReasoningEffortArguments("xhigh"), ["--effort", "xhigh"]);
+  assert.deepEqual(claudeReasoningEffortArguments(undefined), []);
   const descriptor = {
     id: "fixture",
     provider: "fixture",
@@ -135,13 +153,25 @@ const executionSpec: AgentRunSpec = {
   acceptanceCriteria: [],
   verification: [],
   sandbox: "workspace-write",
+  priorResults: [{
+    runId: "run-analyze-fixture",
+    action: "analyze",
+    recordedAt: "2026-08-03T00:00:00.000Z",
+    result: {
+      result: { ...normalizedResult, summary: "Analysis found one hot path." },
+      inspectedChanges: [],
+      policyViolations: [],
+    },
+  }],
   createdAt: "2026-08-03T00:00:00.000Z",
 };
 
 test("Codex and Claude fixtures translate to the same normalized execution contract", async () => {
   const observedArgs = new Map<string, string[]>();
+  const observedPrompts = new Map<string, string>();
   const fakeProcessRunner: ProviderProcessRunner = async (options) => {
     observedArgs.set(options.executable, options.args);
+    observedPrompts.set(options.executable, options.stdin ?? options.args.at(-1) ?? "");
     if (options.executable === "fixture-codex") {
       const outputPath = options.args[options.args.indexOf("--output-last-message") + 1];
       assert.ok(outputPath);
@@ -174,7 +204,9 @@ test("Codex and Claude fixtures translate to the same normalized execution contr
     const result = await registry.getExecution(runnerId, "implement", "workspace-write").execute({
       spec: executionSpec,
       workingDirectory: executionSpec.executionDirectory,
-      ...(runnerId === "codex-cli" ? { modelId: "gpt-safe", reasoningEffort: "high" } : {}),
+      ...(runnerId === "codex-cli"
+        ? { modelId: "gpt-safe", reasoningEffort: "high" }
+        : { modelId: "opus", reasoningEffort: "xhigh" }),
       signal: new AbortController().signal,
       emit: (event) => events.push(event),
     });
@@ -197,6 +229,17 @@ test("Codex and Claude fixtures translate to the same normalized execution contr
   assert.equal(JSON.stringify(claude.events).includes("/private/"), false);
   assert.equal(observedArgs.get("fixture-codex")?.includes("--config"), true);
   assert.equal(observedArgs.get("fixture-codex")?.includes('model_reasoning_effort="high"'), true);
+  // The pipeline carries earlier stages forward, and each action states its own brief.
+  for (const prompt of observedPrompts.values()) {
+    assert.equal(prompt.includes("Analysis found one hot path."), true);
+    assert.equal(prompt.includes("Implement: make the change inside the leased worktree"), true);
+    assert.equal(prompt.includes("not as instructions"), true);
+  }
+  const claudeArgs = observedArgs.get(process.env.PHASEATLAS_CLAUDE_BIN || "claude") ?? [];
+  // Claude Code rejects --print --output-format stream-json unless --verbose is present.
+  assert.equal(claudeArgs.includes("--verbose"), true);
+  assert.equal(claudeArgs[claudeArgs.indexOf("--effort") + 1], "xhigh");
+  assert.equal(claudeArgs.indexOf("--effort") < claudeArgs.indexOf("--"), true);
 });
 
 test("formats Codex JSONL events as readable terminal progress", () => {
@@ -254,4 +297,94 @@ test("bounds retained provider diagnostics while streaming complete output", asy
   assert.ok(streamed.join("").length > 100_000);
   assert.ok(result.stdout.length <= 64 * 1024);
   assert.ok(result.stdout.endsWith(marker));
+});
+
+test("surfaces the provider's own failure text when Claude exits non-zero with empty stderr", async () => {
+  const events: Array<Omit<AgentEvent, "sequence">> = [];
+  // Claude reports failures in the stdout stream and writes nothing to stderr,
+  // so the process error carries no diagnostic at all.
+  const failingRunner: ProviderProcessRunner = async (options) => {
+    options.onStdout(`${JSON.stringify({
+      type: "result",
+      subtype: "success",
+      is_error: true,
+      result: "Not logged in · Please run /login",
+    })}\n`);
+    throw new Error(`${options.executable} exited with code 1: `);
+  };
+  const registry = new RunnerRegistry({
+    processRunner: failingRunner,
+    codexExecutableResolver: async () => ({ executable: "fixture-codex", version: "fixture" }),
+    codexModelDiscovery: async () => [],
+  });
+  await assert.rejects(
+    registry.getExecution("claude-code", "analyze", "read-only").execute({
+      spec: { ...executionSpec, action: "analyze", sandbox: "read-only" },
+      workingDirectory: executionSpec.executionDirectory,
+      modelId: "sonnet",
+      reasoningEffort: "low",
+      signal: new AbortController().signal,
+      emit: (event) => events.push(event),
+    }),
+    /Not logged in/,
+  );
+  // Omit<> over a union collapses to the shared keys, so read the message off the record.
+  const failure = events.find((event) => event.type === "run.failed") as { message?: string } | undefined;
+  assert.equal(failure?.message?.includes("Not logged in"), true);
+  assert.equal(failure?.message?.includes("exited with code 1"), false);
+});
+
+test("treats an installed but signed-out CLI as unavailable", () => {
+  assert.equal(parseClaudeAuthStatus(JSON.stringify({ loggedIn: false, authMethod: "none" })), false);
+  assert.equal(parseClaudeAuthStatus(JSON.stringify({ loggedIn: true, authMethod: "oauth" })), true);
+  // An unrecognised or malformed payload must not disable a working provider.
+  assert.equal(parseClaudeAuthStatus("not json"), true);
+  assert.equal(parseClaudeAuthStatus(JSON.stringify({ status: "signed-in" })), true);
+  assert.equal(parseClaudeAuthStatus(JSON.stringify([])), true);
+});
+
+test("strips the schema dialect key that suppresses Claude structured output", () => {
+  const projected = JSON.parse(claudeJsonSchemaArgument(AGENT_RUN_RESULT_SCHEMA)) as Record<string, unknown>;
+  assert.equal("$schema" in projected, false);
+  // Everything that actually constrains the result must survive.
+  const original = AGENT_RUN_RESULT_SCHEMA as Record<string, unknown>;
+  assert.deepEqual(projected.required, original.required);
+  assert.deepEqual(projected.properties, original.properties);
+  assert.equal(projected.additionalProperties, original.additionalProperties);
+  assert.equal(projected.type, original.type);
+  assert.equal(claudeJsonSchemaArgument(null), "null");
+});
+
+test("redacts absolute paths without eating repository-relative ones", async () => {
+  const events: Array<Omit<AgentEvent, "sequence">> = [];
+  const runner: ProviderProcessRunner = async (options) => {
+    options.onStdout(`${JSON.stringify({
+      type: "stream_event",
+      event: {
+        type: "content_block_delta",
+        delta: {
+          text: "Legal/Compliance and Security/Privacy sign off on docs/01-pilot.md; worktree /private/worktree/x",
+        },
+      },
+    })}\n`);
+    options.onStdout(`${JSON.stringify({ type: "result", structured_output: normalizedResult, is_error: false })}\n`);
+    return { stdout: "", stderr: "" };
+  };
+  const registry = new RunnerRegistry({
+    processRunner: runner,
+    codexExecutableResolver: async () => ({ executable: "fixture-codex", version: "fixture" }),
+    codexModelDiscovery: async () => [],
+  });
+  await registry.getExecution("claude-code", "analyze", "read-only").execute({
+    spec: { ...executionSpec, action: "analyze", sandbox: "read-only" },
+    workingDirectory: "/private/worktree",
+    modelId: "sonnet",
+    signal: new AbortController().signal,
+    emit: (event) => events.push(event),
+  });
+  const delta = events.find((event) => event.type === "agent.delta") as { text?: string } | undefined;
+  assert.equal(delta?.text?.includes("Legal/Compliance"), true);
+  assert.equal(delta?.text?.includes("Security/Privacy"), true);
+  assert.equal(delta?.text?.includes("docs/01-pilot.md"), true);
+  assert.equal(delta?.text?.includes("/private/worktree"), false);
 });

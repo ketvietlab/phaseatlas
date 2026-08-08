@@ -1,0 +1,103 @@
+{
+  "schemaVersion": "phaseatlas.theia-extensions/v1",
+  "extensions": [
+    {
+      "id": "vscode.typescript-language-features",
+      "version": "1.95.3",
+      "license": "SEE LICENSE IN LICENSE-vscode.txt",
+      "url": "https://open-vsx.org/api/vscode/typescript-language-features/1.95.3/file/vscode.typescript-language-features-1.95.3.vsix",
+      "sha256": "b1494642a46d1b139ab799e2ee0ae2453bdcef6ed1a718acca034445cfd9d87f"
+    },
+    {
+      "id": "vscode.css-language-features",
+      "version": "1.95.3",
+      "license": "SEE LICENSE IN LICENSE-vscode.txt",
+      "url": "https://open-vsx.org/api/vscode/css-language-features/1.95.3/file/vscode.css-language-features-1.95.3.vsix",
+      "sha256": "d4352f98bcffb5f27f4efabe797f9ce78042ec07a4037113c21e9d41348ed114"
+    },
+    {
+      "id": "vscode.html-language-features",
+      "version": "1.95.3",
+      "license": "SEE LICENSE IN LICENSE-vscode.txt",
+      "url": "https://open-vsx.org/api/vscode/html-language-features/1.95.3/file/vscode.html-language-features-1.95.3.vsix",
+      "sha256": "1968c387c20036da0636c45a00863d4a4be980033870bfde864e6e097b033b12"
+    },
+    {
+      "id": "vscode.json-language-features",
+      "version": "1.95.3",
+      "license": "SEE LICENSE IN LICENSE-vscode.txt",
+      "url": "https://open-vsx.org/api/vscode/json-language-features/1.95.3/file/vscode.json-language-features-1.95.3.vsix",
+      "sha256": "8436d6ffe294bfb93d517ca37c4913a40bb0e035883c7b6aed9daaf1a32f6b80"
+    },
+    {
+      "id": "vscode.markdown-language-features",
+      "version": "1.95.3",
+      "license": "SEE LICENSE IN LICENSE-vscode.txt",
+      "url": "https://open-vsx.org/api/vscode/markdown-language-features/1.95.3/file/vscode.markdown-language-features-1.95.3.vsix",
+      "sha256": "d2ba7aa2c1265e349862aa542a35daa45f81f2efbec8b51184d672999204d09e"
+    },
+    {
+      "id": "vscode.emmet",
+      "version": "1.95.3",
+      "license": "SEE LICENSE IN LICENSE-vscode.txt",
+      "url": "https://open-vsx.org/api/vscode/emmet/1.95.3/file/vscode.emmet-1.95.3.vsix",
+      "sha256": "a79634af8ed656fc2436ecc33e30a569ebbe5b1d9258fb90e0a73a90e0a89c32"
+    },
+    {
+      "id": "ms-python.python",
+      "version": "2026.4.0",
+      "license": "MIT",
+      "url": "https://open-vsx.org/api/ms-python/python/2026.4.0/file/ms-python.python-2026.4.0.vsix",
+      "sha256": "232aeafb01f069824fdd92d3e628c1c442bbcfa1d3cc945ff97076340bb2b4a6"
+    },
+    {
+      "id": "ms-pyright.pyright",
+      "version": "1.1.402",
+      "license": "MIT",
+      "url": "https://open-vsx.org/api/ms-pyright/pyright/1.1.402/file/ms-pyright.pyright-1.1.402.vsix",
+      "sha256": "7ffa5a8649fa800b282c25ad70ce290367e036238d52727da7cdcac3d57439e9"
+    },
+    {
+      "id": "golang.Go",
+      "version": "0.56.0",
+      "license": "MIT",
+      "url": "https://open-vsx.org/api/golang/Go/0.56.0/file/golang.Go-0.56.0.vsix",
+      "sha256": "9f5959fb17ba0a8dbd804387ddda50975fcaa9dd5267aa33eaaa89912072aacb"
+    },
+    {
+      "id": "rust-lang.rust-analyzer",
+      "version": "0.4.2998",
+      "license": "MIT OR Apache-2.0",
+      "url": "https://open-vsx.org/api/rust-lang/rust-analyzer/0.4.2998/file/rust-lang.rust-analyzer-0.4.2998.vsix",
+      "sha256": "cdc0972c160cdea7c6cf7b7742163a43c935ffe94ea1c8907d7b20d17310ae87"
+    },
+    {
+      "id": "redhat.java",
+      "version": "1.56.2026073008",
+      "license": "EPL-2.0",
+      "url": "https://open-vsx.org/api/redhat/java/1.56.2026073008/file/redhat.java-1.56.2026073008.vsix",
+      "sha256": "258206a78f5133430aece62194d7aa9b211b62096a4b6cdef42cb51ed54a3c6a"
+    },
+    {
+      "id": "llvm-vs-code-extensions.vscode-clangd",
+      "version": "0.6.0",
+      "license": "MIT",
+      "url": "https://open-vsx.org/api/llvm-vs-code-extensions/vscode-clangd/0.6.0/file/llvm-vs-code-extensions.vscode-clangd-0.6.0.vsix",
+      "sha256": "32030694fa6c0ef438f4e4219f84677cd32f603c7faa4c71a283efc1f5b51751"
+    },
+    {
+      "id": "redhat.vscode-yaml",
+      "version": "1.25.2026080108",
+      "license": "MIT",
+      "url": "https://open-vsx.org/api/redhat/vscode-yaml/1.25.2026080108/file/redhat.vscode-yaml-1.25.2026080108.vsix",
+      "sha256": "deef98c763427b689f3906515fc65affdf37685a31a47aa1c679ef164d2d9769"
+    },
+    {
+      "id": "bmewburn.vscode-intelephense-client",
+      "version": "1.18.5",
+      "license": "SEE LICENSE IN LICENSE.txt",
+      "url": "https://open-vsx.org/api/bmewburn/vscode-intelephense-client/1.18.5/file/bmewburn.vscode-intelephense-client-1.18.5.vsix",
+      "sha256": "124e5ad2b7478c52ba68e35629d6ab0c1871fa89012defda8984b1377ff6e618"
+    }
+  ]
+}

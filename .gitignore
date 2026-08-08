@@ -7,3 +7,5 @@ build/
 coverage/
 artifacts/
 
+ide/lib/
+ide/default-extensions/

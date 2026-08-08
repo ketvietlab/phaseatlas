@@ -106,7 +106,8 @@ test("executes writes only in a leased worktree and trusts Git-derived changes",
   assert.equal(validated.result.proposedTaskState, "done");
   await assert.rejects(access(path.join(runtime.root, "packages", "core", "output.ts")));
   assert.equal(await readFile(runtime.taskPath, "utf8"), taskBefore);
-  assert.equal(runtime.leases.list()[0]?.status, "released");
+  // A finished implementation run keeps its worktree so it can be pushed or turned into a pull request.
+  assert.equal(runtime.leases.list()[0]?.status, "retained");
   assert.equal(runtime.store.listRuns()[0]?.status, "completed");
   assert.equal(observedEvents.filter((type) => type === "agent.result").length, 1);
   runtime.store.close();
@@ -160,7 +161,7 @@ test("terminalizes a read-only run when Git baseline capture fails", async (cont
   runtime.store.close();
 });
 
-test("releases a write lease when execution fails", async (context) => {
+test("retains a write lease when execution fails so partial work survives", async (context) => {
   const runtime = await fixture(context);
   const adapter: AgentExecutionAdapter = {
     supportedSandboxes: ["workspace-write"],
@@ -169,7 +170,8 @@ test("releases a write lease when execution fails", async (context) => {
     },
   };
   await assert.rejects(runtime.scheduler.execute({ taskKey: "core/PHA-001", action: "implement" }, adapter, new AbortController().signal), /adapter failed/);
-  assert.equal(runtime.leases.list()[0]?.status, "released");
+  // Partial work from a failed run is exactly what a user needs to inspect, so it is retained too.
+  assert.equal(runtime.leases.list()[0]?.status, "retained");
   assert.equal(runtime.store.listRuns()[0]?.status, "failed");
   runtime.store.close();
 });

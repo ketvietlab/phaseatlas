@@ -76,6 +76,22 @@ function runCodexAppServerFixture(
   });
 }
 
+function extractPromptTextFromCodexTurnStart(turnStart: Record<string, unknown>): string {
+  const params = turnStart.params as { input?: Array<{ text?: string }> } | undefined;
+  const firstChunk = params?.input?.at(0);
+  if (!firstChunk || typeof firstChunk.text !== "string") throw new Error("Fixture did not provide a codex turn prompt.");
+  return firstChunk.text;
+}
+
+function extractTranscriptFromPrompt(prompt: string): unknown[] {
+  const start = prompt.lastIndexOf("\n[");
+  if (start === -1) return [];
+  const text = prompt.slice(start + 1).trim();
+  const parsed = JSON.parse(text) as unknown;
+  if (!Array.isArray(parsed)) throw new Error("Prompt transcript is invalid.");
+  return parsed;
+}
+
 test("persists provider-neutral chat sessions, messages, replay, and cancellation", async () => {
   const root = await fixtureRepository();
   const supportRoot = await mkdtemp(path.join(os.tmpdir(), "phaseatlas-chat-support-"));
@@ -123,7 +139,23 @@ test("persists provider-neutral chat sessions, messages, replay, and cancellatio
     title: "Architecture",
   });
   const second = await runtime.createSession({ runnerId: "codex-cli", model: "gpt-fixture" });
-  assert.equal(runtime.listSessions().length, 2);
+  // A task conversation is one thread: asking again returns the same session so the
+  // four pipeline stages and the user's questions never fork apart.
+  const taskSession = await runtime.createSession({
+    runnerId: "codex-cli",
+    model: "gpt-fixture",
+    taskKey: "core/PHA-100",
+    title: "Task thread",
+  });
+  assert.equal(taskSession.taskKey, "core/PHA-100");
+  const reopenedTaskSession = await runtime.createSession({
+    runnerId: "codex-cli",
+    model: "gpt-fixture",
+    taskKey: "core/PHA-100",
+  });
+  assert.equal(reopenedTaskSession.sessionId, taskSession.sessionId);
+  assert.equal(runtime.listSessions().filter((item) => item.taskKey === "core/PHA-100").length, 1);
+  assert.equal(runtime.listSessions().length, 3);
   assert.equal("taskKey" in first, false);
   assert.equal("workspaceSlug" in first, false);
   assert.equal(first.reasoningEffort, "high");
@@ -136,6 +168,36 @@ test("persists provider-neutral chat sessions, messages, replay, and cancellatio
     runtime.createSession({ runnerId: "codex-cli", model: "gpt-fixture", reasoningEffort: "ultra" }),
     /reasoning effort is not supported/,
   );
+
+  // Changing provider from the composer picker retargets the open conversation,
+  // and stays bound to the discovered catalog like session creation does.
+  const retargeted = await runtime.setSessionProvider({
+    sessionId: first.sessionId,
+    runnerId: "codex-cli",
+    model: "gpt-fixture",
+    reasoningEffort: "low",
+  });
+  assert.equal(retargeted.reasoningEffort, "low");
+  assert.equal(runtime.getSession(first.sessionId).reasoningEffort, "low");
+  await assert.rejects(
+    runtime.setSessionProvider({ sessionId: first.sessionId, runnerId: "codex-cli", model: "manually-entered" }),
+    /selected model is not present/,
+  );
+  await assert.rejects(
+    runtime.setSessionProvider({
+      sessionId: first.sessionId,
+      runnerId: "codex-cli",
+      model: "gpt-fixture",
+      reasoningEffort: "ultra",
+    }),
+    /reasoning effort is not supported/,
+  );
+  await runtime.setSessionProvider({
+    sessionId: first.sessionId,
+    runnerId: "codex-cli",
+    model: "gpt-fixture",
+    reasoningEffort: "high",
+  });
 
   const started = await runtime.send({
     sessionId: first.sessionId,
@@ -191,11 +253,68 @@ test("persists provider-neutral chat sessions, messages, replay, and cancellatio
 
   store.close();
   const reopened = new CheckoutOperationalStore(databasePath, checkoutId);
-  assert.equal(reopened.listChatSessions().length, 2);
+  assert.equal(reopened.listChatSessions().length, 3);
   assert.equal(reopened.getChatSession(first.sessionId).reasoningEffort, "high");
   assert.equal(reopened.listChatMessages(first.sessionId).length, 4);
   assert.equal(reopened.getChatTurn(blocked.turnId).status, "cancelled");
   assert.equal(reopened.getChatTurn(blocked.turnId).reasoningEffort, "high");
+  reopened.close();
+  await rm(root, { recursive: true, force: true });
+  await rm(supportRoot, { recursive: true, force: true });
+});
+
+test("compresses long chat history into summaries and sends compact prompts", async () => {
+  const root = await fixtureRepository();
+  const supportRoot = await mkdtemp(path.join(os.tmpdir(), "phaseatlas-chat-context-runtime-"));
+  const checkoutId = "c".repeat(20);
+  const databasePath = path.join(supportRoot, "operations.sqlite");
+  const store = new CheckoutOperationalStore(databasePath, checkoutId);
+  const turnStarts: Record<string, unknown>[] = [];
+  const processRunner: ProviderProcessRunner = async (options) => {
+    runCodexAppServerFixture(options, {
+      deltas: ["Ready", " context."],
+      onTurnStart: (request) => turnStarts.push(request),
+    });
+    return { stdout: "", stderr: "" };
+  };
+  const runnerOptions = {
+    processRunner,
+    codexExecutableResolver: async () => ({ executable: "fixture-codex", version: "fixture" }),
+    codexModelDiscovery: async () => [{
+      id: "gpt-fixture",
+      displayName: "GPT Fixture",
+      isDefault: true,
+      reasoningEfforts: ["low", "high"],
+      defaultReasoningEffort: "high",
+    }],
+  };
+  const runtime = new RepositoryChatRuntime(
+    store,
+    new RunnerRegistry(runnerOptions),
+    new RepositoryChatAdapterRegistry(runnerOptions),
+    root,
+    checkoutId,
+  );
+
+  const session = await runtime.createSession({ runnerId: "codex-cli", model: "gpt-fixture", reasoningEffort: "high" });
+  for (let index = 0; index < 22; index += 1) {
+    const started = await runtime.send({ sessionId: session.sessionId, text: `Question ${index}` });
+    await waitFor(() => ["completed", "failed", "cancelled", "interrupted"].includes(store.getChatTurn(started.turnId).status));
+  }
+
+  assert.equal(turnStarts.length, 22);
+  const promptWithoutSummary = extractPromptTextFromCodexTurnStart(turnStarts[19]!);
+  const promptWithSummary = extractPromptTextFromCodexTurnStart(turnStarts[20]!);
+  assert.equal(promptWithoutSummary.includes("Prior summary for context (compressed):"), false);
+  assert.equal(promptWithSummary.includes("Prior summary for context (compressed):"), true);
+  assert.equal(extractTranscriptFromPrompt(promptWithSummary).length <= 40, true);
+
+  store.close();
+  const reopened = new CheckoutOperationalStore(databasePath, checkoutId);
+  const persisted = reopened.getChatSessionContext(session.sessionId);
+  assert.ok(persisted);
+  assert.equal(typeof persisted.summary, "string");
+  assert.equal(persisted.summarizedThroughSequence > 0, true);
   reopened.close();
   await rm(root, { recursive: true, force: true });
   await rm(supportRoot, { recursive: true, force: true });

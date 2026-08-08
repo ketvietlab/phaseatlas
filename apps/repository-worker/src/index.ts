@@ -23,6 +23,7 @@ import type {
   RepositoryChatCreateInput,
   RepositoryChatAttachment,
   RepositoryChatImageMediaType,
+  RepositoryChatProviderInput,
   RepositoryChatRenameInput,
   RepositoryChatRetryInput,
   RepositoryChatSendInput,
@@ -96,6 +97,35 @@ const leaseManager = new WorktreeLeaseManager(canonicalRepositoryRoot, initialRe
 const executionScheduler = new AgentExecutionScheduler(inspector, operationalStore, leaseManager);
 const abandonedLeases = await leaseManager.reconcileAbandoned();
 const runners = new RunnerRegistry();
+// The canonical contract plus what the pipeline already concluded, so a question
+// asked in the task conversation is answered against the same facts a run sees.
+async function taskConversationContext(taskKey: string): Promise<string | undefined> {
+  try {
+    const snapshot = await inspector.taskSnapshot();
+    const task = snapshot.tasks.find((candidate) => canonicalAgentTaskKey(candidate) === taskKey);
+    if (!task) return undefined;
+    const stages = operationalStore.listAgentResultsForTask(taskKey, task.revision).map((stage) => ({
+      action: stage.action,
+      outcome: stage.result.result.outcome,
+      summary: stage.result.result.summary,
+      blockers: stage.result.result.blockers,
+      nextAction: stage.result.result.nextAction,
+    }));
+    return JSON.stringify({
+      taskKey,
+      taskRevision: task.revision,
+      title: task.title,
+      objective: task.objective,
+      state: task.state,
+      scope: task.scope,
+      acceptanceCriteria: task.acceptanceCriteria,
+      completedStages: stages,
+    }, null, 2);
+  } catch {
+    return undefined;
+  }
+}
+
 const chatRuntime = new RepositoryChatRuntime(
   operationalStore,
   runners,
@@ -103,6 +133,7 @@ const chatRuntime = new RepositoryChatRuntime(
   canonicalRepositoryRoot,
   initialRepository.checkoutId,
   (event) => send({ type: "chat.turn.event", payload: { turnId: event.turnId, event } }),
+  taskConversationContext,
 );
 const chatEditRuntime = new ChatEditRuntime(
   operationalStore,
@@ -176,7 +207,7 @@ function terminalCreateInput(value: unknown): Partial<TerminalCreateInput> {
 
 function chatCreateInput(value: unknown): RepositoryChatCreateInput {
   if (!isRecord(value)) throw new Error("Chat session input is required.");
-  const allowed = new Set(["runnerId", "model", "reasoningEffort", "title"]);
+  const allowed = new Set(["runnerId", "model", "reasoningEffort", "taskKey", "title"]);
   if (Object.keys(value).some((field) => !allowed.has(field))) throw new Error("Chat session input contains unsupported fields.");
   if (typeof value.runnerId !== "string" || typeof value.model !== "string") {
     throw new Error("runnerId and model are required.");
@@ -189,6 +220,7 @@ function chatCreateInput(value: unknown): RepositoryChatCreateInput {
     runnerId: value.runnerId,
     model: value.model,
     ...(typeof value.reasoningEffort === "string" ? { reasoningEffort: value.reasoningEffort.trim() } : {}),
+    ...(typeof value.taskKey === "string" && value.taskKey.trim() ? { taskKey: value.taskKey.trim() } : {}),
     ...(typeof value.title === "string" ? { title: value.title } : {}),
   };
 }
@@ -201,6 +233,24 @@ function chatRenameInput(value: unknown): RepositoryChatRenameInput {
     throw new Error("sessionId and title are required.");
   }
   return { sessionId: value.sessionId, title: value.title };
+}
+
+function chatProviderInput(value: unknown): RepositoryChatProviderInput {
+  const fields = ["sessionId", "runnerId", "model", "reasoningEffort"];
+  if (!isRecord(value) || Object.keys(value).some((field) => !fields.includes(field))) {
+    throw new Error("Chat provider input is invalid.");
+  }
+  if (typeof value.sessionId !== "string" || typeof value.runnerId !== "string" || typeof value.model !== "string") {
+    throw new Error("sessionId, runnerId, and model are required.");
+  }
+  return {
+    sessionId: value.sessionId,
+    runnerId: value.runnerId,
+    model: value.model,
+    ...(typeof value.reasoningEffort === "string" && value.reasoningEffort.trim()
+      ? { reasoningEffort: value.reasoningEffort.trim() }
+      : {}),
+  };
 }
 
 function chatSendInput(value: unknown): RepositoryChatSendInput {
@@ -1095,6 +1145,13 @@ async function dispatch(request: WorkerRequest): Promise<unknown> {
     }
     case "chat.session.rename":
       return chatRuntime.renameSession(chatRenameInput(requestParams(request).input));
+    case "agent-run.lease": {
+      const runId = requestParams(request).runId;
+      if (typeof runId !== "string" || !runId.trim()) throw new Error("runId is required.");
+      return leaseManager.list().find((lease) => lease.runId === runId) ?? null;
+    }
+    case "chat.session.provider":
+      return chatRuntime.setSessionProvider(chatProviderInput(requestParams(request).input));
     case "chat.session.close": {
       const sessionId = requestParams(request).sessionId;
       if (typeof sessionId !== "string") throw new Error("sessionId is required.");

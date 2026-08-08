@@ -1,5 +1,5 @@
 import { contextBridge, ipcRenderer } from "electron";
-import type { PhaseAtlasDesktopApi, PhaseAtlasDesktopEvent } from "@phaseatlas/contracts";
+import type { IdeSurfaceState, PhaseAtlasDesktopApi, PhaseAtlasDesktopEvent } from "@phaseatlas/contracts";
 
 const api: PhaseAtlasDesktopApi = {
   repositories: {
@@ -86,6 +86,7 @@ const api: PhaseAtlasDesktopApi = {
     listSessions: (checkoutId) => ipcRenderer.invoke("phaseatlas:chat:sessions:list", checkoutId),
     getSession: (checkoutId, sessionId) => ipcRenderer.invoke("phaseatlas:chat:sessions:get", checkoutId, sessionId),
     renameSession: (checkoutId, input) => ipcRenderer.invoke("phaseatlas:chat:sessions:rename", checkoutId, input),
+    setSessionProvider: (checkoutId, input) => ipcRenderer.invoke("phaseatlas:chat:sessions:provider", checkoutId, input),
     closeSession: (checkoutId, sessionId) => ipcRenderer.invoke("phaseatlas:chat:sessions:close", checkoutId, sessionId),
     listMessages: (checkoutId, sessionId) => ipcRenderer.invoke("phaseatlas:chat:messages:list", checkoutId, sessionId),
     listTurns: (checkoutId, sessionId) => ipcRenderer.invoke("phaseatlas:chat:turns:list", checkoutId, sessionId),
@@ -111,6 +112,20 @@ const api: PhaseAtlasDesktopApi = {
       const handler = (_event: Electron.IpcRendererEvent, payload: PhaseAtlasDesktopEvent) => listener(payload);
       ipcRenderer.on("phaseatlas:event", handler);
       return () => ipcRenderer.removeListener("phaseatlas:event", handler);
+    },
+  },
+  ide: {
+    open: (checkoutId, theme, runId) => ipcRenderer.invoke("phaseatlas:ide:open", checkoutId, theme, runId),
+    show: (key) => ipcRenderer.invoke("phaseatlas:ide:show", key),
+    hide: () => ipcRenderer.invoke("phaseatlas:ide:hide"),
+    close: (key) => ipcRenderer.invoke("phaseatlas:ide:close", key),
+    state: () => ipcRenderer.invoke("phaseatlas:ide:state"),
+    setViewport: (rect) => ipcRenderer.invoke("phaseatlas:ide:viewport", rect),
+    setTheme: (theme) => ipcRenderer.invoke("phaseatlas:ide:theme:set", theme),
+    onStateChanged: (listener) => {
+      const handler = (_event: Electron.IpcRendererEvent, state: IdeSurfaceState) => listener(state);
+      ipcRenderer.on("phaseatlas:ide:state", handler);
+      return () => ipcRenderer.removeListener("phaseatlas:ide:state", handler);
     },
   },
   runtime: {

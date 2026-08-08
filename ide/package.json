@@ -1,0 +1,6 @@
+{
+  "name": "@phaseatlas/ide-build",
+  "private": true,
+  "//": "Theia builds CommonJS. The repository root declares type: module, which would make Node treat ide/lib/**/*.js as ESM and fail on the first require(). This file scopes that back.",
+  "type": "commonjs"
+}

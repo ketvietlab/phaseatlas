@@ -8,6 +8,116 @@ may contain a documented breaking change.
 
 ## [Unreleased]
 
+### Added
+
+- The macOS bundle ships the IDE: the Theia build as `theia-ide`, the pinned extensions as
+  `theia-default-extensions`, and the IDE preload beside the desktop one. Packaging fails with an
+  actionable message when those inputs are missing, and bundle verification asserts all three.
+
+- The embedded IDE opens two kinds of workspace. The button beside Chat opens the canonical checkout;
+  a finished implementation run offers its retained worktree, which is where the agent's work and its
+  base revision actually are. Each target gets its own view, port and configuration, and a worktree
+  can only be opened while its lease is retained.
+
+- The IDE opens as a panel over the workspace, beside the sidebar, the way agent chat does — same
+  header, same close button, same `Esc`. Closing it only puts it away: each Theia backend keeps its
+  editors, terminals and language servers, so reopening is immediate, and stopping one is a separate,
+  deliberate act from the panel header. Several open workspaces appear as tabs in that header. When the
+  IDE has the keyboard, `Alt+Shift+P` closes the panel from inside it.
+
+- File paths cited by the model are clickable. A path in a result summary, next action, verification
+  note, blocker, evidence reference, or conversation reply opens that file in a panel on the right of
+  the run workbench, so a claim about the repository can be checked where it is made. Markdown opens
+  rendered, with a Preview and Source toggle.
+
+- The task conversation can change the repository: an Ask/Edit toggle in its composer runs the
+  existing confirmed, isolated, reviewed edit path, with accept and discard offered inline once the
+  edit completes.
+
+- A task conversation: one durable chat session bound to a canonical task, so the four pipeline
+  stages and the user's own questions share a single thread. Turns in that thread receive the task
+  contract and the results of completed stages as context. The run panel now shows that thread —
+  stages and questions interleaved in one transcript with a composer — in place of the per-run
+  command list.
+
+- Reasoning effort for Claude Code, discovered from the installed CLI's `--effort` levels and applied
+  to planning, execution, chat, and isolated chat edits. CLI builds without `--effort` keep the
+  control disabled instead of offering levels the binary would reject.
+- A provider picker in the chat composer. It collapses the selection to one button reading
+  `Claude / Sonnet / Medium`, and opens a searchable popover grouped by CLI with reasoning effort for
+  the chosen model. It reports the provider the open conversation will actually answer with, and a
+  change applies to that conversation and to the repository-wide selection at the same time.
+- `chat.setSessionProvider`, which retargets an open conversation after validating the selection
+  against the discovered catalog. Past turns keep the provider they were recorded with.
+
+- The task run panel now presents `analyze → plan → implement → review` as one connected pipeline
+  with per-stage state, a check mark on completed stages, and a "Start here" marker on the stage to
+  run next. It carries its own agent picker, which also moves the repository-wide selection.
+- Agent runs receive the results of earlier pipeline stages for the same task revision, and each
+  action states what it is for instead of relying on the model to infer it from an action name.
+
+### Fixed
+
+- The embedded IDE refused to start with EADDRINUSE. Its port reservation bound `localhost`, which
+  resolves to IPv6 here, while Theia binds `127.0.0.1` — so the check passed on a port that was
+  taken and the backend then died. It now reserves the address Theia actually uses.
+- A Theia backend outlived an app that was signalled rather than quit, and kept its port. The main
+  process now stops the IDE on SIGINT, SIGTERM and SIGHUP as well as before-quit.
+
+- Model prose that arrived with double-escaped newlines rendered as one paragraph with literal `\n`
+  sequences in it. Such a field is now repaired at render time, leaving the persisted result
+  untouched, and only when the text contains no real newline at all — a text that already breaks
+  lines and also mentions the sequence is describing it, not escaping it.
+
+- Agent narration and chat answers were mangled: the sanitizer treated a slash anywhere in a word as
+  the start of an absolute path, so `Legal/Compliance` became `Legal<path>` and `docs/01-pilot.md`
+  became `docs<path>` — redacting exactly the repository-relative paths the run contract requires a
+  result to carry. Redaction is now anchored to the start of a token.
+
+- Claude Code runs completed their work and then failed with a JSON parse error. The agent result
+  schema carries a `$schema` dialect key, and Claude Code silently abandons structured output when it
+  is present — the run returned prose instead. The key is now dropped before the schema is handed to
+  the CLI.
+
+- Claude Code always reported itself as signed out inside PhaseAtlas, even for a signed-in user. The
+  repository worker's environment allowlist dropped `USER`, which the CLI needs to resolve its stored
+  credentials, so no Claude Code run could ever authenticate.
+
+- Claude Code was offered as an available provider, with a full model catalog, while signed out —
+  its version and model discovery never needed authentication, so every run failed at sign-in
+  instead. Discovery now probes `claude auth status` and reports the runner as unavailable with the
+  reason.
+- A failing Claude Code run reported only "exited with code 1:" with no reason. Claude writes its
+  failure into the stdout stream and leaves stderr empty, so the diagnostic it already parsed was
+  discarded in favour of an empty process error.
+- Every Claude Code invocation failed with "When using --print, --output-format=stream-json requires
+  --verbose". Planning, execution, chat, and isolated chat edits now pass the required flag.
+
+### Removed
+
+- The close button PhaseAtlas injected into Theia's DOM, and the IDE's separate always-on-top child
+  window. The button landed on top of Theia's own top-right controls, the padding meant to reserve
+  room for it applied to a panel Theia hides by default, and both the injection and the close call
+  failed silently — leaving no way out of an IDE that covers the window it is parented to. The IDE
+  panel replaces it, so nothing is injected into Theia at all.
+
+- The chat composer's "Files & folders" and "Images" buttons. Context is attached by typing `@` and
+  by pasting images, which both already worked and are the only supported mechanisms now.
+
+### Changed
+
+- Model prose is rendered as Markdown wherever it appears — the validated result summary, next
+  action, verification details and blockers, and the task conversation — so a path written as
+  `infra/identity/login/` reads as code instead of showing its backticks. Links never resolve and
+  images are never fetched, matching how the chat transcript already treats untrusted model output.
+
+- Split the repository agent selector into separate model and reasoning-effort controls instead of one
+  combined dropdown whose options multiplied every model by every effort level.
+- Reasoning effort is now disabled with an explicit reason for providers that do not expose it, and
+  provider summaries no longer claim a "default effort" for those providers.
+- The chat header no longer carries a provider chip that showed the repository-bar selection while
+  turns ran on the conversation's own provider. The composer picker replaces it.
+
 ## [0.1.0] - 2026-08-04
 
 ### Added

@@ -38,6 +38,7 @@ import {
   type RepositoryChatCreateInput,
   type RepositoryChatEventPage,
   type RepositoryChatMessage,
+  type RepositoryChatProviderInput,
   type RepositoryChatRenameInput,
   type RepositoryChatRetryInput,
   type RepositoryChatSendInput,
@@ -46,6 +47,7 @@ import {
   type RepositorySummary,
   type RepositoryWorkerMethod,
   type RunnerDescriptor,
+  type WorktreeLeaseRecord,
   type TaskContentEvent,
   type TaskContentRunSummary,
   type TaskContentStartInput,
@@ -110,6 +112,11 @@ function workerEnvironment(repositoryPath: string, checkoutStorePath: string): R
   const allowedKeys = [
     "PATH",
     "HOME",
+    // Claude Code resolves its stored credentials through the account identity,
+    // so stripping USER leaves the CLI reporting itself as signed out even when
+    // the user is signed in. LOGNAME is its POSIX twin.
+    "USER",
+    "LOGNAME",
     "SHELL",
     "TMPDIR",
     "SSH_AUTH_SOCK",
@@ -411,6 +418,14 @@ export class RepositoryProcessManager {
     return this.catalog.get(checkoutId) as RepositorySummary;
   }
 
+  // The IDE needs the canonical path and name of a registered checkout without
+  // starting or touching its worker.
+  describe(checkoutId: string): RepositorySummary {
+    const entry = this.catalog.get(checkoutId);
+    if (!entry) throw new Error("Repository is not in the local catalog.");
+    return entry;
+  }
+
   list(): RepositorySummary[] {
     return this.catalog.listVisible();
   }
@@ -458,6 +473,10 @@ export class RepositoryProcessManager {
 
   async saveFile(checkoutId: string, filePath: string, content: string): Promise<void> {
     await (await this.ensureWorker(checkoutId)).call<void>("file.save", { path: filePath, content });
+  }
+
+  async leaseForRun(checkoutId: string, runId: string): Promise<WorktreeLeaseRecord | null> {
+    return (await this.ensureWorker(checkoutId)).call<WorktreeLeaseRecord | null>("agent-run.lease", { runId });
   }
 
   async listRunners(checkoutId: string): Promise<RunnerDescriptor[]> {
@@ -572,6 +591,10 @@ export class RepositoryProcessManager {
 
   async renameChatSession(checkoutId: string, input: RepositoryChatRenameInput): Promise<RepositoryChatSession> {
     return (await this.ensureWorker(checkoutId)).call<RepositoryChatSession>("chat.session.rename", { input });
+  }
+
+  async setChatSessionProvider(checkoutId: string, input: RepositoryChatProviderInput): Promise<RepositoryChatSession> {
+    return (await this.ensureWorker(checkoutId)).call<RepositoryChatSession>("chat.session.provider", { input });
   }
 
   async closeChatSession(checkoutId: string, sessionId: string): Promise<RepositoryChatSession> {

@@ -34,6 +34,9 @@ export async function verifyBundleLayout(candidate = applicationPath) {
     "app/package.json",
     "app/desktop/main.js",
     "app/desktop/preload.cjs",
+    "app/desktop/theia-preload.cjs",
+    "theia-ide/lib/backend/main.js",
+    "theia-default-extensions/manifest.json",
     "repository-worker/index.js",
     "ui/build/index.html",
     "ui/build/assets/phaseatlas-logo-mark.png",
@@ -111,7 +114,14 @@ export async function verifyBundleLayout(candidate = applicationPath) {
     if (await sha256(filePath) !== digest) throw new Error(`Bundle manifest digest mismatch for ${relative}.`);
   }
   const privateFilePattern = /(^|\/)(?:\.env(?:\.|$)|credentials?(?:\.|$)|secrets?(?:\.|$)|.*\.(?:pem|p12|pfx|key))$/i;
-  const customRoots = ["app", "repository-worker", "ui", "node_modules/node-pty"];
+  const customRoots = [
+    "app",
+    "repository-worker",
+    "ui",
+    "theia-ide",
+    "theia-default-extensions",
+    "node_modules/node-pty",
+  ];
   for (const customRoot of customRoots) {
     for (const relative of await filesBelow(path.join(resources, customRoot))) {
       if (privateFilePattern.test(relative)) throw new Error(`Credential-like file was embedded in the artifact: ${customRoot}/${relative}.`);

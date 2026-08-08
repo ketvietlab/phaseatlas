@@ -3,14 +3,20 @@
   import RepositoryWorkbench from "$lib/RepositoryWorkbench.svelte";
   import RepositoryChatWorkspace from "$lib/RepositoryChatWorkspace.svelte";
   import TerminalPanel from "$lib/TerminalPanel.svelte";
+  import ProviderPicker from "$lib/ProviderPicker.svelte";
+  import TaskConversation from "$lib/TaskConversation.svelte";
+  import ModelMarkdown from "$lib/ModelMarkdown.svelte";
   import TaskContentPanel from "$lib/TaskContentPanel.svelte";
   import TaskMap from "$lib/TaskMap.svelte";
+  import IdeWorkspaceLayer from "$lib/IdeWorkspaceLayer.svelte";
   import type {
     AgentResultReview,
     AgentRunAction,
     AgentRunActionAvailability,
     AgentRunSummary,
     CanonicalTask,
+    IdeSurfaceState,
+    IdeViewportRect,
     PersistedRunEvent,
     PlanningProposalSet,
     PlanningStatus,
@@ -115,6 +121,17 @@
   let contentFailures: Record<string, string> = {};
   let openEditorAfterTask: Record<string, boolean> = {};
   let executionOpen = false;
+  const PIPELINE_ACTIONS: AgentRunAction[] = ["analyze", "plan", "implement", "review"];
+  let ideOpening = false;
+  let ideError = "";
+  let ideState: IdeSurfaceState = { targets: [], visibleKey: null };
+  let ideOpen = false;
+  let openedFilePath = "";
+  let openedFileContent = "";
+  let openedFileError = "";
+  let openedFileLoading = false;
+  let openedFileRequest = 0;
+  let openedFileMode: "preview" | "source" = "preview";
   let executionActions: AgentRunActionAvailability[] = [];
   let executionActionsLoading = false;
   let executionError = "";
@@ -166,7 +183,48 @@
   $: selectedModels = selectedRunner?.models ?? [];
   $: selectedProviderModel = selectedModels.find((model) => model.id === plannerModel);
   $: selectedReasoningEfforts = selectedProviderModel?.reasoningEfforts ?? [];
-  $: selectedModelEffortValue = modelEffortValue(plannerModel, plannerReasoningEffort);
+  $: reasoningEffortSupported = selectedReasoningEfforts.length > 0;
+  // One ordered pipeline per task. A stage counts as done only when a completed
+  // run exists for this exact task revision — an older revision is a stale claim,
+  // not progress. The entry point is the first stage that is not yet done.
+  $: openedFileIsMarkdown = /\.mdx?$/i.test(openedFilePath);
+  $: pipelineRuns = selectedTask
+    ? agentRuns.filter((run) => run.taskKey === canonicalTaskKey(selectedTask))
+    : [];
+  $: pipelineDraft = PIPELINE_ACTIONS.map((action) => {
+    const availability = executionActions.find((candidate) => candidate.action === action)
+      ?? { action, sandbox: action === "implement" ? "workspace-write" as const : "read-only" as const, available: false, blockingReasons: [] };
+    const runs = pipelineRuns.filter((run) => run.action === action);
+    const active = runs.some((run) => run.status === "starting" || run.status === "running");
+    const done = runs.some((run) => run.status === "completed" && run.taskRevision === selectedTask?.revision);
+    const stale = !done && runs.some((run) => run.status === "completed");
+    const state = active ? "running" : done ? "done" : stale ? "stale" : availability.available ? "ready" : "blocked";
+    return {
+      action,
+      availability,
+      state,
+      stateLabel: active
+        ? "Running"
+        : done
+          ? "Completed"
+          : stale
+            ? "Superseded by a task edit"
+            : availability.available
+              ? availability.sandbox === "workspace-write" ? "Ready · isolated worktree" : "Ready · read-only"
+              : availability.blockingReasons[0] ?? "Not available",
+      isEntry: false,
+    };
+  });
+  // A superseded stage still needs redoing, so it is a valid entry. While a stage
+  // is running there is no entry at all — pointing further down the pipeline would
+  // invite the user to start the next stage without its input.
+  $: entryStageIndex = pipelineDraft.some((stage) => stage.state === "running")
+    ? -1
+    : pipelineDraft.findIndex((stage) => stage.state === "ready" || stage.state === "stale");
+  $: pipelineStages = pipelineDraft.map((stage, index) => ({ ...stage, isEntry: index === entryStageIndex }));
+  $: pipelineBlocker = entryStageIndex < 0
+    ? pipelineStages.find((stage) => stage.state === "blocked")?.availability.blockingReasons[0] ?? ""
+    : "";
   $: providerSelectionReady = Boolean(
     selectedRunner?.available && selectedProviderModel &&
     (!plannerReasoningEffort || selectedReasoningEfforts.includes(plannerReasoningEffort)),
@@ -242,6 +300,9 @@
       }
     });
     const unsubscribeCloseSurface = window.phaseatlas.runtime.onCloseSurface(closeCurrentSurface);
+    // The main process also changes this on its own — a Theia backend that dies
+    // has to disappear from the strip without the renderer having asked.
+    const unsubscribeIde = window.phaseatlas.ide.onStateChanged((state) => (ideState = state));
 
     void initialize();
     return () => {
@@ -249,6 +310,7 @@
       window.clearInterval(planningClockTimer);
       unsubscribe();
       unsubscribeCloseSurface();
+      unsubscribeIde();
     };
   });
 
@@ -530,21 +592,148 @@
     if (executionOpen && selectedTask) void loadExecutionActions(selectedTask);
   }
 
-  function modelEffortValue(modelId: string, reasoningEffort: string): string {
-    return `${encodeURIComponent(modelId)}|${encodeURIComponent(reasoningEffort)}`;
+  // Shared by the repository bar and the chat composer picker: one repository-wide
+  // selection, persisted per checkout, regardless of which surface changed it.
+  function applyProviderSelection(nextRunnerId: string, nextModelId: string, nextReasoningEffort: string) {
+    const runner = runners.find((candidate) => candidate.id === nextRunnerId);
+    const model = runner?.models.find((candidate) => candidate.id === nextModelId);
+    if (!runner || !model) return;
+    plannerRunnerId = nextRunnerId;
+    plannerModel = nextModelId;
+    plannerReasoningEffort = nextReasoningEffort && model.reasoningEfforts.includes(nextReasoningEffort)
+      ? nextReasoningEffort
+      : "";
+    persistRepositoryProviderSettings();
+    if (executionOpen && selectedTask) void loadExecutionActions(selectedTask);
   }
 
-  function selectProviderModelEffort(value: string) {
-    const separator = value.indexOf("|");
-    if (separator < 0) return;
-    const modelId = decodeURIComponent(value.slice(0, separator));
-    const reasoningEffort = decodeURIComponent(value.slice(separator + 1));
-    const model = selectedModels.find((candidate) => candidate.id === modelId);
-    if (!model || reasoningEffort && !model.reasoningEfforts.includes(reasoningEffort)) return;
+  function selectProviderModel(modelId: string) {
+    if (!selectedModels.some((candidate) => candidate.id === modelId)) return;
     plannerModel = modelId;
+    plannerReasoningEffort = defaultReasoningEffort(modelId);
+    persistRepositoryProviderSettings();
+    if (executionOpen && selectedTask) void loadExecutionActions(selectedTask);
+  }
+
+  function selectProviderReasoningEffort(reasoningEffort: string) {
+    if (reasoningEffort && !selectedReasoningEfforts.includes(reasoningEffort)) return;
     plannerReasoningEffort = reasoningEffort;
     persistRepositoryProviderSettings();
     if (executionOpen && selectedTask) void loadExecutionActions(selectedTask);
+  }
+
+  // A path cited in a result or an answer is a claim about this repository; opening
+  // it lets the user check the claim without leaving the run panel.
+  async function openRepositoryPathInEditor(repositoryPath: string) {
+    if (!window.phaseatlas || !selectedCheckoutId || !repositoryPath) return;
+    const requestId = ++openedFileRequest;
+    openedFilePath = repositoryPath;
+    openedFileContent = "";
+    openedFileError = "";
+    openedFileLoading = true;
+    try {
+      const document = await window.phaseatlas.files.read(selectedCheckoutId, repositoryPath);
+      if (requestId !== openedFileRequest) return;
+      openedFilePath = document.path;
+      openedFileContent = document.content;
+      openedFileMode = "preview";
+    } catch (error) {
+      if (requestId !== openedFileRequest) return;
+      openedFileError = error instanceof Error ? error.message : "The file could not be opened.";
+    } finally {
+      if (requestId === openedFileRequest) openedFileLoading = false;
+    }
+  }
+
+  function closeOpenedFile() {
+    openedFileRequest += 1;
+    openedFilePath = "";
+    openedFileContent = "";
+    openedFileError = "";
+    openedFileLoading = false;
+  }
+
+  // The IDE panel is a surface like chat: it opens over the workspace, right of
+  // the sidebar. The Theia view itself is native, so the panel only reserves the
+  // rectangle and the main process paints into it. Repo home opens the canonical
+  // checkout; a stage opens the worktree it produced.
+  async function openRunWorktreeInIde(runId: string) {
+    if (!window.phaseatlas || !selectedCheckoutId || ideOpening) return;
+    revealIdeSurface();
+    ideOpening = true;
+    ideError = "";
+    try {
+      // The panel measures itself first, so the view has somewhere to go before
+      // it exists and never appears at the wrong size.
+      await tick();
+      ideState = await window.phaseatlas.ide.open(selectedCheckoutId, theme === "dark" ? "dark" : "light", runId);
+    } catch (error) {
+      ideError = error instanceof Error ? error.message : "The run worktree could not be opened.";
+      executionError = ideError;
+    } finally {
+      ideOpening = false;
+    }
+  }
+
+  async function openEmbeddedIde() {
+    if (!window.phaseatlas || !selectedCheckoutId || ideOpening) return;
+    if (ideOpen) {
+      closeIdeSurface();
+      return;
+    }
+    revealIdeSurface();
+    ideOpening = true;
+    ideError = "";
+    try {
+      await tick();
+      ideState = await window.phaseatlas.ide.open(selectedCheckoutId, theme === "dark" ? "dark" : "light");
+    } catch (error) {
+      ideError = error instanceof Error ? error.message : "The embedded IDE could not be opened.";
+    } finally {
+      ideOpening = false;
+    }
+  }
+
+  // The IDE covers the same area as chat and the explorer, so opening it closes
+  // them, exactly as opening either of those closes the others.
+  function revealIdeSurface() {
+    chatOpen = false;
+    ideError = "";
+    ideOpen = true;
+  }
+
+  // Closing the panel never stops a backend — reopening it is immediate. The
+  // header's Stop button is the deliberate act that frees the Theia process.
+  function closeIdeSurface() {
+    ideOpen = false;
+    void window.phaseatlas?.ide.hide().then((state) => (ideState = state)).catch(() => undefined);
+  }
+
+  async function showIdeTarget(key: string) {
+    if (!window.phaseatlas) return;
+    try {
+      ideState = await window.phaseatlas.ide.show(key);
+    } catch (error) {
+      ideError = error instanceof Error ? error.message : "That IDE workspace could not be shown.";
+      ideState = await window.phaseatlas.ide.state();
+    }
+  }
+
+  async function stopIdeTarget(key: string) {
+    if (!window.phaseatlas) return;
+    try {
+      ideState = await window.phaseatlas.ide.close(key);
+    } catch (error) {
+      ideError = error instanceof Error ? error.message : "That IDE workspace could not be stopped.";
+      ideState = await window.phaseatlas.ide.state();
+    }
+    // Nothing left to show means the panel is an empty frame; close it.
+    if (ideState.targets.length === 0) ideOpen = false;
+    else if (ideState.visibleKey === null && ideState.targets[0]) await showIdeTarget(ideState.targets[0].key);
+  }
+
+  function reportIdeViewport(rect: IdeViewportRect) {
+    void window.phaseatlas?.ide.setViewport(rect).catch(() => undefined);
   }
 
   async function revealAgentConfiguration() {
@@ -560,18 +749,27 @@
     errorMessage = "";
     try {
       const repository = await window.phaseatlas.repositories.refresh(checkoutId);
-      const [nextWorkspaces, nextTaskSnapshot] = await Promise.all([
+      // Provider availability is discovered, not static: a CLI can be installed,
+      // signed in, or upgraded while the repository stays open. Refresh has to
+      // re-probe, otherwise fixing a sign-in requires reopening the repository.
+      const [nextWorkspaces, nextTaskSnapshot, nextRunners] = await Promise.all([
         window.phaseatlas.workspaces.list(checkoutId),
         window.phaseatlas.tasks.snapshot(checkoutId),
+        window.phaseatlas.runners.list(checkoutId),
       ]);
       repositories = repositories.map((item) => item.checkoutId === checkoutId ? repository : item);
       workspaces = nextWorkspaces;
       taskSnapshot = nextTaskSnapshot;
+      runners = nextRunners;
+      applyRepositoryProviderSettings(checkoutId);
       const workspaceSlug = nextWorkspaces.some((item) => item.slug === selectedWorkspaceSlug)
         ? selectedWorkspaceSlug
         : nextWorkspaces[0]?.slug ?? "";
       selectWorkspace(workspaceSlug, selectedTaskKey);
-      if (executionOpen) await loadAgentRuns(selectedAgentRunId);
+      if (executionOpen) {
+        await loadAgentRuns(selectedAgentRunId);
+        await loadTaskConversationEvents();
+      }
     } catch (error) {
       errorMessage = error instanceof Error ? error.message : "The repository could not be refreshed.";
     } finally {
@@ -707,6 +905,9 @@
   function openRepositoryEditor(path = "") {
     contentPanelTaskKey = "";
     editorInitialPath = path;
+    // Like chat, the IDE panel is only deactivated by the explorer, not closed:
+    // it comes back when the explorer does. Being inactive reports an empty
+    // rectangle, which takes the native Theia view down with it.
     editorOpen = true;
   }
 
@@ -753,6 +954,7 @@
       task ? loadExecutionActions(task) : Promise.resolve(),
     ]);
     if (selectedAgentRunId) await selectAgentRun(selectedAgentRunId);
+    await loadTaskConversationEvents();
   }
 
   function closeExecutionWorkbench() {
@@ -861,6 +1063,15 @@
       if (selectedTask) await loadExecutionActions(selectedTask);
     } finally {
       executionStartingAction = "";
+    }
+  }
+
+  // The task conversation renders every stage, not just the selected run, so the
+  // transcript needs each stage's events rather than only the focused one.
+  async function loadTaskConversationEvents() {
+    for (const run of pipelineRuns) {
+      if (agentEvents[run.runId]?.length) continue;
+      await reconcileAgentEvents(run.runId).catch(() => undefined);
     }
   }
 
@@ -1415,11 +1626,16 @@
   function setTheme(nextTheme: "light" | "dark") {
     theme = nextTheme;
     document.documentElement.dataset.theme = nextTheme;
+    void window.phaseatlas?.ide.setTheme(nextTheme === "dark" ? "dark" : "light").catch(() => undefined);
     localStorage.setItem("phaseatlas-theme", nextTheme);
   }
 
   function closeCurrentSurface() {
-    if (terminalOpen && terminalPanel?.hasFocus()) {
+    // The IDE goes first: it is the only surface that can hold the keyboard
+    // itself, so a close request arriving while it is open came from inside it.
+    if (ideOpen) {
+      closeIdeSurface();
+    } else if (terminalOpen && terminalPanel?.hasFocus()) {
       void closeTerminal();
     } else if (editorOpen) {
       repositoryWorkbench?.closeActiveSurface();
@@ -1462,6 +1678,7 @@
     if (chatShortcut && !event.repeat && selectedCheckoutId) {
       if (!editorOpen && (chatOpen || (!executionOpen && !plannerOpen && !contentPanelTask))) {
         event.preventDefault();
+        if (!chatOpen && ideOpen) closeIdeSurface();
         chatOpen = !chatOpen;
       }
       return;
@@ -1498,7 +1715,8 @@
     if (event.key !== "Escape") return;
     if (terminalOpen && terminalPanel?.hasFocus()) return;
     if (editorOpen) return;
-    if (chatOpen) chatOpen = false;
+    if (ideOpen) closeIdeSurface();
+    else if (chatOpen) chatOpen = false;
     else if (executionConfirmAction) {
       executionConfirmAction = null;
       executionScopeConfirmed = false;
@@ -1592,12 +1810,28 @@
           aria-label={`${chatActive ? "Close" : "Open"} repository agent chat`}
           aria-pressed={chatActive}
           title={`Toggle agent chat (${chatShortcutLabel})`}
-          onclick={() => chatOpen = !chatOpen}
+          onclick={() => {
+            if (!chatOpen && ideOpen) closeIdeSurface();
+            chatOpen = !chatOpen;
+          }}
           disabled={!selectedCheckoutId}
         >
           <svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M5 5h14v10H9l-4 4z"/><path d="M9 9h6M9 12h4"/></svg>
           <span>Chat</span>
           <kbd>{chatShortcutLabel}</kbd>
+        </button>
+        <button
+          class:active={ideOpen && !editorOpen}
+          class="terminal-toggle"
+          type="button"
+          aria-label={`${ideOpen ? "Close" : "Open"} the embedded IDE`}
+          aria-pressed={ideOpen}
+          title={ideError || `${ideOpen ? "Close" : "Open"} the embedded IDE`}
+          onclick={openEmbeddedIde}
+          disabled={!selectedCheckoutId || ideOpening}
+        >
+          <svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="4" width="18" height="16" rx="2"/><path d="M3 9h18"/><path d="m8 13 2 2-2 2M13 17h4"/></svg>
+          <span>{ideOpening ? "Opening…" : "IDE"}</span>
         </button>
         <button
           class:active={editorOpen}
@@ -1671,17 +1905,33 @@
                   {/each}
                 </select>
               </label>
-              <label>
-                <span class="sr-only">Model and reasoning effort</span>
-                <select value={selectedModelEffortValue} onchange={(event) => selectProviderModelEffort(event.currentTarget.value)} disabled={!selectedModels.length} aria-label="Model and reasoning effort" title="Model and reasoning effort">
+              <label class="provider-quick-model">
+                <span class="sr-only">Model</span>
+                <select value={plannerModel} onchange={(event) => selectProviderModel(event.currentTarget.value)} disabled={!selectedModels.length} aria-label="Model" title="Model">
                   {#each selectedModels as model}
-                    <optgroup label={model.displayName}>
-                      <option value={modelEffortValue(model.id, "")}>{model.displayName} · Provider default</option>
-                      {#each model.reasoningEfforts as effort}
-                        <option value={modelEffortValue(model.id, effort)}>{model.displayName} · {effort} effort{effort === model.defaultReasoningEffort ? " · default" : ""}</option>
-                      {/each}
-                    </optgroup>
+                    <option value={model.id}>{model.displayName}{model.isDefault ? " · default" : ""}</option>
                   {/each}
+                </select>
+              </label>
+              <label class="provider-quick-effort">
+                <span class="sr-only">Reasoning effort</span>
+                <select
+                  value={plannerReasoningEffort}
+                  onchange={(event) => selectProviderReasoningEffort(event.currentTarget.value)}
+                  disabled={!reasoningEffortSupported}
+                  aria-label="Reasoning effort"
+                  title={reasoningEffortSupported
+                    ? "Reasoning effort"
+                    : `${selectedProviderModel?.displayName ?? "This model"} does not expose reasoning effort`}
+                >
+                  {#if reasoningEffortSupported}
+                    <option value="">Provider default</option>
+                    {#each selectedReasoningEfforts as effort}
+                      <option value={effort}>{effort}{effort === selectedProviderModel?.defaultReasoningEffort ? " · default" : ""}</option>
+                    {/each}
+                  {:else}
+                    <option value="">No effort control</option>
+                  {/if}
                 </select>
               </label>
             </div>
@@ -1965,32 +2215,73 @@
               <div><p class="eyebrow">Selected task</p><h3 id="execution-task-title">{selectedTask.key.taskId} · {selectedTask.title}</h3><p>{selectedTask.objective}</p></div>
               <code>{selectedTask.revision.slice(0, 10)}</code>
             </header>
-            <div class="execution-action-grid" aria-busy={executionActionsLoading}>
+            <div class="pipeline-provider">
+              <span>Agent</span>
+              <ProviderPicker
+                {runners}
+                runnerId={plannerRunnerId}
+                modelId={plannerModel}
+                reasoningEffort={plannerReasoningEffort}
+                disabled={Boolean(executionStartingAction)}
+                placement="down"
+                onSelect={applyProviderSelection}
+              />
+              <small>Applies to this run and to every repository selection</small>
+            </div>
+            <ol class="pipeline" aria-busy={executionActionsLoading} aria-label="Task run pipeline">
               {#if executionActionsLoading}
-                <div class="execution-actions-loading"><span class="task-content-spinner"></span>Evaluating provider and task policy…</div>
+                <li class="execution-actions-loading"><span class="task-content-spinner"></span>Evaluating provider and task policy…</li>
               {:else}
-                {#each executionActions as availability}
-                  <div class="execution-action-slot">
+                {#each pipelineStages as stage, index}
+                  <li class="pipeline-stage" data-state={stage.state}>
+                    {#if index > 0}<span class="pipeline-arrow" aria-hidden="true"></span>{/if}
                     <button
-                      class:write-action={availability.sandbox === "workspace-write"}
-                      class="execution-action"
+                      class="pipeline-node"
                       type="button"
-                      disabled={!availability.available || Boolean(executionStartingAction)}
-                      title={availability.blockingReasons.join(" ")}
-                      onclick={() => requestAgentAction(availability)}
+                      disabled={!stage.availability.available || Boolean(executionStartingAction)}
+                      aria-label={`${actionLabel(stage.action)} — ${stage.stateLabel}`}
+                      title={stage.availability.blockingReasons.join(" ") || stage.stateLabel}
+                      onclick={() => requestAgentAction(stage.availability)}
                     >
-                      <span class="execution-action-icon" aria-hidden="true"><svg class="icon" viewBox="0 0 24 24"><path d={availability.action === "implement" ? "M5 19 19 5M14 5h5v5M5 14v5h5" : availability.action === "review" ? "M4 5h16v14H4zM8 10l2 2 5-5" : availability.action === "plan" ? "M5 6h14M5 12h9M5 18h11" : "M4 12h16M12 4v16M7 7l10 10M17 7 7 17"}/></svg></span>
-                      <span><strong>{executionStartingAction === availability.action ? "Starting…" : actionLabel(availability.action)}</strong><small>{availability.sandbox === "workspace-write" ? "Isolated worktree" : "Read-only checkout"}</small></span>
-                      <i data-available={availability.available}></i>
+                      <span class="pipeline-mark" aria-hidden="true">
+                        {#if stage.state === "done"}
+                          <svg viewBox="0 0 24 24"><path d="m5 13 4 4 10-10"/></svg>
+                        {:else if stage.state === "running"}
+                          <span class="task-content-spinner"></span>
+                        {:else if stage.state === "blocked"}
+                          <svg viewBox="0 0 24 24"><rect x="5" y="11" width="14" height="9" rx="1"/><path d="M8 11V8a4 4 0 0 1 8 0v3"/></svg>
+                        {:else}
+                          <span class="pipeline-index">{index + 1}</span>
+                        {/if}
+                      </span>
+                      <span class="pipeline-copy">
+                        <strong>{executionStartingAction === stage.action ? "Starting…" : actionLabel(stage.action)}</strong>
+                        <small>{stage.stateLabel}</small>
+                      </span>
                     </button>
-                    {#if !availability.available && availability.blockingReasons.length}
-                      <p class="execution-action-reason"><strong>Blocked:</strong> {availability.blockingReasons[0]}</p>
-                    {/if}
-                  </div>
+                    {#if stage.isEntry}<span class="pipeline-entry">Start here</span>{/if}
+                  </li>
                 {/each}
               {/if}
-            </div>
+            </ol>
+            {#if pipelineBlocker}
+              <p class="execution-action-reason"><strong>Blocked:</strong> {pipelineBlocker}</p>
+            {/if}
           </section>
+          <div class="execution-journal">
+            <TaskConversation
+              checkoutId={selectedCheckoutId}
+              taskKey={canonicalTaskKey(selectedTask)}
+              runnerId={plannerRunnerId}
+              modelId={plannerModel}
+              reasoningEffort={plannerReasoningEffort}
+              runs={pipelineRuns}
+              runEvents={agentEvents}
+              providerReady={providerSelectionReady}
+              onOpenPath={openRepositoryPathInEditor}
+              onOpenWorktree={openRunWorktreeInIde}
+            />
+          </div>
         {/if}
 
         {#if executionConfirmAction && selectedTask}
@@ -1999,7 +2290,7 @@
             <p>The provider will write only inside a PhaseAtlas-owned worktree. The canonical checkout and task state remain unchanged until a separate review.</p>
             <dl>
               <div><dt>Repository</dt><dd>{selectedRepository?.name}</dd></div>
-              <div><dt>Provider</dt><dd>{selectedRunner?.name} · {selectedProviderModel?.displayName}{plannerReasoningEffort ? ` · ${plannerReasoningEffort}` : " · default effort"}</dd></div>
+              <div><dt>Provider</dt><dd>{selectedRunner?.name} · {selectedProviderModel?.displayName}{plannerReasoningEffort ? ` · ${plannerReasoningEffort} effort` : reasoningEffortSupported ? " · default effort" : ""}</dd></div>
               <div><dt>Sandbox</dt><dd>{executionConfirmAction.sandbox}</dd></div>
               <div><dt>Network</dt><dd>{selectedTask.scope.allowExternalNetwork ? "Allowed by task" : "Blocked"}</dd></div>
             </dl>
@@ -2037,86 +2328,20 @@
               <span><small>Freshness</small>{selectedAgentRun.freshness ?? "pending"}</span>
             </div>
 
-            <div class="execution-journal">
-              <section class="execution-narrative" aria-live={isAgentRunActive(selectedAgentRun) ? "polite" : "off"}>
-                <header class="execution-section-heading">
-                  <div><span class="narrative-mark" aria-hidden="true"></span><div><strong>Agent response</strong><p>Reasoning summaries and final guidance from {selectedAgentRun.runnerId}.</p></div></div>
-                  <span>{selectedNarrativeEvents.length}</span>
-                </header>
-                <div class="execution-timeline">
-              {#if selectedNarrativeEvents.length}
-                {#each selectedNarrativeEvents as event}
-                  <article class="execution-event" data-type={event.type}>
-                    <span class="execution-event-sequence">{String(event.sequence).padStart(2, "0")}</span>
-                    <div class="execution-event-content">
-                      <header><strong>{eventHeading(event)}</strong><time>{formatRunTime(event.timestamp)}</time></header>
-                      {#if eventBody(event)}
-                        <p>{eventBody(event)}</p>
-                      {/if}
-                    </div>
-                  </article>
-                {/each}
-              {:else}
-                <div class="execution-timeline-empty"><span class="run-waiting-signal" aria-hidden="true"><i></i><i></i><i></i></span><div><strong>{isAgentRunActive(selectedAgentRun) ? "Agent is working" : "No agent response"}</strong><p>{isAgentRunActive(selectedAgentRun) ? "Provider responses will appear here without terminal noise." : "This run did not persist a provider response."}</p></div></div>
-              {/if}
-                </div>
-              </section>
-
-              {#if selectedCommandCards.length}
-                <section class="execution-activity" aria-label="Command activity">
-                  <header class="execution-section-heading">
-                    <div><span class="activity-mark" aria-hidden="true"></span><div><strong>Command activity</strong><p>Output stays in SQLite until you request it.</p></div></div>
-                    <span>{selectedCommandCards.length}</span>
-                  </header>
-                  <div class="command-disclosures">
-                    {#each selectedCommandCards as command}
-                      {@const outputKey = commandOutputKey(selectedAgentRun.runId, command.commandId)}
-                      {@const expanded = expandedCommandKeys.has(outputKey)}
-                      {@const output = commandOutputs[outputKey]}
-                      <article class="command-disclosure" data-expanded={expanded} data-exit={command.exitCode ?? "running"}>
-                        <button type="button" aria-expanded={expanded} onclick={() => toggleCommandOutput(selectedAgentRun.runId, command.commandId)}>
-                          <span class="command-chevron" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="m9 6 6 6-6 6"/></svg></span>
-                          <span class="command-copy"><code>{command.command}</code><small>{command.exitCode === undefined ? "Running" : `Exit ${command.exitCode}`} · {formatCharacterCount(command.outputCharacters)}</small></span>
-                          <span class="command-fetch-label">{expanded ? "Close output" : "Fetch output"}</span>
-                        </button>
-                        {#if expanded}
-                          <div class="command-output-panel">
-                            {#if output?.loading && !output.text}
-                              <div class="command-output-loading"><span></span>Reading a bounded page from SQLite…</div>
-                            {:else if output?.error}
-                              <div class="command-output-error"><span>{output.error}</span><button type="button" onclick={() => loadCommandOutput(selectedAgentRun.runId, command.commandId, output.offset)}>Retry</button></div>
-                            {:else if output?.text}
-                              <pre>{output.text}</pre>
-                              <footer>
-                                <span>Showing {formatCharacterPosition(output.offset + 1)}–{formatCharacterPosition(output.nextOffset)} of {formatCharacterPosition(output.totalCharacters)} characters</span>
-                                <div class="command-page-actions">
-                                  {#if output.offset > 0}<button type="button" disabled={output.loading} onclick={() => loadCommandOutput(selectedAgentRun.runId, command.commandId, Math.max(0, output.offset - 20_000))}>Previous</button>{/if}
-                                  {#if output.hasMore}<button type="button" disabled={output.loading} onclick={() => loadCommandOutput(selectedAgentRun.runId, command.commandId, output.nextOffset)}>{output.loading ? "Loading…" : "Next 20k"}</button>{/if}
-                                  {#if command.exitCode === undefined}<button type="button" disabled={output.loading} onclick={() => loadCommandOutput(selectedAgentRun.runId, command.commandId, output.offset)}>Refresh</button>{/if}
-                                </div>
-                              </footer>
-                            {:else}
-                              <div class="command-output-empty"><span>No output has been persisted for this command.</span>{#if command.exitCode === undefined}<button type="button" onclick={() => loadCommandOutput(selectedAgentRun.runId, command.commandId, 0)}>Check again</button>{/if}</div>
-                            {/if}
-                          </div>
-                        {/if}
-                      </article>
-                    {/each}
-                  </div>
-                </section>
-              {/if}
-            </div>
 
             {#if selectedAgentReview}
               <section class="execution-result" data-freshness={selectedAgentReview.freshness}>
                 <header>
-                  <div><p class="eyebrow">Validated result</p><h3>{selectedAgentReview.persisted.validated.result.summary}</h3></div>
+                  <div><p class="eyebrow">Validated result</p><h3>{selectedTask ? `${selectedTask.key.taskId} · ${actionLabel(selectedAgentRun?.action ?? "analyze")}` : "Summary"}</h3></div>
                   <span class="result-freshness">{selectedAgentReview.freshness}</span>
                 </header>
+                <!-- The summary is prose, often several hundred words. Heading
+                     typography made it a wall; it belongs in body text. -->
+                <div class="execution-result-summary"><ModelMarkdown source={selectedAgentReview.persisted.validated.result.summary} onOpenPath={openRepositoryPathInEditor} /></div>
                 {#if selectedAgentReview.reason}<p class="execution-result-warning">{selectedAgentReview.reason}</p>{/if}
                 <div class="execution-result-grid">
                   <section><span>Outcome</span><strong>{selectedAgentReview.persisted.validated.result.outcome}</strong><small>{selectedAgentReview.promotable ? "Eligible for separate promotion review" : "Not promotable"}</small></section>
-                  <section><span>Next action</span><strong>{selectedAgentReview.persisted.validated.result.nextAction}</strong><small>{selectedAgentReview.persisted.validated.result.requiresHumanReview ? "Human review required" : "No review requested"}</small></section>
+                  <section><span>Next action</span><strong><ModelMarkdown source={selectedAgentReview.persisted.validated.result.nextAction} onOpenPath={openRepositoryPathInEditor} /></strong><small>{selectedAgentReview.persisted.validated.result.requiresHumanReview ? "Human review required" : "No review requested"}</small></section>
                 </div>
                 <div class="execution-result-columns">
                   <section>
@@ -2128,7 +2353,7 @@
                   <section>
                     <header><strong>Verification</strong><span>{selectedAgentReview.persisted.validated.result.verification.length}</span></header>
                     {#if selectedAgentReview.persisted.validated.result.verification.length}
-                      <ul class="execution-verification-list">{#each selectedAgentReview.persisted.validated.result.verification as check}<li><span data-status={check.status}></span><div><strong>{check.stepId}</strong><small>{check.details}</small></div></li>{/each}</ul>
+                      <ul class="execution-verification-list">{#each selectedAgentReview.persisted.validated.result.verification as check}<li><span data-status={check.status}></span><div><strong>{check.stepId}</strong><small><ModelMarkdown source={check.details} onOpenPath={openRepositoryPathInEditor} /></small></div></li>{/each}</ul>
                     {:else}<p class="execution-result-empty">No verification records.</p>{/if}
                   </section>
                 </div>
@@ -2137,12 +2362,12 @@
                     <strong>Produced evidence</strong>
                     <ul>
                       {#each selectedAgentReview.persisted.validated.result.producedEvidence as evidence}
-                        <li><span>{evidence.type.replaceAll("_", " ")}</span><code>{evidence.reference}</code></li>
+                        <li><span>{evidence.type.replaceAll("_", " ")}</span><ModelMarkdown source={`\`${evidence.reference}\``} onOpenPath={openRepositoryPathInEditor} /></li>
                       {/each}
                     </ul>
                   </div>
                 {/if}
-                {#if selectedAgentReview.persisted.validated.result.blockers.length}<div class="execution-blockers"><strong>Blockers</strong>{#each selectedAgentReview.persisted.validated.result.blockers as blocker}<p>{blocker}</p>{/each}</div>{/if}
+                {#if selectedAgentReview.persisted.validated.result.blockers.length}<div class="execution-blockers"><strong>Blockers</strong>{#each selectedAgentReview.persisted.validated.result.blockers as blocker}<p><ModelMarkdown source={blocker} onOpenPath={openRepositoryPathInEditor} /></p>{/each}</div>{/if}
               </section>
             {/if}
           </section>
@@ -2150,6 +2375,29 @@
           <div class="execution-run-empty"><span class="execution-header-mark" aria-hidden="true"><svg class="icon" viewBox="0 0 24 24"><path d="M5 4h14v16H5zM8 8h8M8 12h5M8 16h7"/></svg></span><h3>No run selected</h3><p>Start an action or choose a durable attempt from repository history.</p></div>
         {/if}
       </div>
+      {#if openedFilePath}
+        <aside class="opened-file" aria-label={`File ${openedFilePath}`}>
+          <header>
+            <code title={openedFilePath}>{openedFilePath}</code>
+            {#if openedFileIsMarkdown}
+              <div class="opened-file-modes" role="group" aria-label="View mode">
+                <button class:active={openedFileMode === "preview"} type="button" aria-pressed={openedFileMode === "preview"} onclick={() => openedFileMode = "preview"}>Preview</button>
+                <button class:active={openedFileMode === "source"} type="button" aria-pressed={openedFileMode === "source"} onclick={() => openedFileMode = "source"}>Source</button>
+              </div>
+            {/if}
+            <button class="opened-file-close" type="button" aria-label="Close file" onclick={closeOpenedFile}>×</button>
+          </header>
+          {#if openedFileLoading}
+            <p class="opened-file-state">Reading {openedFilePath}…</p>
+          {:else if openedFileError}
+            <p class="opened-file-state">{openedFileError}</p>
+          {:else if openedFileIsMarkdown && openedFileMode === "preview"}
+            <div class="opened-file-preview"><ModelMarkdown source={openedFileContent} onOpenPath={openRepositoryPathInEditor} /></div>
+          {:else}
+            <pre>{openedFileContent}</pre>
+          {/if}
+        </aside>
+      {/if}
     </div>
   </div>
 {/if}
@@ -2175,7 +2423,7 @@
           <span class="runner-status-dot"></span>
           <div>
             <strong>{selectedRunner?.name ?? "No runner available"} · {selectedProviderModel?.displayName ?? "No model"}</strong>
-            <small>{plannerReasoningEffort ? `${plannerReasoningEffort} reasoning effort` : "Provider default reasoning effort"}</small>
+            <small>{plannerReasoningEffort ? `${plannerReasoningEffort} reasoning effort` : reasoningEffortSupported ? "Provider default reasoning effort" : "This provider does not expose reasoning effort"}</small>
           </div>
         </div>
 
@@ -2338,6 +2586,23 @@
   </div>
 {/if}
 
+{#if ideOpen && selectedCheckoutId && selectedRepository}
+  <IdeWorkspaceLayer
+    state={ideState}
+    repositoryName={selectedRepository.name}
+    {platform}
+    active={!editorOpen}
+    {terminalOpen}
+    {terminalHeight}
+    starting={ideOpening}
+    errorMessage={ideError}
+    onShow={showIdeTarget}
+    onStop={stopIdeTarget}
+    onClose={closeIdeSurface}
+    onViewport={reportIdeViewport}
+  />
+{/if}
+
 {#if chatOpen && selectedCheckoutId && selectedRepository}
   {#key selectedCheckoutId}
     <RepositoryChatWorkspace
@@ -2351,6 +2616,7 @@
       {terminalOpen}
       {terminalHeight}
       {terminalShortcutLabel}
+      onSelectProvider={applyProviderSelection}
       onClose={() => chatOpen = false}
       onOpenExplorer={() => {
         openRepositoryEditor();

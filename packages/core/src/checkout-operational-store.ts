@@ -5,6 +5,7 @@ import type { DatabaseSync as DatabaseSyncType } from "node:sqlite";
 import type {
   AgentResultRevalidationRecord,
   AgentRunAction,
+  AgentRunStageResult,
   AgentRunCommandOutputPage,
   AgentSandbox,
   PersistedAgentRunResult,
@@ -23,7 +24,7 @@ import type {
   ValidatedAgentRunResult,
 } from "@phaseatlas/contracts";
 
-const SCHEMA_VERSION = "4";
+const SCHEMA_VERSION = "6";
 const RUN_KINDS = new Set<PersistedRunKind>(["planning", "task_content", "agent"]);
 const RUN_STATUSES = new Set<PersistedRunStatus>(["starting", "running", "completed", "failed", "cancelled", "interrupted"]);
 const TERMINAL_RUN_STATUSES = new Set<PersistedRunStatus>(["completed", "failed", "cancelled", "interrupted"]);
@@ -46,6 +47,13 @@ const CHAT_EVENT_TYPES = new Set<PersistedRepositoryChatEvent["type"]>([
 const { DatabaseSync } = createRequire(import.meta.url)("node:" + "sqlite") as {
   DatabaseSync: typeof DatabaseSyncType;
 };
+
+export interface RepositoryChatSessionContextSnapshot {
+  sessionId: string;
+  summary: string;
+  summarizedThroughSequence: number;
+  updatedAt: string;
+}
 
 function parseTaskKeys(value: unknown): string[] {
   if (typeof value !== "string") return [];
@@ -88,6 +96,22 @@ function parseValidatedResult(value: unknown): ValidatedAgentRunResult {
     throw new Error("Operational store contains an invalid agent result.");
   }
   return parsed as ValidatedAgentRunResult;
+}
+
+function parseChatContextSummary(value: unknown): RepositoryChatSessionContextSnapshot {
+  if (!value || typeof value !== "object") throw new Error("Operational store contains an invalid chat context summary.");
+  const row = value as Record<string, unknown>;
+  const summarizedThroughSequence = Number(row.summarized_through_sequence);
+  if (typeof row.session_id !== "string" || typeof row.summary !== "string" ||
+      !Number.isInteger(summarizedThroughSequence) || summarizedThroughSequence < 0 || typeof row.updated_at !== "string") {
+    throw new Error("Operational store contains an invalid chat context summary.");
+  }
+  return {
+    sessionId: row.session_id,
+    summary: row.summary,
+    summarizedThroughSequence,
+    updatedAt: row.updated_at,
+  };
 }
 
 export interface PersistedAgentRunSpecRecord {
@@ -430,6 +454,25 @@ export class CheckoutOperationalStore {
     };
   }
 
+  // Completed results for one task at one revision, oldest first. Feeds the
+  // pipeline: a later stage receives what the earlier stages concluded.
+  listAgentResultsForTask(taskKey: string, taskRevision: string): AgentRunStageResult[] {
+    const rows = this.database.prepare(`
+      SELECT results.run_id, results.recorded_at, results.result_json, specs.action
+      FROM agent_run_results AS results
+      JOIN agent_run_specs AS specs ON specs.run_id = results.run_id
+      JOIN runs ON runs.run_id = results.run_id
+      WHERE results.task_key = ? AND results.task_revision = ? AND runs.status = 'completed'
+      ORDER BY results.recorded_at, results.run_id
+    `).all(taskKey, taskRevision) as Array<Record<string, unknown>>;
+    return rows.map((row) => ({
+      runId: String(row.run_id),
+      action: String(row.action) as AgentRunAction,
+      recordedAt: String(row.recorded_at),
+      result: parseValidatedResult(row.result_json),
+    }));
+  }
+
   recordResultRevalidation(input: AgentResultRevalidationRecord): AgentResultRevalidationRecord {
     if (!input.reviewer.trim()) throw new Error("Revalidation reviewer is required.");
     if (!this.getAgentResult(input.runId)) throw new Error("Agent result does not exist.");
@@ -474,8 +517,8 @@ export class CheckoutOperationalStore {
     }
     this.database.prepare(`
       INSERT INTO chat_sessions (
-        session_id, checkout_id, runner_id, model_id, reasoning_effort, title, state, created_at, updated_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        session_id, checkout_id, runner_id, model_id, reasoning_effort, title, state, task_key, created_at, updated_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `).run(
       input.sessionId,
       input.checkoutId,
@@ -484,6 +527,7 @@ export class CheckoutOperationalStore {
       input.reasoningEffort ?? null,
       input.title,
       input.state,
+      input.taskKey ?? null,
       input.createdAt,
       input.updatedAt,
     );
@@ -497,10 +541,53 @@ export class CheckoutOperationalStore {
     return rows.map((row) => this.chatSessionFromRow(row));
   }
 
+  // One conversation per task: the pipeline stages and the user's questions must
+  // land in the same thread rather than spawning a session per run.
+  findChatSessionForTask(taskKey: string): RepositoryChatSession | null {
+    const row = this.database.prepare(`
+      SELECT * FROM chat_sessions WHERE task_key = ? AND state = 'open' ORDER BY created_at LIMIT 1
+    `).get(taskKey) as Record<string, unknown> | undefined;
+    return row ? this.chatSessionFromRow(row) : null;
+  }
+
   getChatSession(sessionId: string): RepositoryChatSession {
     const row = this.database.prepare("SELECT * FROM chat_sessions WHERE session_id = ?").get(sessionId) as Record<string, unknown> | undefined;
     if (!row) throw new Error(`Chat session ${sessionId} is not registered.`);
     return this.chatSessionFromRow(row);
+  }
+
+  getChatSessionContext(sessionId: string): RepositoryChatSessionContextSnapshot | null {
+    const row = this.database.prepare(`
+      SELECT * FROM chat_session_contexts WHERE session_id = ?
+    `).get(sessionId) as Record<string, unknown> | undefined;
+    if (!row) return null;
+    if (!String(row.session_id)) throw new Error(`Chat session context ${sessionId} is invalid.`);
+    if (String(row.session_id) !== sessionId) throw new Error(`Chat session context ${sessionId} does not match query.`);
+    return parseChatContextSummary(row);
+  }
+
+  updateChatSessionContext(sessionId: string, summary: string, summarizedThroughSequence: number): RepositoryChatSessionContextSnapshot {
+    this.getChatSession(sessionId);
+    if (!summary.trim()) throw new Error("Chat session context summary is required.");
+    const sequence = Number(summarizedThroughSequence);
+    if (!Number.isInteger(sequence) || sequence < 0) throw new Error("summarizedThroughSequence is invalid.");
+    const timestamp = new Date().toISOString();
+    this.database.prepare(`
+      INSERT INTO chat_session_contexts (session_id, summary, summarized_through_sequence, updated_at)
+      VALUES (?, ?, ?, ?)
+      ON CONFLICT(session_id) DO UPDATE SET
+        summary = excluded.summary,
+        summarized_through_sequence = excluded.summarized_through_sequence,
+        updated_at = excluded.updated_at
+    `).run(sessionId, summary, sequence, timestamp);
+    const row = this.database.prepare("SELECT * FROM chat_session_contexts WHERE session_id = ?").get(sessionId) as Record<string, unknown> | undefined;
+    if (!row) throw new Error("Unable to persist chat session context.");
+    return parseChatContextSummary(row);
+  }
+
+  clearChatSessionContext(sessionId: string): void {
+    this.getChatSession(sessionId);
+    this.database.prepare("DELETE FROM chat_session_contexts WHERE session_id = ?").run(sessionId);
   }
 
   renameChatSession(sessionId: string, title: string, timestamp = new Date().toISOString()): RepositoryChatSession {
@@ -508,6 +595,26 @@ export class CheckoutOperationalStore {
     this.getChatSession(sessionId);
     this.database.prepare("UPDATE chat_sessions SET title = ?, updated_at = ? WHERE session_id = ?")
       .run(title.trim(), timestamp, sessionId);
+    return this.getChatSession(sessionId);
+  }
+
+  setChatSessionProvider(
+    sessionId: string,
+    runnerId: string,
+    model: string,
+    reasoningEffort?: string,
+    timestamp = new Date().toISOString(),
+  ): RepositoryChatSession {
+    if (!runnerId.trim() || !model.trim()) throw new Error("Chat session provider selection is incomplete.");
+    const session = this.getChatSession(sessionId);
+    if (session.state === "closed") throw new Error("An archived chat session cannot change provider.");
+    const active = this.database.prepare(`
+      SELECT turn_id FROM chat_turns WHERE session_id = ? AND status IN ('starting', 'running') LIMIT 1
+    `).get(sessionId) as { turn_id?: string } | undefined;
+    if (active?.turn_id) throw new Error("Cancel the active chat turn before changing provider.");
+    this.database.prepare(`
+      UPDATE chat_sessions SET runner_id = ?, model_id = ?, reasoning_effort = ?, updated_at = ? WHERE session_id = ?
+    `).run(runnerId.trim(), model.trim(), reasoningEffort?.trim() || null, timestamp, sessionId);
     return this.getChatSession(sessionId);
   }
 
@@ -877,6 +984,7 @@ export class CheckoutOperationalStore {
       ...(typeof row.reasoning_effort === "string" ? { reasoningEffort: row.reasoning_effort } : {}),
       title: String(row.title),
       state: state as RepositoryChatSession["state"],
+      ...(typeof row.task_key === "string" && row.task_key ? { taskKey: row.task_key } : {}),
       createdAt: String(row.created_at),
       updatedAt: String(row.updated_at),
     };
@@ -1013,6 +1121,7 @@ export class CheckoutOperationalStore {
         reasoning_effort TEXT,
         title TEXT NOT NULL,
         state TEXT NOT NULL CHECK(state IN ('open', 'closed')),
+        task_key TEXT,
         created_at TEXT NOT NULL,
         updated_at TEXT NOT NULL
       );
@@ -1048,6 +1157,12 @@ export class CheckoutOperationalStore {
         payload_json TEXT NOT NULL,
         PRIMARY KEY (turn_id, sequence)
       );
+      CREATE TABLE IF NOT EXISTS chat_session_contexts (
+        session_id TEXT PRIMARY KEY REFERENCES chat_sessions(session_id) ON DELETE CASCADE,
+        summary TEXT NOT NULL,
+        summarized_through_sequence INTEGER NOT NULL CHECK(summarized_through_sequence >= 0),
+        updated_at TEXT NOT NULL
+      );
     `);
     const schema = this.database.prepare("SELECT value FROM store_meta WHERE key = 'schema_version'").get() as { value?: string } | undefined;
     if (existingDatabase && !schema?.value) this.failInitialization("Checkout store schema metadata is missing.");
@@ -1064,6 +1179,14 @@ export class CheckoutOperationalStore {
       this.migrateVersionThree();
       schemaVersion = "4";
     }
+    if (schemaVersion === "4") {
+      this.migrateVersionFour();
+      schemaVersion = "5";
+    }
+    if (schemaVersion === "5") {
+      this.migrateVersionFive();
+      schemaVersion = "6";
+    }
     if (schemaVersion && schemaVersion !== SCHEMA_VERSION) {
       this.failInitialization(`Unsupported checkout store schema version ${schemaVersion}.`);
     }
@@ -1072,6 +1195,8 @@ export class CheckoutOperationalStore {
     if (identity?.value && identity.value !== this.checkoutId) {
       this.failInitialization("Checkout store identity does not match its worker checkout.");
     }
+    // Indexes on migrated columns belong after the chain, never in the base DDL.
+    this.database.exec("CREATE INDEX IF NOT EXISTS chat_sessions_task_key ON chat_sessions(task_key);");
     this.database.prepare("INSERT OR IGNORE INTO store_meta (key, value) VALUES ('schema_version', ?)").run(SCHEMA_VERSION);
     this.database.prepare("INSERT OR IGNORE INTO store_meta (key, value) VALUES ('checkout_id', ?)").run(this.checkoutId);
   }
@@ -1155,6 +1280,47 @@ export class CheckoutOperationalStore {
         WHERE event_type = 'chat.tool.output';
 
         UPDATE store_meta SET value = '4' WHERE key = 'schema_version';
+      `);
+      this.database.exec("COMMIT");
+    } catch (error) {
+      this.database.exec("ROLLBACK");
+      throw error;
+    }
+  }
+
+  // A task conversation is one durable chat session bound to a canonical task, so
+  // the four pipeline stages and the user's own questions share a single thread.
+  private migrateVersionFive(): void {
+    this.database.exec("BEGIN IMMEDIATE");
+    try {
+      // A database older than 4 has no chat_sessions table at all, so the base DDL
+      // creates it already carrying task_key. Only add the column when it is absent.
+      const columns = this.database.prepare("PRAGMA table_info(chat_sessions)").all() as Array<{ name?: unknown }>;
+      if (!columns.some((column) => String(column.name) === "task_key")) {
+        this.database.exec("ALTER TABLE chat_sessions ADD COLUMN task_key TEXT;");
+      }
+      this.database.exec(`
+        CREATE INDEX IF NOT EXISTS chat_sessions_task_key ON chat_sessions(task_key);
+        UPDATE store_meta SET value = '6' WHERE key = 'schema_version';
+      `);
+      this.database.exec("COMMIT");
+    } catch (error) {
+      this.database.exec("ROLLBACK");
+      throw error;
+    }
+  }
+
+  private migrateVersionFour(): void {
+    this.database.exec("BEGIN IMMEDIATE");
+    try {
+      this.database.exec(`
+        CREATE TABLE IF NOT EXISTS chat_session_contexts (
+          session_id TEXT PRIMARY KEY REFERENCES chat_sessions(session_id) ON DELETE CASCADE,
+          summary TEXT NOT NULL,
+          summarized_through_sequence INTEGER NOT NULL CHECK(summarized_through_sequence >= 0),
+          updated_at TEXT NOT NULL
+        );
+        UPDATE store_meta SET value = '5' WHERE key = 'schema_version';
       `);
       this.database.exec("COMMIT");
     } catch (error) {

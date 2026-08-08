@@ -458,7 +458,9 @@ export interface AgentCheckoutIdentity {
   canonicalPath: string;
 }
 
-export type WorktreeLeaseStatus = "allocating" | "active" | "releasing" | "released" | "abandoned";
+// "retained" is a finished run whose worktree is deliberately kept so the user can
+// push it or open a pull request. It is not reclaimed on worker restart.
+export type WorktreeLeaseStatus = "allocating" | "active" | "retained" | "releasing" | "released" | "abandoned";
 
 export interface WorktreeLeaseRecord {
   leaseId: string;
@@ -471,6 +473,13 @@ export interface WorktreeLeaseRecord {
   updatedAt: string;
   recoveryReason?: string;
   disposition?: string;
+}
+
+export interface AgentRunStageResult {
+  readonly runId: string;
+  readonly action: AgentRunAction;
+  readonly recordedAt: string;
+  readonly result: ValidatedAgentRunResult;
 }
 
 export interface AgentRunSpec {
@@ -489,6 +498,7 @@ export interface AgentRunSpec {
   readonly acceptanceCriteria: ReadonlyArray<AcceptanceCriterion>;
   readonly verification: ReadonlyArray<VerificationStep>;
   readonly sandbox: AgentSandbox;
+  readonly priorResults: ReadonlyArray<AgentRunStageResult>;
   readonly createdAt: string;
 }
 
@@ -646,6 +656,7 @@ export interface RepositoryChatSession {
   runnerId: string;
   model: string;
   reasoningEffort?: string;
+  taskKey?: string;
   title: string;
   state: RepositoryChatSessionState;
   createdAt: string;
@@ -681,12 +692,20 @@ export interface RepositoryChatCreateInput {
   runnerId: string;
   model: string;
   reasoningEffort?: string;
+  taskKey?: string;
   title?: string;
 }
 
 export interface RepositoryChatRenameInput {
   sessionId: string;
   title: string;
+}
+
+export interface RepositoryChatProviderInput {
+  sessionId: string;
+  runnerId: string;
+  model: string;
+  reasoningEffort?: string;
 }
 
 export interface RepositoryChatSendInput {
@@ -868,6 +887,8 @@ export type RepositoryWorkerMethod =
   | "chat.session.list"
   | "chat.session.get"
   | "chat.session.rename"
+  | "chat.session.provider"
+  | "agent-run.lease"
   | "chat.session.close"
   | "chat.message.list"
   | "chat.turn.list"
@@ -959,6 +980,31 @@ export type PhaseAtlasDesktopEvent =
   | RepositoryChatDesktopEvent
   | ChatEditDesktopEvent;
 
+// One IDE surface per workspace the user opened: the canonical checkout, or a
+// run's retained worktree. The key is opaque to the renderer — it only ever
+// hands one back that the main process already published.
+export interface IdeSurfaceTarget {
+  key: string;
+  checkoutId: string;
+  leaseId?: string;
+  title: string;
+}
+
+export interface IdeSurfaceState {
+  targets: IdeSurfaceTarget[];
+  visibleKey: string | null;
+}
+
+// The IDE is a native view painted over the body of a PhaseAtlas panel, so the
+// renderer measures that panel and reports where the view belongs, in CSS
+// pixels relative to the window's content area.
+export interface IdeViewportRect {
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+}
+
 export interface PhaseAtlasDesktopApi {
   repositories: {
     open(): Promise<RepositorySummary | null>;
@@ -1011,6 +1057,7 @@ export interface PhaseAtlasDesktopApi {
     listSessions(checkoutId: string): Promise<RepositoryChatSession[]>;
     getSession(checkoutId: string, sessionId: string): Promise<RepositoryChatSession>;
     renameSession(checkoutId: string, input: RepositoryChatRenameInput): Promise<RepositoryChatSession>;
+    setSessionProvider(checkoutId: string, input: RepositoryChatProviderInput): Promise<RepositoryChatSession>;
     closeSession(checkoutId: string, sessionId: string): Promise<RepositoryChatSession>;
     listMessages(checkoutId: string, sessionId: string): Promise<RepositoryChatMessage[]>;
     listTurns(checkoutId: string, sessionId: string): Promise<RepositoryChatTurn[]>;
@@ -1031,6 +1078,19 @@ export interface PhaseAtlasDesktopApi {
   };
   events: {
     subscribe(listener: (event: PhaseAtlasDesktopEvent) => void): () => void;
+  };
+  ide: {
+    // runId opens that run's retained worktree; omitting it opens the canonical checkout.
+    open(checkoutId: string, theme: "light" | "dark", runId?: string): Promise<IdeSurfaceState>;
+    // Switching only changes which view is painted; every backend stays alive,
+    // so returning to an IDE costs nothing. Closing is what stops one.
+    show(key: string): Promise<IdeSurfaceState>;
+    hide(): Promise<IdeSurfaceState>;
+    close(key: string): Promise<IdeSurfaceState>;
+    state(): Promise<IdeSurfaceState>;
+    setViewport(rect: IdeViewportRect): Promise<IdeSurfaceState>;
+    setTheme(theme: "light" | "dark"): Promise<void>;
+    onStateChanged(listener: (state: IdeSurfaceState) => void): () => void;
   };
   runtime: {
     platform(): Promise<string>;

@@ -61,7 +61,17 @@ export class AgentExecutionScheduler {
     let lease: WorktreeLeaseRecord | undefined;
     try {
       if (sandbox === "workspace-write") lease = await this.leases.acquire(runId);
-      const spec = createAgentRunSpec({ runId, request, repository, snapshot, ...(lease ? { lease } : {}) });
+      const spec = createAgentRunSpec({
+        runId,
+        request,
+        repository,
+        snapshot,
+        ...(lease ? { lease } : {}),
+        // Same task, same revision only: a result from a superseded contract is
+        // not context, it is a stale claim.
+        priorResults: this.store.listAgentResultsForTask(taskKey, task.revision)
+          .filter((stage) => stage.action !== request.action),
+      });
       this.store.recordAgentSpec({
         runId,
         taskKey: spec.taskKey,
@@ -230,7 +240,13 @@ export class AgentExecutionScheduler {
       }
       throw error;
     } finally {
-      if (prepared.lease) await this.leases.release(spec.runId, signal.aborted ? "cancelled" : "run_finished");
+      // A cancelled run produced nothing to act on, so its worktree goes. A run
+      // that reached a terminal state keeps it: pushing it or opening a pull
+      // request is the whole point of an implementation run.
+      if (prepared.lease) {
+        if (signal.aborted) await this.leases.release(spec.runId, "cancelled");
+        else await this.leases.retain(spec.runId, "run_finished");
+      }
     }
   }
 

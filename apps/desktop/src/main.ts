@@ -1,6 +1,8 @@
 import { fileURLToPath } from "node:url";
 import { readFileSync, writeFileSync } from "node:fs";
 import path from "node:path";
+import { TheiaIdeManager } from "./theia-ide-manager.js";
+import { assertIdeViewport, assertPhaseAtlasTheme } from "./theia-ide-policy.js";
 import { app, BrowserWindow, dialog, ipcMain, shell } from "electron";
 import { RepositoryProcessManager } from "./repository-process-manager.js";
 
@@ -103,11 +105,30 @@ const packagedReleasePolicy = releasePolicy();
 writeReleaseSmokeResult({ ok: false, stage: "release-policy-loaded" });
 
 const currentDirectory = path.dirname(fileURLToPath(import.meta.url));
+const theiaBackendEntry = process.env.PHASEATLAS_THEIA_BACKEND_ENTRY ||
+  (app.isPackaged
+    ? path.join(process.resourcesPath, "theia-ide", "lib", "backend", "main.js")
+    // dist lives at apps/desktop/dist, so the repository root is three levels up.
+    : path.resolve(currentDirectory, "../../../ide/lib/backend/main.js"));
+const theiaPreloadEntry = path.join(currentDirectory, "theia-preload.cjs");
+const theiaDefaultExtensionsRoot = app.isPackaged
+  ? path.join(process.resourcesPath, "theia-default-extensions")
+  : path.resolve(currentDirectory, "../../../ide/default-extensions");
 const workerEntry = process.env.PHASEATLAS_WORKER_ENTRY ||
   (app.isPackaged
     ? path.join(process.resourcesPath, "repository-worker", "index.js")
     : path.resolve(currentDirectory, "../../repository-worker/dist/index.js"));
 const applicationSupportRoot = path.join(app.getPath("userData"), "runtime");
+const embeddedIde = new TheiaIdeManager(
+  theiaBackendEntry,
+  theiaPreloadEntry,
+  theiaDefaultExtensionsRoot,
+  applicationSupportRoot,
+  (host, state) => host.webContents.send("phaseatlas:ide:state", state),
+  // Leaving the IDE from inside it closes the surface the same way ⌘W does, so
+  // the renderer keeps a single notion of "the surface on top".
+  (host) => host.webContents.send("phaseatlas:shortcut:close-surface"),
+);
 const repositories = new RepositoryProcessManager(workerEntry, applicationSupportRoot, (event) => {
   for (const window of BrowserWindow.getAllWindows()) {
     if (!window.isDestroyed()) window.webContents.send("phaseatlas:event", event);
@@ -169,7 +190,50 @@ async function createWindow(): Promise<BrowserWindow> {
   return window;
 }
 
+function ideHost(event: Electron.IpcMainInvokeEvent): BrowserWindow {
+  const host = BrowserWindow.fromWebContents(event.sender);
+  if (!host) throw new Error("The IDE surface has no PhaseAtlas window to live in.");
+  return host;
+}
+
 function registerIpc(): void {
+  ipcMain.on("phaseatlas:ide:theme:get", (event) => {
+    event.returnValue = embeddedIde.themeForWebContents(event.sender.id);
+  });
+  ipcMain.handle("phaseatlas:ide:open", async (event, checkoutId: string, theme: string, runId?: string) => {
+    assertPhaseAtlasTheme(theme);
+    const repository = repositories.describe(checkoutId);
+    const host = ideHost(event);
+    if (runId === undefined) {
+      return embeddedIde.open({ checkoutId: repository.checkoutId }, repository.path, repository.name, theme, host);
+    }
+    // A run's worktree is only a workspace while its lease is retained. Opening
+    // one that is about to be removed would discard whatever the user typed.
+    const lease = await repositories.leaseForRun(checkoutId, runId);
+    if (!lease) throw new Error("This run has no worktree to open.");
+    if (lease.status !== "retained") {
+      throw new Error(`This run's worktree is ${lease.status} and can no longer be opened.`);
+    }
+    return embeddedIde.open(
+      { checkoutId: repository.checkoutId, leaseId: lease.leaseId },
+      lease.worktreePath,
+      `${repository.name} · ${lease.branch}`,
+      theme,
+      host,
+    );
+  });
+  ipcMain.handle("phaseatlas:ide:show", (event, key: string) => embeddedIde.show(ideHost(event), key));
+  ipcMain.handle("phaseatlas:ide:hide", (event) => embeddedIde.hide(ideHost(event)));
+  ipcMain.handle("phaseatlas:ide:close", (event, key: string) => embeddedIde.close(ideHost(event), key));
+  ipcMain.handle("phaseatlas:ide:state", (event) => embeddedIde.state(ideHost(event)));
+  ipcMain.handle("phaseatlas:ide:viewport", (event, rect: unknown) => {
+    assertIdeViewport(rect);
+    return embeddedIde.setViewport(ideHost(event), rect);
+  });
+  ipcMain.handle("phaseatlas:ide:theme:set", (_event, theme: string) => {
+    assertPhaseAtlasTheme(theme);
+    embeddedIde.setTheme(theme);
+  });
   ipcMain.handle("phaseatlas:runtime:platform", () => process.platform);
   ipcMain.handle("phaseatlas:repositories:list", () => repositories.list());
   ipcMain.handle("phaseatlas:repositories:refresh", (event, checkoutId: string) => {
@@ -272,6 +336,7 @@ function registerIpc(): void {
   ipcMain.handle("phaseatlas:chat:sessions:list", (_event, checkoutId: string) => repositories.listChatSessions(checkoutId));
   ipcMain.handle("phaseatlas:chat:sessions:get", (_event, checkoutId: string, sessionId: string) => repositories.getChatSession(checkoutId, sessionId));
   ipcMain.handle("phaseatlas:chat:sessions:rename", (_event, checkoutId: string, input) => repositories.renameChatSession(checkoutId, input));
+  ipcMain.handle("phaseatlas:chat:sessions:provider", (_event, checkoutId: string, input) => repositories.setChatSessionProvider(checkoutId, input));
   ipcMain.handle("phaseatlas:chat:sessions:close", (_event, checkoutId: string, sessionId: string) => repositories.closeChatSession(checkoutId, sessionId));
   ipcMain.handle("phaseatlas:chat:messages:list", (_event, checkoutId: string, sessionId: string) => repositories.listChatMessages(checkoutId, sessionId));
   ipcMain.handle("phaseatlas:chat:turns:list", (_event, checkoutId: string, sessionId: string) => repositories.listChatTurns(checkoutId, sessionId));
@@ -334,7 +399,20 @@ app.whenReady().then(async () => {
   if (process.env.PHASEATLAS_RELEASE_SMOKE === "1") app.exit(1);
 });
 
-app.on("before-quit", () => repositories.stopAll());
+app.on("before-quit", () => {
+  embeddedIde.stopAll();
+  repositories.stopAll();
+});
+
+// before-quit does not fire when the process is signalled, which leaves Theia
+// backends alive holding their ports; the next launch then fails to bind.
+for (const signal of ["SIGINT", "SIGTERM", "SIGHUP"] as const) {
+  process.once(signal, () => {
+    embeddedIde.stopAll();
+    repositories.stopAll();
+    app.exit(0);
+  });
+}
 app.on("window-all-closed", () => {
   if (process.platform !== "darwin") app.quit();
 });
