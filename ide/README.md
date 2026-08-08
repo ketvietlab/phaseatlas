@@ -1,8 +1,8 @@
 # PhaseAtlas embedded IDE
 
-The desktop app launches an Eclipse Theia backend per checkout and shows it in
-its own window. `apps/desktop` owns the launch policy, the window and the preload
-bridge; this directory owns the IDE those point at.
+The desktop app launches an Eclipse Theia backend per checkout or retained run worktree and shows it
+in a native view embedded in the PhaseAtlas window. `apps/desktop` owns the launch policy, the view,
+and the preload bridge; this directory owns the IDE those point at.
 
 ## Source
 
@@ -14,7 +14,7 @@ The IDE is built from that source, not from a prebuilt artifact:
 
 ```bash
 git submodule update --init --depth 1 ide/theia
-pnpm build:ide                # yarn install + yarn build:browser, then copy to ide/lib
+pnpm build:ide                # npm install + npm build:browser, then copy to ide/lib
 pnpm fetch:ide-extensions     # download and verify the pinned extensions
 ```
 

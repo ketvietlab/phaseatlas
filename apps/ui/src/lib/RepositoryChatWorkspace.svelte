@@ -1386,7 +1386,7 @@
   .chat-header { display: grid; min-width: 0; grid-template-columns: 40px minmax(180px,1fr) auto auto auto 36px; align-items: center; gap: 8px; border-bottom: 1px solid var(--border); padding: 0 12px 0 16px; background: color-mix(in srgb,var(--surface) 96%,var(--brand-50)); -webkit-app-region: drag; }
   .chat-header button,.chat-header .access-chip { -webkit-app-region: no-drag; }.chat-mark { position: relative; width: 32px; height: 32px; border: 1px solid var(--brand-200); border-radius: 10px; background: var(--active-surface); }.chat-mark span { position: absolute; width: 7px; height: 7px; border: 1px solid var(--brand-500); background: var(--surface); transform: rotate(45deg); }.chat-mark span:nth-child(1) { top: 5px; left: 12px; }.chat-mark span:nth-child(2) { bottom: 5px; left: 5px; }.chat-mark span:nth-child(3) { right: 5px; bottom: 5px; background: var(--brand-500); }
   .chat-title { min-width: 0; }.chat-title p,.conversation-header p { margin: 0 0 2px; color: var(--active-text); font-size: 11px; font-weight: 800; letter-spacing: .09em; text-transform: uppercase; }.chat-title h2 { overflow: hidden; margin: 0; font-size: 16px; letter-spacing: -.015em; text-overflow: ellipsis; white-space: nowrap; }.chat-title h2 span { color: var(--text-subtle); font-weight: 560; }
-  
+
   .explorer-chip { display: inline-flex; align-items: center; gap: 6px; border: 1px solid var(--border); border-radius: var(--radius); padding: 8px 10px; background: var(--surface); color: var(--text-muted); font-size: 12px; font-weight: 750; }.explorer-chip:hover,.explorer-chip.active { border-color: var(--brand-300); background: var(--active-surface); color: var(--active-text); }.explorer-chip svg { width: 15px; height: 15px; fill: none; stroke: currentColor; stroke-width: 1.7; }
   .access-chip { display: flex; align-items: center; gap: 5px; border: 1px solid var(--border); border-radius: var(--radius-full); padding: 5px 8px; color: var(--text-muted); font-size: 11px; font-weight: 750; text-transform: uppercase; white-space: nowrap; }.access-chip[data-mode="edit"] { border-color: color-mix(in srgb,var(--warning-500) 52%,var(--border)); background: var(--warning-surface); color: var(--warning-text); }.access-chip[data-mode="edit"][data-access="ask_for_approval"] { border-color: color-mix(in srgb,var(--brand-400) 55%,var(--border)); background: var(--active-surface); color: var(--active-text); }.access-chip svg { width: 12px; height: 12px; fill: none; stroke: currentColor; stroke-width: 1.8; }.close-chat { display: grid; width: 34px; height: 34px; place-items: center; border: 0; border-radius: var(--radius); background: transparent; color: var(--text-muted); font-size: 24px; }.close-chat:hover { background: var(--surface-soft); color: var(--text); }
   .chat-grid { display: grid; min-height: 0; grid-template-columns: 252px minmax(0,1fr); }.session-rail { display: grid; min-height: 0; grid-template-rows: 52px minmax(0,1fr) 44px; border-right: 1px solid var(--border); background: var(--surface-soft); }.session-rail-header { display: flex; align-items: center; justify-content: space-between; border-bottom: 1px solid var(--border); padding: 0 10px 0 13px; }.session-rail-header > div { display: flex; align-items: center; gap: 7px; }.session-rail-header span { color: var(--text-muted); font-size: 12px; font-weight: 800; letter-spacing: .06em; text-transform: uppercase; }.session-rail-header strong { display: grid; min-width: 20px; height: 18px; place-items: center; border-radius: var(--radius-full); background: var(--surface); color: var(--text-subtle); font-size: 11px; }.session-rail-header > button { display: grid; width: 29px; height: 29px; place-items: center; border: 1px solid var(--border); border-radius: var(--radius-sm); background: var(--surface); color: var(--active-text); font-size: 18px; }.session-rail-header > button:hover { border-color: var(--brand-300); background: var(--active-surface); }.session-rail-header > button:disabled { opacity: .45; }
@@ -1428,10 +1428,10 @@
   .chat-shell.kilo-chat { border-radius: 22px; background: color-mix(in srgb,var(--canvas) 88%,var(--surface)); }
   .kilo-chat .chat-header { border-bottom: 1px solid color-mix(in srgb,var(--border) 72%,transparent); padding-top: 8px; padding-bottom: 8px; background: color-mix(in srgb,var(--surface) 96%,var(--brand-50)); }
   .kilo-chat .chat-title h2 { font-size: 15px; letter-spacing: -0.02em; }
-  
-  
-  
-  
+
+
+
+
   .kilo-chat .chat-grid { grid-template-columns: 240px minmax(0,1fr); }
   .kilo-chat .session-rail { border-right: 1px solid color-mix(in srgb,var(--border) 80%,transparent); }
   .kilo-chat .session-rail-header { padding-top: 10px; padding-bottom: 10px; }

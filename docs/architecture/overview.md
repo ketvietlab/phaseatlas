@@ -13,6 +13,9 @@ flowchart TB
   UI["Svelte renderer"] --> Bridge["Preload bridge"]
   Bridge --> Main["Electron main · supervisor"]
   Main --> Policy["Packaged release policy"]
+  Main --> Ide["Embedded Theia supervisor"]
+  Ide --> IdeView["Sandboxed Theia view"]
+  Ide --> IdeBackend["Checkout-bound Theia backend"]
   Main --> A["Repository worker A"]
   Main --> B["Repository worker B"]
   A --> WA["Workspace projections"]
@@ -41,6 +44,11 @@ resources, loads only the bundled static renderer, and resolves the repository-w
 same bundle. Development artifacts disable updates. Release artifacts permit only a manually initiated
 flow backed by pre-verified signed metadata; no renderer capability can change that policy.
 
+The main process also supervises embedded Theia instances. The renderer may select only a registered
+checkout ID or a retained run ID; trusted code resolves that identity to the canonical checkout or
+retained worktree path before starting the backend. The Theia browser surface is separately sandboxed,
+and its backend is bound to loopback for exactly one resolved workspace.
+
 ### Repository worker
 
 Every active checkout receives one Electron utility process. Its repository root is fixed at process
@@ -55,6 +63,8 @@ Workspaces are logical partitions inside a repository worker; they do not receiv
 Renderer                     Untrusted input and rendered repository content
 Preload                      Explicit, typed capability boundary
 Electron main                Trusted supervisor; no domain-heavy work
+Theia browser surface        Sandboxed web surface; no PhaseAtlas filesystem or IPC bridge
+Theia backend/extensions     Trusted local IDE authority for exactly one resolved workspace
 Repository worker            Trusted for exactly one granted checkout
 Agent subprocess/worktree    Sandboxed execution with task-scoped permissions
 Release tooling              External signing/notarization credentials; public metadata only in bundle
@@ -87,10 +97,11 @@ An agent can propose state and produce evidence. It cannot directly declare a ca
 ## Distribution boundary
 
 The macOS bundle contains Electron, the desktop main/preload output, the static renderer, the bundled
-repository worker, and the native terminal runtime. A generated SHA-256 manifest covers PhaseAtlas-owned
-files. Packaging validates the renderer sandbox strings, typed preload exposure, absence of workspace
-imports, absence of credential-like custom files, and the application code signature before the smoke
-test can start it.
+repository worker, the embedded Theia runtime and pinned extensions, and the native terminal runtime.
+A generated SHA-256 manifest covers all PhaseAtlas-owned runtime files, including Theia and its default
+extensions. Packaging validates the renderer sandbox strings, typed preload exposure, absence of
+workspace imports, absence of credential-like custom files, and the application code signature before
+the smoke test can start it.
 
 The application bundle is replaceable; canonical tasks remain in each repository and checkout-owned
 operational SQLite remains under PhaseAtlas application support. This separation makes rollback an

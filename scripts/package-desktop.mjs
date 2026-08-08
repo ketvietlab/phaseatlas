@@ -189,7 +189,17 @@ if (releaseInputs) {
 }
 await writeFile(path.join(resourcesPath, "release-policy.json"), JSON.stringify(policy, null, 2));
 
-const manifestRoots = ["app", "repository-worker", "ui", "node_modules/node-pty", "LICENSE", "release-policy.json", ...(releaseInputs ? ["update"] : [])];
+const manifestRoots = [
+  "app",
+  "repository-worker",
+  "ui",
+  "theia-ide",
+  "theia-default-extensions",
+  "node_modules/node-pty",
+  "LICENSE",
+  "release-policy.json",
+  ...(releaseInputs ? ["update"] : []),
+];
 const manifestFiles = {};
 for (const root of manifestRoots) {
   const absolute = path.join(resourcesPath, root);

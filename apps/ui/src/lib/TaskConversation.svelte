@@ -371,13 +371,13 @@
   .turn-failure { margin: 6px 0 0; border-radius: var(--radius-xs); padding: 6px 8px; background: color-mix(in srgb,#c44242 8%,var(--surface)); color: var(--text-muted); font-size: 12.5px; }
 
   .conversation-status { margin: 2px 0 0; color: var(--text-subtle); font-size: 12.5px; }
-  
-  
-  
-  
-  
-  
-  
+
+
+
+
+
+
+
   .conversation-error { margin: 0; border-radius: var(--radius-xs); padding: 6px 8px; background: color-mix(in srgb,#c44242 8%,var(--surface)); color: var(--text-muted); font-size: 12.5px; }
 
   .conversation-composer { border: 1px solid var(--border); border-radius: var(--radius); background: var(--surface); }
