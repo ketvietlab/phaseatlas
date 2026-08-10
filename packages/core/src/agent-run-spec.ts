@@ -92,6 +92,13 @@ export function createAgentRunSpec(input: {
     runId: input.runId,
     taskKey: canonicalTaskKey(task),
     taskRevision: task.revision,
+    ...(input.snapshot.registry ? {
+      taskRegistry: {
+        remote: input.snapshot.registry.remote,
+        ref: input.snapshot.registry.ref,
+        commit: input.snapshot.registry.commit,
+      },
+    } : {}),
     action: input.request.action,
     checkout: {
       repositoryId: input.repository.id,

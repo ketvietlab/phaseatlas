@@ -16,10 +16,25 @@ TaskProposal -> CanonicalTask -> AgentRunSpec -> AgentRunResult
 ## Canonical location
 
 ```text
-.phaseatlas/workspaces/<workspace-slug>/tasks/<task-id>.yaml
+<task-registry-ref>:.phaseatlas/workspaces/<workspace-slug>/tasks/<task-id>.yaml
 ```
 
-One file per task reduces merge conflicts and makes task changes reviewable in pull requests.
+The repository manifest declares the remote ref used by every code checkout:
+
+```yaml
+taskRegistry:
+  remote: origin
+  ref: refs/heads/phaseatlas/tasks
+  defaultDeliveryRef: refs/heads/develop
+```
+
+One file per task reduces conflicts. The current code branch is never a second task authority. A task
+snapshot records the registry ref, commit, sync state, and unpublished changed paths. Missing or
+unfetchable configured refs fail closed.
+
+Theia edits the application-managed registry worktree. Save produces a draft; validation plus an
+explicit publish creates a commit and pushes it only when the remote still matches the expected
+registry commit. Task state transitions remain subject to the normal review and evidence authority.
 
 ## Approved legacy candidate projection
 
@@ -210,7 +225,7 @@ is an optional Markdown sidecar stored beside it:
 
 The Markdown body is initialized only when a user requests it. It uses `Context`, `Requirements`,
 `Implementation notes`, `Constraints`, and `Verification plan` sections so an implementation agent
-can start without the planning conversation. The body can then be edited in the repository editor.
+can start without the planning conversation. The body can then be edited in the embedded Theia IDE.
 Its path and bytes participate in the canonical revision hash.
 
 ## State and readiness

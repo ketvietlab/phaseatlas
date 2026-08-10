@@ -45,9 +45,10 @@ same bundle. Development artifacts disable updates. Release artifacts permit onl
 flow backed by pre-verified signed metadata; no renderer capability can change that policy.
 
 The main process also supervises embedded Theia instances. The renderer may select only a registered
-checkout ID or a retained run ID; trusted code resolves that identity to the canonical checkout or
-retained worktree path before starting the backend. The Theia browser surface is separately sandboxed,
-and its backend is bound to loopback for exactly one resolved workspace.
+checkout ID, retained run ID, or configured task-registry target; trusted code resolves that identity
+to the canonical checkout, retained worktree, or application-managed registry worktree before
+starting the backend. The Theia browser surface is separately sandboxed, and its backend is bound to
+loopback for exactly one resolved workspace.
 
 ### Repository worker
 
@@ -81,7 +82,8 @@ commands. The worker resolves all paths under its granted root and validates tas
 
 PhaseAtlas distinguishes four data classes:
 
-1. **Canonical task contract** — Git-tracked `.phaseatlas/` YAML.
+1. **Canonical task contract** — Git-tracked `.phaseatlas/` YAML on the repository's configured task
+   registry ref; an unconfigured repository reads it from the current code checkout for compatibility.
 2. **Repository evidence** — Git, pull requests, CI, and promoted evidence documents.
 3. **Operational state** — local SQLite, run events, logs, retries, and UI state.
 4. **Projection** — workspace metrics and display status derived from the previous sources.
@@ -97,12 +99,12 @@ An agent can propose state and produce evidence. It cannot directly declare a ca
 ## Distribution boundary
 
 The macOS bundle contains Electron, the desktop main/preload output, the static renderer, the bundled
-repository worker, the embedded Theia runtime and pinned extensions, and the native terminal runtime.
+repository worker, and the embedded Theia runtime with its pinned extensions and terminal support.
 A generated SHA-256 manifest covers all PhaseAtlas-owned runtime files, including Theia and its default
 extensions. Packaging validates the renderer sandbox strings, typed preload exposure, absence of
 workspace imports, absence of credential-like custom files, and the application code signature before
 the smoke test can start it.
 
-The application bundle is replaceable; canonical tasks remain in each repository and checkout-owned
-operational SQLite remains under PhaseAtlas application support. This separation makes rollback an
-application replacement rather than a task or execution-state migration.
+The application bundle is replaceable; canonical tasks remain on each repository's task registry ref
+and checkout-owned operational SQLite remains under PhaseAtlas application support. This separation
+makes rollback an application replacement rather than a task or execution-state migration.

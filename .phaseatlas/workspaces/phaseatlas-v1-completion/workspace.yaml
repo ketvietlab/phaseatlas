@@ -1,5 +1,0 @@
-schemaVersion: phaseatlas.workspace/v1
-slug: phaseatlas-v1-completion
-name: PhaseAtlas V1 Completion
-description: Complete the remaining repository-ingestion, durable runtime, isolated agent execution,
-  execution workbench, and desktop distribution milestones for PhaseAtlas.

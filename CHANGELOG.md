@@ -10,6 +10,11 @@ may contain a documented breaking change.
 
 ### Added
 
+- Repositories can nominate one canonical Git task registry ref. PhaseAtlas loads it through a
+  detached managed worktree, records its commit in task snapshots, and keeps task state stable while
+  users switch code branches. Theia opens the registry as a dedicated target with draft status,
+  validation, discard, and expected-head `Review & Publish` controls.
+
 - The macOS bundle ships the IDE: the Theia build as `theia-ide`, the pinned extensions as
   `theia-default-extensions`, and the IDE preload beside the desktop one. Packaging fails with an
   actionable message when those inputs are missing, and bundle verification asserts all three.
@@ -19,11 +24,43 @@ may contain a documented breaking change.
   base revision actually are. Each target gets its own view, port and configuration, and a worktree
   can only be opened while its lease is retained.
 
-- The IDE opens as a panel over the workspace, beside the sidebar, the way agent chat does — same
-  header, same close button, same `Esc`. Closing it only puts it away: each Theia backend keeps its
+- The IDE opens as a full replacement for the repository content column, beside the sidebar. Chat and
+  IDE share an in-surface switcher, header, close behavior, and `Esc`. Closing it only puts it away:
+  each Theia backend keeps its
   editors, terminals and language servers, so reopening is immediate, and stopping one is a separate,
   deliberate act from the panel header. Several open workspaces appear as tabs in that header. When the
   IDE has the keyboard, `Alt+Shift+P` closes the panel from inside it.
+
+- The embedded Theia chrome now uses the PhaseAtlas light and dark design tokens for surfaces,
+  borders, typography, focus, tabs, activity bars, selection, buttons, and status. Native view bounds
+  are corrected for renderer zoom so the IDE cannot shrink over PhaseAtlas or leave a dead strip.
+
+- The repository-wide AI Chat action now opens Theia's native Chat View. Codex and ClaudeCode are
+  registered there, API-key provider onboarding is bypassed for these CLI-authenticated agents, and
+  the pinned Claude Agent SDK is included in packaged runtime verification.
+
+- Repository agent, model, and reasoning-effort settings now synchronize in both directions between
+  PhaseAtlas and Theia. Theia's chat composer receives a compact PhaseAtlas provider bar, all reverse
+  changes are validated against the repository runner catalog, and the packaged current Codex runtime
+  applies selected Codex models and effort levels instead of falling back to Theia's older bundled CLI.
+
+- The embedded IDE now ships pinned syntax grammars for common programming and configuration
+  languages, plus Markdown authoring and preview, Mermaid diagrams, MDX, Svelte, and Vue support.
+
+- The repository sidebar is narrower and name-focused. Repository rows, close targets, branding,
+  runtime status, the main content offset, and native IDE bounds now share the compact width;
+  touch-sized controls are restored in the mobile drawer.
+
+### Removed
+
+- The standalone PhaseAtlas terminal, its PTY worker protocol, IPC bridge, renderer dependencies, and
+  packaging path. Interactive shells now use the checkout-bound terminal provided by Theia.
+
+- The separate Monaco repository editor and its renderer dependency. Repository editing now has one
+  canonical surface: the checkout-bound Theia IDE.
+
+- The standalone PhaseAtlas repository chat window and its `Chat | IDE` surface switcher. Repository-
+  wide conversations now use Theia AI Chat, avoiding two competing chat and editor shells.
 
 - File paths cited by the model are clickable. A path in a result summary, next action, verification
   note, blocker, evidence reference, or conversation reply opens that file in a panel on the right of

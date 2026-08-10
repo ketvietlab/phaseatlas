@@ -1,8 +1,5 @@
 <script lang="ts">
   import { onMount, tick } from "svelte";
-  import RepositoryWorkbench from "$lib/RepositoryWorkbench.svelte";
-  import RepositoryChatWorkspace from "$lib/RepositoryChatWorkspace.svelte";
-  import TerminalPanel from "$lib/TerminalPanel.svelte";
   import ProviderPicker from "$lib/ProviderPicker.svelte";
   import TaskConversation from "$lib/TaskConversation.svelte";
   import ModelMarkdown from "$lib/ModelMarkdown.svelte";
@@ -15,6 +12,8 @@
     AgentRunActionAvailability,
     AgentRunSummary,
     CanonicalTask,
+    IdeAgentConfiguration,
+    IdeAgentSelection,
     IdeSurfaceState,
     IdeViewportRect,
     PersistedRunEvent,
@@ -36,7 +35,6 @@
   const TASK_VIEW_STORAGE_KEY = "phaseatlas.task-view";
   const PROVIDER_SETTINGS_STORAGE_KEY = "phaseatlas.repository-provider-settings.v1";
   const SELECTED_AGENT_RUN_STORAGE_KEY = "phaseatlas.selected-agent-run.v1";
-  const TERMINAL_HEIGHT_STORAGE_KEY = "phaseatlas.terminal-height.v1";
   const LEGACY_WORKBENCH_STATE_STORAGE_KEY = "phaseatlas.workbench-state.v1";
   const WORKBENCH_STATE_STORAGE_KEY = "phaseatlas.workbench-state.v2";
 
@@ -45,15 +43,8 @@
     modelId: string;
     reasoningEffort?: string;
   }>;
-  type PersistedWorkbenchSurfaceState = {
-    chatOpen: boolean;
-    editorOpen: boolean;
-    terminalOpen: boolean;
-    terminalMaximized: boolean;
-  };
   type PersistedWorkbenchState = {
     selectedCheckoutId: string;
-    repositories: Record<string, PersistedWorkbenchSurfaceState>;
   };
   type CommandCard = {
     commandId: string;
@@ -111,21 +102,22 @@
   let plannerError = "";
   let publishing = false;
   let published = false;
-  let editorOpen = false;
-  let editorInitialPath = "";
   let contentPanelTaskKey = "";
   let contentRuns: Record<string, { status: TaskContentRunStatus; taskKeys: string[] }> = {};
   let contentTaskStatuses: Record<string, TaskContentRunStatus> = {};
   let contentTaskRunIds: Record<string, string> = {};
   let contentLogs: Record<string, string> = {};
   let contentFailures: Record<string, string> = {};
-  let openEditorAfterTask: Record<string, boolean> = {};
+  let openIdeAfterTask: Record<string, boolean> = {};
   let executionOpen = false;
   const PIPELINE_ACTIONS: AgentRunAction[] = ["analyze", "plan", "implement", "review"];
   let ideOpening = false;
   let ideError = "";
   let ideState: IdeSurfaceState = { targets: [], visibleKey: null };
   let ideOpen = false;
+  let ideRepositorySync: Promise<void> = Promise.resolve();
+  let ideRepositorySyncRequest = 0;
+  let ideAgentSync: Promise<void> = Promise.resolve();
   let openedFilePath = "";
   let openedFileContent = "";
   let openedFileError = "";
@@ -155,14 +147,7 @@
   let executionReturnFocus: HTMLElement | null = null;
   let executionActionRequest = 0;
   let agentRunListRequest = 0;
-  let terminalOpen = false;
-  let terminalMaximized = false;
-  let terminalHeight = 300;
-  let terminalPanel: { focus(): void; hasFocus(): boolean } | undefined;
-  let repositoryWorkbench: { closeActiveSurface(): void; focusActiveEditor(): void } | undefined;
   let taskContentPanel: { closeActiveSurface(): void } | undefined;
-  let chatOpen = false;
-  let workbenchStateReady = false;
 
   $: selectedRepository = repositories.find(
     (repository) => repository.checkoutId === selectedCheckoutId,
@@ -252,25 +237,12 @@
   $: selectedTaskRuns = selectedTask
     ? agentRuns.filter((run) => run.taskKey === canonicalTaskKey(selectedTask))
     : [];
-  $: explorerShortcutLabel = platform === "darwin" ? "⌘⇧E" : "Ctrl+Shift+E";
-  $: terminalShortcutLabel = platform === "darwin" ? "⌘`" : "Ctrl+`";
   $: chatShortcutLabel = platform === "darwin" ? "⌥L" : "Alt+L";
-  $: chatActive = chatOpen && !editorOpen;
-  $: if (workbenchStateReady && selectedCheckoutId) {
-    persistWorkbenchState(selectedCheckoutId, {
-      chatOpen,
-      editorOpen,
-      terminalOpen,
-      terminalMaximized,
-    });
-  }
 
   onMount(() => {
     theme = document.documentElement.dataset.theme === "dark" ? "dark" : "light";
     const savedTaskView = window.localStorage.getItem(TASK_VIEW_STORAGE_KEY);
     if (savedTaskView === "list" || savedTaskView === "map") taskView = savedTaskView;
-    const savedTerminalHeight = Number(window.localStorage.getItem(TERMINAL_HEIGHT_STORAGE_KEY));
-    if (Number.isFinite(savedTerminalHeight) && savedTerminalHeight >= 180) terminalHeight = savedTerminalHeight;
     const planningClockTimer = window.setInterval(() => {
       planningClock = Date.now();
     }, 1_000);
@@ -303,6 +275,10 @@
     // The main process also changes this on its own — a Theia backend that dies
     // has to disappear from the strip without the renderer having asked.
     const unsubscribeIde = window.phaseatlas.ide.onStateChanged((state) => (ideState = state));
+    const unsubscribeIdeAgent = window.phaseatlas.ide.onAgentConfigurationChanged((checkoutId, configuration) => {
+      if (checkoutId !== selectedCheckoutId) return;
+      applyIdeAgentConfiguration(configuration);
+    });
 
     void initialize();
     return () => {
@@ -311,6 +287,7 @@
       unsubscribe();
       unsubscribeCloseSurface();
       unsubscribeIde();
+      unsubscribeIdeAgent();
     };
   });
 
@@ -325,7 +302,6 @@
       const savedRepository = repositories.find((repository) => repository.checkoutId === savedWorkbenchState?.selectedCheckoutId);
       const initialRepository = savedRepository ?? repositories[0];
       if (initialRepository) await selectRepository(initialRepository.checkoutId);
-      workbenchStateReady = true;
     } catch (error) {
       errorMessage = error instanceof Error ? error.message : "PhaseAtlas could not be initialized.";
     } finally {
@@ -340,49 +316,15 @@
       if (!value || typeof value !== "object" || Array.isArray(value)) return null;
       const state = value as Record<string, unknown>;
       if (typeof state.selectedCheckoutId !== "string") return null;
-      const parseSurface = (candidate: unknown): PersistedWorkbenchSurfaceState | null => {
-        if (!candidate || typeof candidate !== "object" || Array.isArray(candidate)) return null;
-        const surface = candidate as Record<string, unknown>;
-        return {
-          chatOpen: surface.chatOpen === true,
-          editorOpen: surface.editorOpen === true,
-          terminalOpen: surface.terminalOpen === true,
-          terminalMaximized: surface.terminalOpen === true && surface.terminalMaximized === true,
-        };
-      };
-      if (state.repositories && typeof state.repositories === "object" && !Array.isArray(state.repositories)) {
-        const repositories = Object.fromEntries(Object.entries(state.repositories as Record<string, unknown>)
-          .map(([checkoutId, candidate]) => [checkoutId, parseSurface(candidate)] as const)
-          .filter((entry): entry is [string, PersistedWorkbenchSurfaceState] => Boolean(entry[1])));
-        return { selectedCheckoutId: state.selectedCheckoutId, repositories };
-      }
-      const legacySurface = parseSurface(state);
-      if (!legacySurface) return null;
-      return {
-        selectedCheckoutId: state.selectedCheckoutId,
-        repositories: { [state.selectedCheckoutId]: legacySurface },
-      };
+      return { selectedCheckoutId: state.selectedCheckoutId };
     } catch {
       return null;
     }
   }
 
-  function persistWorkbenchState(checkoutId: string, surface: PersistedWorkbenchSurfaceState) {
-    const existing = readWorkbenchState();
-    const state: PersistedWorkbenchState = {
-      selectedCheckoutId: checkoutId,
-      repositories: { ...existing?.repositories, [checkoutId]: surface },
-    };
-    window.localStorage.setItem(WORKBENCH_STATE_STORAGE_KEY, JSON.stringify(state));
+  function persistWorkbenchState(checkoutId: string) {
+    window.localStorage.setItem(WORKBENCH_STATE_STORAGE_KEY, JSON.stringify({ selectedCheckoutId: checkoutId }));
     window.localStorage.removeItem(LEGACY_WORKBENCH_STATE_STORAGE_KEY);
-  }
-
-  function restoreWorkbenchState(state: PersistedWorkbenchSurfaceState | undefined) {
-    if (!state) return;
-    chatOpen = state.chatOpen;
-    editorOpen = state.editorOpen;
-    terminalOpen = state.terminalOpen;
-    terminalMaximized = state.terminalOpen && state.terminalMaximized;
   }
 
   function clearWorkbenchState() {
@@ -391,19 +333,7 @@
   }
 
   function removeRepositoryWorkbenchState(checkoutId: string) {
-    const existing = readWorkbenchState();
-    if (!existing) return;
-    const repositories = { ...existing.repositories };
-    delete repositories[checkoutId];
-    if (!Object.keys(repositories).length) {
-      clearWorkbenchState();
-      return;
-    }
-    const selectedCheckoutId = existing.selectedCheckoutId === checkoutId
-      ? Object.keys(repositories)[0] ?? ""
-      : existing.selectedCheckoutId;
-    window.localStorage.setItem(WORKBENCH_STATE_STORAGE_KEY, JSON.stringify({ selectedCheckoutId, repositories }));
-    window.localStorage.removeItem(LEGACY_WORKBENCH_STATE_STORAGE_KEY);
+    if (readWorkbenchState()?.selectedCheckoutId === checkoutId) clearWorkbenchState();
   }
 
   async function openRepository() {
@@ -427,37 +357,27 @@
 
   async function selectRepository(checkoutId: string) {
     if (!window.phaseatlas) return;
-    if (workbenchStateReady && selectedCheckoutId) {
-      persistWorkbenchState(selectedCheckoutId, {
-        chatOpen,
-        editorOpen,
-        terminalOpen,
-        terminalMaximized,
-      });
-    }
-    const savedSurface = readWorkbenchState()?.repositories[checkoutId];
+    const keepIdeVisible = ideOpen;
     const requestId = ++repositoryLoadRequest;
     repositoryLoading = true;
     selectedCheckoutId = checkoutId;
+    persistWorkbenchState(checkoutId);
     workspaces = [];
     runners = [];
     taskSnapshot = null;
+    plannerRunnerId = "";
+    plannerModel = "";
+    plannerReasoningEffort = "";
     selectedWorkspaceSlug = "";
     selectedTaskKey = "";
-    editorOpen = false;
-    editorInitialPath = "";
-    terminalOpen = false;
-    terminalMaximized = false;
     contentPanelTaskKey = "";
     contentRuns = {};
     contentTaskStatuses = {};
     contentTaskRunIds = {};
     contentLogs = {};
     contentFailures = {};
-    openEditorAfterTask = {};
+    openIdeAfterTask = {};
     executionOpen = false;
-    chatOpen = false;
-    restoreWorkbenchState(savedSurface);
     executionActions = [];
     executionError = "";
     executionNotice = "";
@@ -470,6 +390,10 @@
     commandOutputs = {};
     errorMessage = "";
     menuOpen = false;
+    // Switching the visible IDE is independent from refreshing PhaseAtlas's
+    // repository metadata. In particular, a worker/schema error must not leave
+    // Theia showing the previously selected checkout.
+    if (keepIdeVisible) void queueRepositoryIdeSync(checkoutId);
     try {
       const recoveredRepository = await window.phaseatlas.repositories.refresh(checkoutId);
       if (requestId !== repositoryLoadRequest || checkoutId !== selectedCheckoutId) return;
@@ -508,30 +432,6 @@
     } finally {
       if (requestId === repositoryLoadRequest && checkoutId === selectedCheckoutId) repositoryLoading = false;
     }
-  }
-
-  async function toggleTerminal() {
-    if (!selectedCheckoutId) return;
-    if (terminalOpen) {
-      await closeTerminal();
-      return;
-    }
-    terminalOpen = true;
-    await tick();
-    terminalPanel?.focus();
-  }
-
-  async function closeTerminal(restoreEditorFocus = true) {
-    terminalOpen = false;
-    terminalMaximized = false;
-    if (!restoreEditorFocus || !editorOpen) return;
-    await tick();
-    repositoryWorkbench?.focusActiveEditor();
-  }
-
-  function updateTerminalHeight(nextHeight: number) {
-    terminalHeight = Math.round(nextHeight);
-    window.localStorage.setItem(TERMINAL_HEIGHT_STORAGE_KEY, String(terminalHeight));
   }
 
   function readRepositoryProviderSettings(): RepositoryProviderSettings {
@@ -573,7 +473,7 @@
     if (plannerRunnerId && plannerModel) persistRepositoryProviderSettings();
   }
 
-  function persistRepositoryProviderSettings() {
+  function persistRepositoryProviderSettings(syncIde = true) {
     if (!selectedCheckoutId || !plannerRunnerId || !plannerModel) return;
     const settings = readRepositoryProviderSettings();
     settings[selectedCheckoutId] = {
@@ -582,6 +482,35 @@
       ...(plannerReasoningEffort ? { reasoningEffort: plannerReasoningEffort } : {}),
     };
     window.localStorage.setItem(PROVIDER_SETTINGS_STORAGE_KEY, JSON.stringify(settings));
+    if (syncIde) queueIdeAgentSync(selectedCheckoutId, settings[selectedCheckoutId]);
+  }
+
+  function queueIdeAgentSync(checkoutId: string, selection: IdeAgentSelection): void {
+    if (!window.phaseatlas || !checkoutId || !selection.runnerId || !selection.modelId) return;
+    const next = async () => {
+      if (!window.phaseatlas) return;
+      await window.phaseatlas.ide.configureAgent(checkoutId, selection);
+    };
+    ideAgentSync = ideAgentSync.then(next, next).catch((error: unknown) => {
+      if (checkoutId === selectedCheckoutId && ideOpen) {
+        ideError = error instanceof Error ? error.message : "The IDE agent settings could not be synchronized.";
+      }
+    });
+  }
+
+  function applyIdeAgentConfiguration(configuration: IdeAgentConfiguration): void {
+    const runner = runners.find((candidate) => candidate.id === configuration.runnerId);
+    const model = runner?.models.find((candidate) => candidate.id === configuration.modelId);
+    if (!runner?.available || !model) return;
+    plannerRunnerId = runner.id;
+    plannerModel = model.id;
+    plannerReasoningEffort = configuration.reasoningEffort && model.reasoningEfforts.includes(configuration.reasoningEffort)
+      ? configuration.reasoningEffort
+      : "";
+    // This update already came through the validated IDE bridge. Persist it for
+    // the repository without echoing the same selection back into Theia.
+    persistRepositoryProviderSettings(false);
+    if (executionOpen && selectedTask) void loadExecutionActions(selectedTask);
   }
 
   function selectProviderRunner(runnerId: string) {
@@ -681,23 +610,88 @@
       closeIdeSurface();
       return;
     }
+    showRepositoryIde();
+  }
+
+  async function openTaskRegistryIde() {
+    if (!window.phaseatlas || !selectedCheckoutId || ideOpening || !selectedRepository?.taskRegistry) return;
     revealIdeSurface();
     ideOpening = true;
     ideError = "";
     try {
       await tick();
-      ideState = await window.phaseatlas.ide.open(selectedCheckoutId, theme === "dark" ? "dark" : "light");
+      ideState = await window.phaseatlas.ide.openTaskRegistry(
+        selectedCheckoutId,
+        theme === "dark" ? "dark" : "light",
+      );
     } catch (error) {
-      ideError = error instanceof Error ? error.message : "The embedded IDE could not be opened.";
+      ideError = error instanceof Error ? error.message : "The task registry could not be opened in Theia.";
     } finally {
       ideOpening = false;
     }
   }
 
-  // The IDE covers the same area as chat and the explorer, so opening it closes
-  // them, exactly as opening either of those closes the others.
+  function showRepositoryIde() {
+    if (!selectedCheckoutId) return;
+    contentPanelTaskKey = "";
+    revealIdeSurface();
+    return queueRepositoryIdeSync(selectedCheckoutId);
+  }
+
+  async function openTheiaChat() {
+    if (!window.phaseatlas || !selectedCheckoutId || ideOpening) return;
+    ideError = "";
+    try {
+      await showRepositoryIde();
+      await window.phaseatlas.ide.openChat();
+    } catch (error) {
+      ideError = error instanceof Error ? error.message : "Theia AI Chat could not be opened.";
+    }
+  }
+
+  function queueRepositoryIdeSync(checkoutId: string): Promise<void> {
+    if (!window.phaseatlas) return Promise.resolve();
+    const requestId = ++ideRepositorySyncRequest;
+    ideOpening = true;
+    ideError = "";
+    const sync = async () => {
+      if (!window.phaseatlas || !ideOpen || selectedCheckoutId !== checkoutId) return;
+      if (plannerRunnerId && plannerModel) {
+        await window.phaseatlas.ide.configureAgent(checkoutId, {
+          runnerId: plannerRunnerId,
+          modelId: plannerModel,
+          ...(plannerReasoningEffort ? { reasoningEffort: plannerReasoningEffort } : {}),
+        });
+      }
+      await tick();
+      const existing = ideState.targets.find((target) =>
+        target.checkoutId === checkoutId && target.kind !== "tasks" && target.leaseId === undefined,
+      );
+      const nextState = existing
+        ? await window.phaseatlas.ide.show(existing.key)
+        : await window.phaseatlas.ide.open(checkoutId, theme === "dark" ? "dark" : "light");
+      // An already-running switch may finish after the user closes the IDE. In
+      // that case hide the native view again instead of leaving it over the UI.
+      if (!ideOpen) {
+        ideState = await window.phaseatlas.ide.hide();
+        return;
+      }
+      if (selectedCheckoutId === checkoutId) ideState = nextState;
+    };
+    ideRepositorySync = ideRepositorySync
+      .then(sync, sync)
+      .catch((error: unknown) => {
+        if (selectedCheckoutId === checkoutId && ideOpen) {
+          ideError = error instanceof Error ? error.message : "The repository IDE could not be opened.";
+        }
+      })
+      .finally(() => {
+        if (requestId === ideRepositorySyncRequest) ideOpening = false;
+      });
+    return ideRepositorySync;
+  }
+
   function revealIdeSurface() {
-    chatOpen = false;
     ideError = "";
     ideOpen = true;
   }
@@ -734,13 +728,6 @@
 
   function reportIdeViewport(rect: IdeViewportRect) {
     void window.phaseatlas?.ide.setViewport(rect).catch(() => undefined);
-  }
-
-  async function revealAgentConfiguration() {
-    chatOpen = false;
-    await tick();
-    agentConfigurationElement?.scrollIntoView({ behavior: "smooth", block: "center" });
-    agentConfigurationElement?.querySelector<HTMLSelectElement>("select")?.focus({ preventScroll: true });
   }
 
   async function refreshRepository(checkoutId: string) {
@@ -848,10 +835,9 @@
     if (event.type === "task-content.task-completed") {
       contentTaskStatuses = { ...contentTaskStatuses, [event.taskKey]: "completed" };
       if (window.phaseatlas) taskSnapshot = await window.phaseatlas.tasks.snapshot(selectedCheckoutId);
-      if (openEditorAfterTask[event.taskKey]) {
-        editorInitialPath = event.contentPath;
-        editorOpen = true;
-        openEditorAfterTask = { ...openEditorAfterTask, [event.taskKey]: false };
+      if (openIdeAfterTask[event.taskKey]) {
+        showRepositoryIde();
+        openIdeAfterTask = { ...openIdeAfterTask, [event.taskKey]: false };
       }
     }
   }
@@ -876,7 +862,7 @@
       Object.entries(contentFailures).filter(([taskKey]) => !requestedTaskKeys.includes(taskKey)),
     );
     if (openAfter && requestedTaskKeys.length === 1) {
-      openEditorAfterTask = { ...openEditorAfterTask, [requestedTaskKeys[0]]: true };
+      openIdeAfterTask = { ...openIdeAfterTask, [requestedTaskKeys[0]]: true };
     }
     try {
       const result = await window.phaseatlas.tasks.initializeContent(selectedCheckoutId, {
@@ -902,23 +888,9 @@
     }
   }
 
-  function openRepositoryEditor(path = "") {
-    contentPanelTaskKey = "";
-    editorInitialPath = path;
-    // Like chat, the IDE panel is only deactivated by the explorer, not closed:
-    // it comes back when the explorer does. Being inactive reports an empty
-    // rectangle, which takes the native Theia view down with it.
-    editorOpen = true;
-  }
-
   function editTaskContent(task: CanonicalTask) {
     if (!task.content) return;
-    openRepositoryEditor(task.content.path);
-  }
-
-  async function handleEditorSaved(path: string) {
-    if (!window.phaseatlas || !path.startsWith(".phaseatlas/")) return;
-    taskSnapshot = await window.phaseatlas.tasks.snapshot(selectedCheckoutId);
+    showRepositoryIde();
   }
 
   function readSelectedAgentRuns(): Record<string, string> {
@@ -1608,18 +1580,12 @@
       taskSnapshot = null;
       selectedWorkspaceSlug = "";
       selectedTaskKey = "";
-      chatOpen = false;
       executionOpen = false;
       agentRuns = [];
       agentEvents = {};
       agentEventCursors = {};
-      terminalMaximized = false;
       if (repositories[0]) await selectRepository(repositories[0].checkoutId);
-      else {
-        terminalOpen = false;
-        editorOpen = false;
-        clearWorkbenchState();
-      }
+      else clearWorkbenchState();
     }
   }
 
@@ -1635,12 +1601,6 @@
     // itself, so a close request arriving while it is open came from inside it.
     if (ideOpen) {
       closeIdeSurface();
-    } else if (terminalOpen && terminalPanel?.hasFocus()) {
-      void closeTerminal();
-    } else if (editorOpen) {
-      repositoryWorkbench?.closeActiveSurface();
-    } else if (chatOpen) {
-      chatOpen = false;
     } else if (executionConfirmAction) {
       executionConfirmAction = null;
       executionScopeConfirmed = false;
@@ -1651,8 +1611,6 @@
       taskContentPanel?.closeActiveSurface();
     } else if (plannerOpen) {
       closePlanner();
-    } else if (terminalOpen) {
-      void closeTerminal(false);
     } else {
       menuOpen = false;
     }
@@ -1676,11 +1634,8 @@
     }
     const chatShortcut = event.altKey && !event.metaKey && !event.ctrlKey && !event.shiftKey && event.key.toLowerCase() === "l";
     if (chatShortcut && !event.repeat && selectedCheckoutId) {
-      if (!editorOpen && (chatOpen || (!executionOpen && !plannerOpen && !contentPanelTask))) {
-        event.preventDefault();
-        if (!chatOpen && ideOpen) closeIdeSurface();
-        chatOpen = !chatOpen;
-      }
+      event.preventDefault();
+      void openTheiaChat();
       return;
     }
     const modifier = event.metaKey || event.ctrlKey;
@@ -1697,33 +1652,20 @@
       if (
         !event.repeat &&
         selectedCheckoutId &&
-        !chatActive &&
         !executionOpen &&
         !plannerOpen &&
         !contentPanelTask
-      ) openRepositoryEditor();
-      return;
-    }
-    const terminalShortcut = modifier && !event.shiftKey && !event.altKey && (
-      event.code === "Backquote" || event.key.toLowerCase() === "j"
-    );
-    if (terminalShortcut && !event.repeat && selectedCheckoutId) {
-      event.preventDefault();
-      void toggleTerminal();
+      ) showRepositoryIde();
       return;
     }
     if (event.key !== "Escape") return;
-    if (terminalOpen && terminalPanel?.hasFocus()) return;
-    if (editorOpen) return;
     if (ideOpen) closeIdeSurface();
-    else if (chatOpen) chatOpen = false;
     else if (executionConfirmAction) {
       executionConfirmAction = null;
       executionScopeConfirmed = false;
       executionPanelElement?.focus();
     }
     else if (executionOpen) closeExecutionWorkbench();
-    else if (terminalMaximized) terminalMaximized = false;
     else if (plannerOpen) closePlanner();
     else menuOpen = false;
   }
@@ -1755,16 +1697,21 @@
 
     <button class="primary-button open-repository" type="button" onclick={openRepository} disabled={opening}>
       <svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5v14M5 12h14"/></svg>
-      <span>{opening ? "Opening…" : "Open repository"}</span>
+      <span>{opening ? "Opening…" : "Open repo"}</span>
     </button>
 
     <nav class="repository-list" aria-label="Open repositories">
       {#each repositories as repository}
         <div class:active={repository.checkoutId === selectedCheckoutId} class="repository-row">
-          <button class="repository-select" type="button" onclick={() => selectRepository(repository.checkoutId)}>
+          <button
+            class="repository-select"
+            type="button"
+            aria-label={`${repository.name}, ${repository.workspaceCount} ${repository.workspaceCount === 1 ? "workspace" : "workspaces"}`}
+            title={repository.name}
+            onclick={() => selectRepository(repository.checkoutId)}
+          >
             <span class="repository-copy">
               <strong>{repository.name}</strong>
-              <small>{repository.workspaceCount} {repository.workspaceCount === 1 ? "workspace" : "workspaces"}</small>
             </span>
             <span class="online-dot" aria-label="Worker is online"></span>
           </button>
@@ -1777,7 +1724,7 @@
 
     <footer class="sidebar-footer">
       <span class="live-indicator"></span>
-      <span><strong>Local runtime</strong><small>One worker per checkout</small></span>
+      <span><strong>Local runtime</strong><small>Workers online</small></span>
     </footer>
   </aside>
 
@@ -1792,36 +1739,26 @@
   </header>
   {#if menuOpen}<button class="sidebar-backdrop" type="button" aria-label="Close menu" onclick={() => (menuOpen = false)}></button>{/if}
 
-  <main
-    class:terminal-visible={terminalOpen && !editorOpen && Boolean(selectedCheckoutId) && !terminalMaximized}
-    class="main"
-    id="main-content"
-    style={`--terminal-panel-height: ${terminalHeight}px`}
-  >
+  <main class="main" id="main-content">
     <header class="command-bar">
       <div class="breadcrumbs">
         <span>PhaseAtlas</span><span>/</span><strong>{selectedRepository?.name || "Repositories"}</strong>
       </div>
       <div class="command-actions">
         <button
-          class:active={chatActive}
           class="terminal-toggle"
           type="button"
-          aria-label={`${chatActive ? "Close" : "Open"} repository agent chat`}
-          aria-pressed={chatActive}
-          title={`Toggle agent chat (${chatShortcutLabel})`}
-          onclick={() => {
-            if (!chatOpen && ideOpen) closeIdeSurface();
-            chatOpen = !chatOpen;
-          }}
-          disabled={!selectedCheckoutId}
+          aria-label="Open Theia AI Chat"
+          title={`Open Theia AI Chat with Codex or Claude (${chatShortcutLabel})`}
+          onclick={() => void openTheiaChat()}
+          disabled={!selectedCheckoutId || ideOpening}
         >
           <svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M5 5h14v10H9l-4 4z"/><path d="M9 9h6M9 12h4"/></svg>
-          <span>Chat</span>
+          <span>AI Chat</span>
           <kbd>{chatShortcutLabel}</kbd>
         </button>
         <button
-          class:active={ideOpen && !editorOpen}
+          class:active={ideOpen}
           class="terminal-toggle"
           type="button"
           aria-label={`${ideOpen ? "Close" : "Open"} the embedded IDE`}
@@ -1833,34 +1770,20 @@
           <svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="4" width="18" height="16" rx="2"/><path d="M3 9h18"/><path d="m8 13 2 2-2 2M13 17h4"/></svg>
           <span>{ideOpening ? "Opening…" : "IDE"}</span>
         </button>
-        <button
-          class:active={editorOpen}
-          class="terminal-toggle"
-          type="button"
-          aria-label="Open repository explorer"
-          aria-pressed={editorOpen}
-          title={`Open explorer (${explorerShortcutLabel})`}
-          onclick={() => openRepositoryEditor()}
-          disabled={!selectedCheckoutId}
-        >
-          <svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M4 5h16v14H4zM8 5v14M11 9h6M11 13h4"/></svg>
-          <span>Explorer</span>
-          <kbd>{explorerShortcutLabel}</kbd>
-        </button>
-        <button
-          class:active={terminalOpen}
-          class="terminal-toggle"
-          type="button"
-          aria-label={`${terminalOpen ? "Close" : "Open"} repository terminal`}
-          aria-pressed={terminalOpen}
-          title={`Toggle terminal (${terminalShortcutLabel})`}
-          onclick={toggleTerminal}
-          disabled={!selectedCheckoutId}
-        >
-          <svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="m5 7 4.5 5L5 17M12 17h7"/></svg>
-          <span>Terminal</span>
-          <kbd>{terminalShortcutLabel}</kbd>
-        </button>
+        {#if selectedRepository?.taskRegistry}
+          <button
+            class:active={ideOpen && ideState.targets.find((target) => target.key === ideState.visibleKey)?.kind === "tasks"}
+            class="terminal-toggle"
+            type="button"
+            aria-label="Edit canonical tasks in Theia"
+            title={`Edit tasks from ${selectedRepository.taskRegistry.ref.replace("refs/heads/", "")}`}
+            onclick={openTaskRegistryIde}
+            disabled={ideOpening}
+          >
+            <svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M5 4h14v16H5zM8 8h8M8 12h8M8 16h5"/><path d="m15 16 3-3 2 2-3 3-3 1z"/></svg>
+            <span>Tasks</span>
+          </button>
+        {/if}
         <span class="runtime-badge"><span class="live-indicator"></span>{platform} · local</span>
         <button class="theme-toggle" type="button" aria-label={theme === "dark" ? "Switch to light theme" : "Switch to dark theme"} aria-pressed={theme === "dark"} onclick={() => setTheme(theme === "dark" ? "light" : "dark")}>
           <span class="theme-track"><span class="theme-thumb"></span></span>
@@ -2084,7 +2007,7 @@
                         <p class="task-content-preview">{selectedTask.content.body.slice(0, 280)}{selectedTask.content.body.length > 280 ? "…" : ""}</p>
                         <footer>
                           <code>{selectedTask.content.path}</code>
-                          <button class="secondary-button" type="button" onclick={() => openRepositoryEditor(selectedTask.content?.path)}>Edit in Monaco</button>
+                          <button class="secondary-button" type="button" onclick={showRepositoryIde}>Open in IDE</button>
                         </footer>
                       {:else}
                         <p>Generate a repository-aware Markdown body when this task is ready for implementation. Publishing the outline does not spend these tokens.</p>
@@ -2160,14 +2083,12 @@
 {#if executionOpen}
   <button class="execution-backdrop" type="button" aria-label="Close execution workbench" onclick={closeExecutionWorkbench}></button>
   <div
-    class:terminal-docked={terminalOpen && !terminalMaximized}
     class="execution-panel"
     role="dialog"
     aria-modal="true"
     aria-labelledby="execution-title"
     tabindex="-1"
     bind:this={executionPanelElement}
-    style={`--persistent-terminal-height: ${terminalHeight}px`}
   >
     <header class="execution-header">
       <div class="execution-header-mark" aria-hidden="true"><svg class="icon" viewBox="0 0 24 24"><path d="M5 4h14v16H5zM8 8h8M8 12h5M8 16h7"/><path d="m15 11 4 2.5-4 2.5z"/></svg></div>
@@ -2591,47 +2512,13 @@
     state={ideState}
     repositoryName={selectedRepository.name}
     {platform}
-    active={!editorOpen}
-    {terminalOpen}
-    {terminalHeight}
+    active={true}
     starting={ideOpening}
     errorMessage={ideError}
-    onShow={showIdeTarget}
     onStop={stopIdeTarget}
     onClose={closeIdeSurface}
     onViewport={reportIdeViewport}
   />
-{/if}
-
-{#if chatOpen && selectedCheckoutId && selectedRepository}
-  {#key selectedCheckoutId}
-    <RepositoryChatWorkspace
-      checkoutId={selectedCheckoutId}
-      repositoryName={selectedRepository.name}
-      {runners}
-      runnerId={plannerRunnerId}
-      modelId={plannerModel}
-      reasoningEffort={plannerReasoningEffort}
-      active={!editorOpen}
-      {terminalOpen}
-      {terminalHeight}
-      {terminalShortcutLabel}
-      onSelectProvider={applyProviderSelection}
-      onClose={() => chatOpen = false}
-      onOpenExplorer={() => {
-        openRepositoryEditor();
-      }}
-      onToggleTerminal={() => void toggleTerminal()}
-      onCreateTaskProposal={(request) => {
-        chatOpen = false;
-        plannerRequest = request;
-        openPlanner(selectedWorkspaceSlug ? "workspace" : "repository");
-      }}
-      onShowAgentConfiguration={() => {
-        void revealAgentConfiguration();
-      }}
-    />
-  {/key}
 {/if}
 
 {#if contentPanelTask}
@@ -2650,38 +2537,4 @@
     onInitialize={(task) => initializeTaskContent([canonicalTaskKey(task)])}
     onRun={(task) => openExecutionWorkbench(task)}
   />
-{/if}
-
-{#if editorOpen && selectedCheckoutId}
-  <RepositoryWorkbench
-    bind:this={repositoryWorkbench}
-    checkoutId={selectedCheckoutId}
-    initialPath={editorInitialPath}
-    theme={theme === "dark" ? "dark" : "light"}
-    panelOpen={terminalOpen && Boolean(selectedRepository)}
-    panelHeight={terminalHeight}
-    panelMaximized={terminalMaximized}
-    terminalShortcutLabel={terminalShortcutLabel}
-    onClose={() => editorOpen = false}
-    onSaved={handleEditorSaved}
-    onToggleTerminal={() => void toggleTerminal()}
-  ></RepositoryWorkbench>
-{/if}
-
-{#if terminalOpen && selectedCheckoutId && selectedRepository}
-  {#key selectedCheckoutId}
-    <TerminalPanel
-      bind:this={terminalPanel}
-      checkoutId={selectedCheckoutId}
-      repositoryName={selectedRepository.name}
-      theme={theme === "dark" ? "dark" : "light"}
-      height={terminalHeight}
-      maximized={terminalMaximized}
-      repositoryWorkbench={editorOpen}
-      shortcutLabel={terminalShortcutLabel}
-      onClose={() => void closeTerminal(editorOpen)}
-      onHeightChange={updateTerminalHeight}
-      onToggleMaximized={() => terminalMaximized = !terminalMaximized}
-    />
-  {/key}
 {/if}

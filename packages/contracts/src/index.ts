@@ -22,6 +22,40 @@ export type TaskState = (typeof TASK_STATES)[number];
 export type TaskKind = "code" | "docs" | "research" | "review" | "operations";
 export type TaskPriority = "critical" | "high" | "normal" | "low";
 
+export interface TaskRegistryConfig {
+  remote: string;
+  ref: string;
+  defaultDeliveryRef?: string;
+}
+
+export type TaskRegistrySyncState = "current" | "draft" | "ahead" | "conflicted" | "offline";
+
+export interface TaskRegistrySource extends TaskRegistryConfig {
+  commit: string;
+  syncState: TaskRegistrySyncState;
+  changedPaths: string[];
+}
+
+export interface TaskRegistryWorkspace {
+  path: string;
+  source: TaskRegistrySource;
+}
+
+export interface TaskRegistryValidation {
+  source: TaskRegistrySource;
+  issues: ValidationIssue[];
+}
+
+export interface TaskRegistryPublishInput {
+  expectedCommit: string;
+  message: string;
+}
+
+export interface TaskRegistryPublishResult {
+  source: TaskRegistrySource;
+  snapshot: TaskSnapshot;
+}
+
 export interface RepositorySummary {
   id: string;
   checkoutId: string;
@@ -30,6 +64,7 @@ export interface RepositorySummary {
   configuration: "configured" | "legacy";
   workspaceCount: number;
   openedAt: string;
+  taskRegistry?: TaskRegistryConfig;
   runtime?: RepositoryRuntimeSummary;
 }
 
@@ -187,6 +222,7 @@ export interface TaskGraphEdge {
 export interface TaskSnapshot {
   repositoryId: string;
   generatedAt: string;
+  registry?: TaskRegistrySource;
   tasks: CanonicalTask[];
   issues: ValidationIssue[];
   graph: {
@@ -487,6 +523,7 @@ export interface AgentRunSpec {
   readonly runId: string;
   readonly taskKey: string;
   readonly taskRevision: string;
+  readonly taskRegistry?: Pick<TaskRegistrySource, "remote" | "ref" | "commit">;
   readonly action: AgentRunAction;
   readonly checkout: AgentCheckoutIdentity;
   readonly lease?: WorktreeLeaseRecord;
@@ -603,32 +640,6 @@ export type AgentEvent =
   | { sequence: number; type: "file.changed"; path: string; patch?: string }
   | { sequence: number; type: "turn.completed"; summary: string }
   | { sequence: number; type: "run.failed"; message: string };
-
-export type TerminalSessionStatus = "running" | "exited";
-
-export interface TerminalSessionSnapshot {
-  sessionId: string;
-  title: string;
-  shell: string;
-  cwd: string;
-  status: TerminalSessionStatus;
-  cols: number;
-  rows: number;
-  output: string;
-  createdAt: string;
-  exitCode?: number;
-  exitSignal?: number;
-}
-
-export interface TerminalCreateInput {
-  cols: number;
-  rows: number;
-}
-
-export type TerminalEvent =
-  | { type: "terminal.output"; sessionId: string; data: string; timestamp: string }
-  | { type: "terminal.exited"; sessionId: string; exitCode: number; exitSignal?: number; timestamp: string }
-  | { type: "terminal.closed"; sessionId: string; timestamp: string };
 
 export type RepositoryChatSessionState = "open" | "closed";
 export type RepositoryChatTurnStatus = "starting" | "running" | "completed" | "failed" | "cancelled" | "interrupted";
@@ -858,6 +869,11 @@ export type RepositoryWorkerMethod =
   | "repository.refresh"
   | "workspace.list"
   | "task.snapshot"
+  | "task-registry.workspace"
+  | "task-registry.status"
+  | "task-registry.validate"
+  | "task-registry.publish"
+  | "task-registry.discard"
   | "runner.list"
   | "planning.start"
   | "planning.cancel"
@@ -878,11 +894,6 @@ export type RepositoryWorkerMethod =
   | "agent-run.recover"
   | "agent-run.leases"
   | "agent-run.release"
-  | "terminal.list"
-  | "terminal.create"
-  | "terminal.write"
-  | "terminal.resize"
-  | "terminal.close"
   | "chat.session.create"
   | "chat.session.list"
   | "chat.session.get"
@@ -922,7 +933,7 @@ export type WorkerResponse =
   | { requestId: string; error: { code: string; message: string } };
 
 export interface WorkerEvent {
-  type: "worker.ready" | "repository.changed" | "worker.warning" | "planning.event" | "task-content.event" | "agent-run.event" | "terminal.event" | "chat.turn.event" | "chat.edit.event" | "lease.recovery";
+  type: "worker.ready" | "repository.changed" | "worker.warning" | "planning.event" | "task-content.event" | "agent-run.event" | "chat.turn.event" | "chat.edit.event" | "lease.recovery";
   payload: Record<string, unknown>;
 }
 
@@ -951,12 +962,6 @@ export interface AgentRunDesktopEvent {
   event: PersistedRunEvent;
 }
 
-export interface TerminalDesktopEvent {
-  type: "terminal.event";
-  checkoutId: string;
-  event: TerminalEvent;
-}
-
 export interface RepositoryChatDesktopEvent {
   type: "chat.turn.event";
   checkoutId: string;
@@ -976,7 +981,6 @@ export type PhaseAtlasDesktopEvent =
   | PlanningDesktopEvent
   | TaskContentDesktopEvent
   | AgentRunDesktopEvent
-  | TerminalDesktopEvent
   | RepositoryChatDesktopEvent
   | ChatEditDesktopEvent;
 
@@ -987,12 +991,41 @@ export interface IdeSurfaceTarget {
   key: string;
   checkoutId: string;
   leaseId?: string;
+  kind?: "code" | "run" | "tasks";
   title: string;
 }
 
 export interface IdeSurfaceState {
   targets: IdeSurfaceTarget[];
   visibleKey: string | null;
+}
+
+export interface IdeAgentSelection {
+  runnerId: string;
+  modelId: string;
+  reasoningEffort?: string;
+}
+
+export interface IdeAgentModelOption {
+  id: string;
+  label: string;
+  isDefault: boolean;
+  reasoningEfforts: string[];
+  defaultReasoningEffort?: string;
+}
+
+export interface IdeAgentOption {
+  runnerId: string;
+  label: string;
+  theiaAgentId: "Codex" | "ClaudeCode";
+  models: IdeAgentModelOption[];
+}
+
+// This projection is created by the desktop process from the repository
+// worker's validated runner catalog. The embedded view may select one of these
+// values, but cannot invent providers or models outside the repository policy.
+export interface IdeAgentConfiguration extends IdeAgentSelection {
+  agents: IdeAgentOption[];
 }
 
 // The IDE is a native view painted over the body of a PhaseAtlas panel, so the
@@ -1045,13 +1078,6 @@ export interface PhaseAtlasDesktopApi {
     result(checkoutId: string, runId: string): Promise<AgentResultReview>;
     recover(checkoutId: string, input: AgentRunRecoveryInput): Promise<AgentRunRecoveryResult>;
   };
-  terminals: {
-    list(checkoutId: string): Promise<TerminalSessionSnapshot[]>;
-    create(checkoutId: string, input: TerminalCreateInput): Promise<TerminalSessionSnapshot>;
-    write(checkoutId: string, sessionId: string, data: string): Promise<void>;
-    resize(checkoutId: string, sessionId: string, cols: number, rows: number): Promise<void>;
-    close(checkoutId: string, sessionId: string): Promise<void>;
-  };
   chat: {
     createSession(checkoutId: string, input: RepositoryChatCreateInput): Promise<RepositoryChatSession>;
     listSessions(checkoutId: string): Promise<RepositoryChatSession[]>;
@@ -1082,6 +1108,7 @@ export interface PhaseAtlasDesktopApi {
   ide: {
     // runId opens that run's retained worktree; omitting it opens the canonical checkout.
     open(checkoutId: string, theme: "light" | "dark", runId?: string): Promise<IdeSurfaceState>;
+    openTaskRegistry(checkoutId: string, theme: "light" | "dark"): Promise<IdeSurfaceState>;
     // Switching only changes which view is painted; every backend stays alive,
     // so returning to an IDE costs nothing. Closing is what stops one.
     show(key: string): Promise<IdeSurfaceState>;
@@ -1090,6 +1117,13 @@ export interface PhaseAtlasDesktopApi {
     state(): Promise<IdeSurfaceState>;
     setViewport(rect: IdeViewportRect): Promise<IdeSurfaceState>;
     setTheme(theme: "light" | "dark"): Promise<void>;
+    // Opens Theia's native AI Chat view. Agent selection and execution remain
+    // inside Theia, which already registers the Codex and ClaudeCode agents.
+    openChat(): Promise<void>;
+    configureAgent(checkoutId: string, selection: IdeAgentSelection): Promise<IdeAgentConfiguration>;
+    onAgentConfigurationChanged(
+      listener: (checkoutId: string, configuration: IdeAgentConfiguration) => void,
+    ): () => void;
     onStateChanged(listener: (state: IdeSurfaceState) => void): () => void;
   };
   runtime: {

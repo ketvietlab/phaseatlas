@@ -14,11 +14,9 @@ module cache, current directory, or failed parser to corrupt another.
 Use Electron as the first desktop runtime. Keep the renderer sandboxed, expose a narrow preload API,
 and start one utility process for every active checkout. Multiple workspaces share that worker.
 
-Integrated terminal sessions are also owned by that checkout utility process. The worker selects the
-shell and binds its working directory to the canonical repository root; the renderer can supply only
-session identifiers, bounded input, and terminal dimensions. A repository worker with retained
-terminal sessions stays active so switching repositories swaps terminal session sets without killing
-their processes.
+Interactive terminals belong exclusively to the checkout-bound Theia backend. PhaseAtlas does not
+expose a second shell, PTY protocol, or renderer terminal; repository workers remain focused on
+validated repository operations and agent execution.
 
 ## Consequences
 

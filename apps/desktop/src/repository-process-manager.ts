@@ -52,9 +52,11 @@ import {
   type TaskContentRunSummary,
   type TaskContentStartInput,
   type TaskSnapshot,
-  type TerminalCreateInput,
-  type TerminalEvent,
-  type TerminalSessionSnapshot,
+  type TaskRegistryPublishInput,
+  type TaskRegistryPublishResult,
+  type TaskRegistrySource,
+  type TaskRegistryValidation,
+  type TaskRegistryWorkspace,
   type WorkerEvent,
   type WorkerRequest,
   type WorkerResponse,
@@ -84,9 +86,10 @@ interface CatalogRow extends Record<string, unknown> {
   recovery_required: number;
   last_error: string | null;
   updated_at: string;
+  task_registry_json: string | null;
 }
 
-const CATALOG_SCHEMA_VERSION = "1";
+const CATALOG_SCHEMA_VERSION = "2";
 const LIFECYCLE_STATES = new Set<RepositoryLifecycleState>(["closed", "starting", "online", "cooling", "recovery_required"]);
 const ACTIVE_STATES = new Set(["starting", "running"]);
 const TERMINAL_STATES = new Set(["completed", "failed", "cancelled", "interrupted"]);
@@ -160,12 +163,16 @@ class RepositoryCatalog {
         lifecycle_state TEXT NOT NULL,
         recovery_required INTEGER NOT NULL DEFAULT 0,
         last_error TEXT,
+        task_registry_json TEXT,
         updated_at TEXT NOT NULL
       );
     `);
     const schema = this.database.prepare("SELECT value FROM catalog_meta WHERE key = 'schema_version'").get() as { value?: string } | undefined;
     if (existingDatabase && !schema?.value) throw new Error("Repository catalog schema metadata is missing.");
-    if (schema?.value && schema.value !== CATALOG_SCHEMA_VERSION) {
+    if (schema?.value === "1") {
+      this.database.exec("ALTER TABLE repositories ADD COLUMN task_registry_json TEXT;");
+      this.database.prepare("UPDATE catalog_meta SET value = ? WHERE key = 'schema_version'").run(CATALOG_SCHEMA_VERSION);
+    } else if (schema?.value && schema.value !== CATALOG_SCHEMA_VERSION) {
       throw new Error(`Unsupported repository catalog schema version ${schema.value}.`);
     }
     this.database.prepare("INSERT OR IGNORE INTO catalog_meta (key, value) VALUES ('schema_version', ?)")
@@ -200,8 +207,8 @@ class RepositoryCatalog {
     this.database.prepare(`
       INSERT INTO repositories (
         checkout_id, repository_id, name, canonical_path, configuration, workspace_count,
-        opened_at, visible, lifecycle_state, recovery_required, last_error, updated_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 0, NULL, ?)
+        opened_at, visible, lifecycle_state, recovery_required, last_error, task_registry_json, updated_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 0, NULL, ?, ?)
       ON CONFLICT(checkout_id) DO UPDATE SET
         repository_id = excluded.repository_id,
         name = excluded.name,
@@ -212,6 +219,7 @@ class RepositoryCatalog {
         lifecycle_state = excluded.lifecycle_state,
         recovery_required = 0,
         last_error = NULL,
+        task_registry_json = excluded.task_registry_json,
         updated_at = excluded.updated_at
     `).run(
       descriptor.checkoutId,
@@ -223,6 +231,7 @@ class RepositoryCatalog {
       descriptor.openedAt,
       visible ? 1 : 0,
       state,
+      descriptor.taskRegistry ? JSON.stringify(descriptor.taskRegistry) : null,
       timestamp,
     );
     return this.get(descriptor.checkoutId) as RepositorySummary;
@@ -261,6 +270,15 @@ class RepositoryCatalog {
     if (!Number.isInteger(row.workspace_count) || row.workspace_count < 0) {
       throw new Error("Repository catalog contains an invalid workspace count.");
     }
+    let taskRegistry: RepositorySummary["taskRegistry"];
+    if (row.task_registry_json) {
+      try {
+        const parsed = JSON.parse(row.task_registry_json) as RepositorySummary["taskRegistry"];
+        if (parsed && typeof parsed.remote === "string" && typeof parsed.ref === "string") taskRegistry = parsed;
+      } catch {
+        throw new Error("Repository catalog contains invalid task registry metadata.");
+      }
+    }
     return {
       id: row.repository_id,
       checkoutId: row.checkout_id,
@@ -269,6 +287,7 @@ class RepositoryCatalog {
       configuration: row.configuration,
       workspaceCount: Number(row.workspace_count),
       openedAt: row.opened_at,
+      ...(taskRegistry ? { taskRegistry } : {}),
       runtime: {
         state: row.lifecycle_state,
         recoveryRequired: Boolean(row.recovery_required),
@@ -391,7 +410,6 @@ export class RepositoryProcessManager {
   private readonly idleTimers = new Map<string, NodeJS.Timeout>();
   private readonly viewDemand = new Map<string, Set<number>>();
   private readonly runDemand = new Map<string, Set<string>>();
-  private readonly terminalDemand = new Map<string, Set<string>>();
   private readonly chatDemand = new Map<string, Set<string>>();
   private readonly idleMs: number;
   private stopped = false;
@@ -445,6 +463,26 @@ export class RepositoryProcessManager {
 
   async taskSnapshot(checkoutId: string): Promise<TaskSnapshot> {
     return (await this.ensureWorker(checkoutId)).call<TaskSnapshot>("task.snapshot");
+  }
+
+  async taskRegistryWorkspace(checkoutId: string): Promise<TaskRegistryWorkspace> {
+    return (await this.ensureWorker(checkoutId)).call<TaskRegistryWorkspace>("task-registry.workspace");
+  }
+
+  async taskRegistryStatus(checkoutId: string): Promise<TaskRegistrySource> {
+    return (await this.ensureWorker(checkoutId)).call<TaskRegistrySource>("task-registry.status");
+  }
+
+  async validateTaskRegistry(checkoutId: string): Promise<TaskRegistryValidation> {
+    return (await this.ensureWorker(checkoutId)).call<TaskRegistryValidation>("task-registry.validate");
+  }
+
+  async publishTaskRegistry(checkoutId: string, input: TaskRegistryPublishInput): Promise<TaskRegistryPublishResult> {
+    return (await this.ensureWorker(checkoutId)).call<TaskRegistryPublishResult>("task-registry.publish", { input });
+  }
+
+  async discardTaskRegistry(checkoutId: string, expectedCommit: string): Promise<TaskRegistrySource> {
+    return (await this.ensureWorker(checkoutId)).call<TaskRegistrySource>("task-registry.discard", { expectedCommit });
   }
 
   async startTaskContent(checkoutId: string, input: TaskContentStartInput): Promise<{ runId: string }> {
@@ -554,29 +592,6 @@ export class RepositoryProcessManager {
     return result;
   }
 
-  async listTerminals(checkoutId: string): Promise<TerminalSessionSnapshot[]> {
-    return (await this.ensureWorker(checkoutId)).call<TerminalSessionSnapshot[]>("terminal.list");
-  }
-
-  async createTerminal(checkoutId: string, input: TerminalCreateInput): Promise<TerminalSessionSnapshot> {
-    const snapshot = await (await this.ensureWorker(checkoutId)).call<TerminalSessionSnapshot>("terminal.create", { input });
-    this.trackTerminal(checkoutId, snapshot.sessionId, true);
-    return snapshot;
-  }
-
-  async writeTerminal(checkoutId: string, sessionId: string, data: string): Promise<void> {
-    await (await this.ensureWorker(checkoutId)).call<void>("terminal.write", { sessionId, data });
-  }
-
-  async resizeTerminal(checkoutId: string, sessionId: string, cols: number, rows: number): Promise<void> {
-    await (await this.ensureWorker(checkoutId)).call<void>("terminal.resize", { sessionId, cols, rows });
-  }
-
-  async closeTerminal(checkoutId: string, sessionId: string): Promise<void> {
-    await (await this.ensureWorker(checkoutId)).call<void>("terminal.close", { sessionId });
-    this.trackTerminal(checkoutId, sessionId, false);
-  }
-
   async createChatSession(checkoutId: string, input: RepositoryChatCreateInput): Promise<RepositoryChatSession> {
     return (await this.ensureWorker(checkoutId)).call<RepositoryChatSession>("chat.session.create", { input });
   }
@@ -677,7 +692,6 @@ export class RepositoryProcessManager {
 
   close(checkoutId: string, viewId?: number): void {
     this.catalog.setVisible(checkoutId, false);
-    this.terminalDemand.delete(checkoutId);
     if (viewId !== undefined) this.releaseView(checkoutId, viewId);
     else this.viewDemand.delete(checkoutId);
     this.scheduleIdle(checkoutId);
@@ -803,10 +817,6 @@ export class RepositoryProcessManager {
                 : undefined;
       this.trackRun(checkoutId, event.payload.runId, status);
       this.eventSink?.({ type: "agent-run.event", checkoutId, runId: event.payload.runId, event: persistedEvent });
-    } else if (event.type === "terminal.event" && event.payload.event) {
-      const terminalEvent = event.payload.event as TerminalEvent;
-      if (terminalEvent.type === "terminal.closed") this.trackTerminal(checkoutId, terminalEvent.sessionId, false);
-      this.eventSink?.({ type: "terminal.event", checkoutId, event: terminalEvent });
     } else if (event.type === "chat.turn.event" && typeof event.payload.turnId === "string" && event.payload.event) {
       const chatEvent = event.payload.event as PersistedRepositoryChatEvent;
       const status = chatEvent.type === "chat.turn.completed" ? "completed"
@@ -846,19 +856,6 @@ export class RepositoryProcessManager {
     }
   }
 
-  private trackTerminal(checkoutId: string, sessionId: string, active: boolean): void {
-    const sessions = this.terminalDemand.get(checkoutId) ?? new Set<string>();
-    if (active) sessions.add(sessionId);
-    else sessions.delete(sessionId);
-    if (sessions.size) {
-      this.terminalDemand.set(checkoutId, sessions);
-      this.cancelIdle(checkoutId);
-    } else {
-      this.terminalDemand.delete(checkoutId);
-      this.scheduleIdle(checkoutId);
-    }
-  }
-
   private trackChatTurn(checkoutId: string, turnId: string, status?: string): void {
     const turns = this.chatDemand.get(checkoutId) ?? new Set<string>();
     if (status && ACTIVE_STATES.has(status)) turns.add(turnId);
@@ -876,7 +873,6 @@ export class RepositoryProcessManager {
     if (this.workers.get(checkoutId) !== worker) return;
     this.workers.delete(checkoutId);
     this.runDemand.delete(checkoutId);
-    this.terminalDemand.delete(checkoutId);
     this.chatDemand.delete(checkoutId);
     if (this.stopped) return;
     if (expected) this.catalog.setRuntime(checkoutId, "closed");
@@ -885,12 +881,12 @@ export class RepositoryProcessManager {
 
   private scheduleIdle(checkoutId: string): void {
     const worker = this.workers.get(checkoutId);
-    if (!worker || this.viewDemand.get(checkoutId)?.size || this.runDemand.get(checkoutId)?.size || this.terminalDemand.get(checkoutId)?.size || this.chatDemand.get(checkoutId)?.size) return;
+    if (!worker || this.viewDemand.get(checkoutId)?.size || this.runDemand.get(checkoutId)?.size || this.chatDemand.get(checkoutId)?.size) return;
     this.cancelIdle(checkoutId);
     this.catalog.setRuntime(checkoutId, "cooling");
     const timer = setTimeout(() => {
       this.idleTimers.delete(checkoutId);
-      if (this.viewDemand.get(checkoutId)?.size || this.runDemand.get(checkoutId)?.size || this.terminalDemand.get(checkoutId)?.size || this.chatDemand.get(checkoutId)?.size) return;
+      if (this.viewDemand.get(checkoutId)?.size || this.runDemand.get(checkoutId)?.size || this.chatDemand.get(checkoutId)?.size) return;
       if (this.workers.get(checkoutId) !== worker) return;
       this.workers.delete(checkoutId);
       this.catalog.setRuntime(checkoutId, "closed");

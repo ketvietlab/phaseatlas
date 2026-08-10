@@ -60,32 +60,29 @@ renderer.
    stale and non-promotable.
 
 The renderer stores only the selected run preference. Run specifications, events, results, retry links,
-freshness, and terminal state remain in checkout-owned operational storage behind the worker.
+freshness, and final lifecycle state remain in checkout-owned operational storage behind the worker.
 
-## Exercising repository chat
+## Exercising Theia AI chat
 
-1. Choose an installed CLI and one of its discovered models in **Provider settings**, then open
-   **Agent chat** from the active repository toolbar. Chat does not require a workspace or task.
-2. Create multiple conversations and send turns in more than one session. The session rail shows
-   independent active state while normalized reasoning, tools, command output, and provider silence
-   remain visible in the selected transcript.
-3. Attach only repository-relative path references. Chat remains read-only; it does not expose a file
-   picker, command input, executable path, provider permissions, or task authority.
-4. Reload during a turn. Session metadata is hydrated for every conversation, while selected transcript
-   messages and bounded event pages are reconstructed from checkout storage and deduplicated by sequence.
-5. Cancel an active turn or restart the worker to exercise terminal cancellation and explicit retry of
-   interrupted attempts.
-
-Assistant content is rendered by `@humanspeak/svelte-markdown`, following the Conversation, Message,
-Tool, Reasoning, and Prompt Input composition used by Svelte AI Elements. URL and image output is
-disabled at the chat boundary, Mermaid rendering is isolated, and PhaseAtlas remains the authority for
-session state and durable events.
+1. Authenticate the local Codex and/or Claude Code CLI, select a repository, then use **AI Chat** or
+   `Option+L` (`Alt+L` elsewhere). A cold target must finish loading and open Theia's right Chat View on
+   the first action.
+2. Open the Agent picker and verify both `Codex` and `ClaudeCode` are registered. The generic API-key
+   configuration gate must not appear.
+3. Send a read-only prompt to each authenticated agent. Codex uses local Codex/ChatGPT auth; Claude Code
+   uses the pinned packaged Agent SDK with local Claude auth or `ANTHROPIC_API_KEY`.
+4. Change agent, model, and effort in PhaseAtlas and verify the synchronized bar in Theia updates. Then
+   change the same fields in Theia (including its native agent pin) and verify PhaseAtlas updates. Send a
+   turn after each change and confirm the reported provider/model matches the selection.
+5. Switch repositories while the IDE is visible and verify the explorer, synchronized provider bar,
+   and AI Chat belong to the newly
+   selected canonical checkout.
 
 ## Current limitations
 
 - Result promotion and canonical task-state transitions remain separate reviewed workflows.
 - The packaged worker path has a placeholder layout and will be finalized with Electron packaging.
-- Repository chat starts read-only. Use the Ask/Edit switch for a separately confirmed isolated edit.
+- Task-scoped conversation editing remains a separately confirmed isolated workflow.
 
 ### Isolated chat editing
 

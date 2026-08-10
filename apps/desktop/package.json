@@ -11,6 +11,8 @@
     "dev": "wait-on tcp:127.0.0.1:4177 && cross-env PHASEATLAS_UI_DEV_URL=http://127.0.0.1:4177 electron dist/main.js"
   },
   "dependencies": {
+    "@anthropic-ai/claude-agent-sdk": "0.2.100",
+    "@openai/codex-sdk": "0.147.0",
     "@phaseatlas/contracts": "workspace:*"
   },
   "devDependencies": {

@@ -1,6 +1,6 @@
 import { execFile } from "node:child_process";
 import { createRequire } from "node:module";
-import { access, cp, mkdir, mkdtemp, readFile, rename, rm, stat, writeFile } from "node:fs/promises";
+import { access, cp, mkdir, mkdtemp, readFile, realpath, rename, rm, stat, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { promisify } from "node:util";
@@ -57,10 +57,8 @@ for (const required of [
 }
 
 const desktopRequire = createRequire(path.join(repositoryRoot, "apps", "desktop", "package.json"));
-const workerRequire = createRequire(path.join(repositoryRoot, "apps", "repository-worker", "package.json"));
 const electronExecutable = desktopRequire("electron");
 const electronApplication = path.resolve(path.dirname(electronExecutable), "../..");
-const nodePtyPackage = path.dirname(workerRequire.resolve("node-pty/package.json"));
 if (!electronApplication.endsWith("Electron.app")) throw new Error("Installed Electron runtime has an unexpected macOS layout.");
 
 await rm(artifactRoot, { recursive: true, force: true });
@@ -126,9 +124,6 @@ await rm(path.join(resourcesPath, "default_app.asar"), { force: true });
 await mkdir(path.join(resourcesPath, "app", "desktop"), { recursive: true });
 await mkdir(path.join(resourcesPath, "repository-worker"), { recursive: true });
 await mkdir(path.join(resourcesPath, "ui"), { recursive: true });
-const packagedNodePty = path.join(resourcesPath, "node_modules", "node-pty");
-const nodePtyPrebuild = `${process.platform}-${process.arch}`;
-await mkdir(path.join(packagedNodePty, "prebuilds"), { recursive: true });
 await cp(path.join(repositoryRoot, "apps", "desktop", "dist", "main.js"), path.join(resourcesPath, "app", "desktop", "main.js"));
 await cp(path.join(repositoryRoot, "apps", "desktop", "dist", "preload.cjs"), path.join(resourcesPath, "app", "desktop", "preload.cjs"));
 await cp(path.join(repositoryRoot, "apps", "desktop", "dist", "theia-preload.cjs"), path.join(resourcesPath, "app", "desktop", "theia-preload.cjs"));
@@ -138,7 +133,34 @@ await cp(path.join(repositoryRoot, "apps", "desktop", "dist", "theia-preload.cjs
 // CommonJS instead of inheriting app/package.json's type: module.
 const ideBuild = path.join(repositoryRoot, "ide", "lib");
 const ideExtensions = path.join(repositoryRoot, "ide", "default-extensions");
-for (const [label, source] of [["ide/lib", ideBuild], ["ide/default-extensions", ideExtensions]]) {
+const claudeAgentSdk = await realpath(path.join(
+  repositoryRoot,
+  "apps",
+  "desktop",
+  "node_modules",
+  "@anthropic-ai",
+  "claude-agent-sdk",
+));
+const codexAgentSdk = await realpath(path.join(
+  repositoryRoot,
+  "apps",
+  "desktop",
+  "node_modules",
+  "@openai",
+  "codex-sdk",
+  "dist",
+));
+const codexTarget = process.arch === "arm64" ? "aarch64-apple-darwin" : "x86_64-apple-darwin";
+const codexPackage = await realpath(path.resolve(codexAgentSdk, "../../codex"));
+const codexRuntime = await realpath(path.resolve(
+  codexPackage,
+  `../codex-darwin-${process.arch}/vendor/${codexTarget}`,
+));
+for (const [label, source] of [
+  ["ide/lib", ideBuild],
+  ["ide/default-extensions", ideExtensions],
+  ["ide/default-extensions/plugins", path.join(ideExtensions, "plugins")],
+]) {
   try {
     await access(source);
   } catch {
@@ -147,13 +169,15 @@ for (const [label, source] of [["ide/lib", ideBuild], ["ide/default-extensions",
 }
 await cp(ideBuild, path.join(resourcesPath, "theia-ide", "lib"), { recursive: true, verbatimSymlinks: true });
 await cp(ideExtensions, path.join(resourcesPath, "theia-default-extensions"), { recursive: true });
+await cp(claudeAgentSdk, path.join(resourcesPath, "claude-agent-sdk"), { recursive: true });
+await cp(codexAgentSdk, path.join(resourcesPath, "codex-agent-sdk"), { recursive: true });
+await cp(codexRuntime, path.join(resourcesPath, "codex-cli"), { recursive: true, preserveTimestamps: true });
+// pnpm's package-local .bin entry is a link outside this copied directory and
+// is not needed by Theia, which imports sdk.mjs next to cli.js directly.
+await rm(path.join(resourcesPath, "claude-agent-sdk", "node_modules"), { recursive: true, force: true });
 await cp(path.join(repositoryRoot, "apps", "repository-worker", "dist", "index.js"), path.join(resourcesPath, "repository-worker", "index.js"));
 await cp(path.join(repositoryRoot, "apps", "ui", "build"), path.join(resourcesPath, "ui", "build"), { recursive: true });
 await cp(path.join(repositoryRoot, "LICENSE"), path.join(resourcesPath, "LICENSE"));
-await cp(path.join(nodePtyPackage, "package.json"), path.join(packagedNodePty, "package.json"));
-await cp(path.join(nodePtyPackage, "LICENSE"), path.join(packagedNodePty, "LICENSE"));
-await cp(path.join(nodePtyPackage, "lib"), path.join(packagedNodePty, "lib"), { recursive: true, preserveTimestamps: true, verbatimSymlinks: true });
-await cp(path.join(nodePtyPackage, "prebuilds", nodePtyPrebuild), path.join(packagedNodePty, "prebuilds", nodePtyPrebuild), { recursive: true, preserveTimestamps: true, verbatimSymlinks: true });
 await writeFile(path.join(resourcesPath, "app", "package.json"), JSON.stringify({
   name: "phaseatlas-desktop",
   version: applicationVersion,
@@ -195,7 +219,9 @@ const manifestRoots = [
   "ui",
   "theia-ide",
   "theia-default-extensions",
-  "node_modules/node-pty",
+  "claude-agent-sdk",
+  "codex-agent-sdk",
+  "codex-cli",
   "LICENSE",
   "release-policy.json",
   ...(releaseInputs ? ["update"] : []),

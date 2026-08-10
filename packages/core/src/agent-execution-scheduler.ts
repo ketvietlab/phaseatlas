@@ -90,6 +90,7 @@ export class AgentExecutionScheduler {
         payload: {
           taskKey: spec.taskKey,
           taskRevision: spec.taskRevision,
+          ...(spec.taskRegistry ? { taskRegistry: spec.taskRegistry } : {}),
           action: spec.action,
           sandbox: spec.sandbox,
           checkoutId: spec.checkout.checkoutId,

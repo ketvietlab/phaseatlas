@@ -17,12 +17,12 @@
     "release:metadata": "node scripts/create-release-metadata.mjs",
     "check": "pnpm --filter @phaseatlas/contracts build && pnpm --filter @phaseatlas/core build && pnpm --filter @phaseatlas/contracts check && pnpm --filter @phaseatlas/core check && pnpm --filter @phaseatlas/repository-worker check && pnpm --filter @phaseatlas/ui check && pnpm --filter @phaseatlas/desktop check",
     "dev": "node scripts/dev.mjs",
-    "postinstall": "node scripts/fix-node-pty-permissions.mjs",
     "test": "pnpm --filter @phaseatlas/contracts build && pnpm --filter @phaseatlas/core build && pnpm --filter @phaseatlas/core test && pnpm --filter @phaseatlas/repository-worker test",
     "build:ide": "node scripts/build-ide.mjs",
     "fetch:ide-extensions": "node scripts/fetch-ide-extensions.mjs"
   },
   "devDependencies": {
-    "concurrently": "^10.0.4"
+    "concurrently": "^10.0.4",
+    "extract-zip": "2.0.1"
   }
 }

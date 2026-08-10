@@ -1,12 +1,16 @@
 import { spawn } from "node:child_process";
 import type { ChildProcessByStdio } from "node:child_process";
 import type { Readable } from "node:stream";
-import { access, mkdir } from "node:fs/promises";
+import { access, mkdir, readFile, writeFile } from "node:fs/promises";
 import http from "node:http";
 import net from "node:net";
 import path from "node:path";
 import { BrowserWindow, WebContentsView, shell } from "electron";
-import type { IdeSurfaceState, IdeSurfaceTarget } from "@phaseatlas/contracts";
+import type {
+  IdeAgentConfiguration,
+  IdeSurfaceState,
+  IdeSurfaceTarget,
+} from "@phaseatlas/contracts";
 import {
   assertTheiaLaunchIdentity,
   isAllowedTheiaNavigation,
@@ -20,12 +24,24 @@ import {
 
 const STARTUP_TIMEOUT_MS = 20_000;
 const DIAGNOSTIC_LIMIT = 4_000;
-
+const PHASEATLAS_THEIA_DEFAULTS = {
+  "ai-features.AiEnable.enableAI": true,
+  "ai-features.chat.bypassModelRequirement": true,
+  "ai-features.chat.defaultChatAgent": "Codex",
+  "editor.minimap.enabled": false,
+  "extensions.ignoreRecommendations": true,
+  "files.autoSave": "afterDelay",
+  "git.autoRepositoryDetection": true,
+  "git.openRepositoryInParentFolders": "always",
+  "workbench.editor.closeOnFileDelete": true,
+  "workbench.startupEditor": "none",
+} as const;
 interface TheiaInstance {
   key: string;
   target: TheiaTarget;
   checkoutId: string;
   repositoryPath: string;
+  configPath: string;
   title: string;
   port: number;
   process: ChildProcessByStdio<null, Readable, Readable>;
@@ -38,12 +54,88 @@ interface TheiaInstance {
   view?: WebContentsView;
 }
 
+const THEIA_AGENT_IDS = {
+  "codex-cli": "Codex",
+  "claude-code": "ClaudeCode",
+} as const;
+
+function theiaAgentId(configuration: IdeAgentConfiguration | undefined): "Codex" | "ClaudeCode" {
+  return configuration?.agents.find((agent) => agent.runnerId === configuration.runnerId)?.theiaAgentId ?? "Codex";
+}
+
 // Electron drops the webContents reference once the view is gone, so reaching
 // straight through `view.webContents` throws on a crashed or closed IDE rather
 // than reporting it. Every access goes through here instead.
 function liveContents(view: WebContentsView | undefined): Electron.WebContents | undefined {
   const contents = view?.webContents as Electron.WebContents | undefined;
   return contents && !contents.isDestroyed() ? contents : undefined;
+}
+
+async function seedTheiaSettings(
+  configPath: string,
+  claudeCodePath: string,
+  configuration?: IdeAgentConfiguration,
+): Promise<void> {
+  const defaults = {
+    ...PHASEATLAS_THEIA_DEFAULTS,
+    "ai-features.chat.defaultChatAgent": theiaAgentId(configuration),
+    "ai-features.claudeCode.executablePath": claudeCodePath,
+  } as const;
+  const settingsPath = path.join(configPath, "settings.json");
+  try {
+    await writeFile(settingsPath, `${JSON.stringify(defaults, null, 2)}\n`, {
+      encoding: "utf8",
+      flag: "wx",
+      mode: 0o600,
+    });
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
+    // Existing target settings belong to the user. Add missing product defaults
+    // without replacing explicit values or rewriting the rest of their JSONC.
+    let current = await readFile(settingsPath, "utf8");
+    const missing = Object.entries(defaults).filter(([key]) => {
+      const escaped = key.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+      return !new RegExp(`^[\\t ]*["']${escaped}["'][\\t ]*:`, "m").test(current);
+    });
+    if (!missing.length) return;
+    const closingBrace = current.lastIndexOf("}");
+    if (closingBrace < 0) return;
+    const before = current.slice(0, closingBrace).trimEnd();
+    const separator = before.endsWith("{") ? "\n" : ",\n";
+    const additions = missing.map(([key, value]) => `  ${JSON.stringify(key)}: ${JSON.stringify(value)}`).join(",\n");
+    const updated = `${before}${separator}${additions}\n}${current.slice(closingBrace + 1)}`;
+    await writeFile(settingsPath, updated, { encoding: "utf8", mode: 0o600 });
+  }
+}
+
+async function setTheiaDefaultAgent(configPath: string, agentId: "Codex" | "ClaudeCode"): Promise<void> {
+  const settingsPath = path.join(configPath, "settings.json");
+  let current = await readFile(settingsPath, "utf8");
+  const key = "ai-features.chat.defaultChatAgent";
+  const escaped = key.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const property = new RegExp(`(^[\\t ]*["']${escaped}["'][\\t ]*:[\\t ]*)(["'][^"']*["'])`, "m");
+  if (property.test(current)) {
+    current = current.replace(property, `$1${JSON.stringify(agentId)}`);
+  } else {
+    const closingBrace = current.lastIndexOf("}");
+    if (closingBrace < 0) throw new Error("The IDE settings file is invalid.");
+    const before = current.slice(0, closingBrace).trimEnd();
+    const separator = before.endsWith("{") ? "\n" : ",\n";
+    current = `${before}${separator}  ${JSON.stringify(key)}: ${JSON.stringify(agentId)}\n}${current.slice(closingBrace + 1)}`;
+  }
+  await writeFile(settingsPath, current, { encoding: "utf8", mode: 0o600 });
+}
+
+async function writeAgentConfiguration(configPath: string, configuration: IdeAgentConfiguration): Promise<void> {
+  await writeFile(
+    path.join(configPath, "phaseatlas-agent.json"),
+    `${JSON.stringify({
+      runnerId: configuration.runnerId,
+      modelId: configuration.modelId,
+      ...(configuration.reasoningEffort ? { reasoningEffort: configuration.reasoningEffort } : {}),
+    }, null, 2)}\n`,
+    { encoding: "utf8", mode: 0o600 },
+  );
 }
 
 async function reserveTargetPort(target: TheiaTarget): Promise<number> {
@@ -92,6 +184,7 @@ async function waitForBackend(instance: TheiaInstance): Promise<void> {
 export class TheiaIdeManager {
   private readonly instances = new Map<string, TheiaInstance>();
   private readonly starts = new Map<string, Promise<void>>();
+  private readonly agentConfigurations = new Map<string, IdeAgentConfiguration>();
   private readonly viewports = new WeakMap<BrowserWindow, IdeViewportRect>();
   private readonly hosts = new Set<BrowserWindow>();
 
@@ -99,6 +192,9 @@ export class TheiaIdeManager {
     private readonly backendEntry: string,
     private readonly preloadEntry: string,
     private readonly defaultExtensionsRoot: string,
+    private readonly claudeCodePath: string,
+    private readonly codexSdkPath: string,
+    private readonly codexExecutablePath: string,
     private readonly runtimeRoot: string,
     private readonly publishState: (host: BrowserWindow, state: IdeSurfaceState) => void,
     private readonly requestLeave: (host: BrowserWindow) => void,
@@ -176,6 +272,7 @@ export class TheiaIdeManager {
         key: instance.key,
         checkoutId: instance.checkoutId,
         ...(instance.target.leaseId ? { leaseId: instance.target.leaseId } : {}),
+        kind: instance.target.kind === "tasks" ? "tasks" : instance.target.leaseId ? "run" : "code",
         title: instance.title,
       });
       if (instance.visible) visibleKey = instance.key;
@@ -184,11 +281,20 @@ export class TheiaIdeManager {
   }
 
   setViewport(host: BrowserWindow, rect: IdeViewportRect): IdeSurfaceState {
+    // getBoundingClientRect() reports CSS pixels after page zoom, while a
+    // WebContentsView expects device-independent window pixels. At 110% zoom,
+    // using the CSS rectangle directly shrinks and shifts Theia by roughly 9%,
+    // leaving PhaseAtlas visible along the right and bottom edges.
+    const zoom = host.webContents.getZoomFactor();
+    const left = Math.round(rect.x * zoom);
+    const top = Math.round(rect.y * zoom);
+    const right = Math.round((rect.x + rect.width) * zoom);
+    const bottom = Math.round((rect.y + rect.height) * zoom);
     this.viewports.set(host, {
-      x: Math.round(rect.x),
-      y: Math.round(rect.y),
-      width: Math.round(rect.width),
-      height: Math.round(rect.height),
+      x: left,
+      y: top,
+      width: Math.max(0, right - left),
+      height: Math.max(0, bottom - top),
     });
     this.layout(host);
     return this.state(host);
@@ -209,6 +315,81 @@ export class TheiaIdeManager {
     for (const instance of this.instances.values()) this.applyTheme(instance, theme);
   }
 
+  checkoutForWebContents(webContentsId: number): { checkoutId: string; host: BrowserWindow; kind: "code" | "run" | "tasks" } | undefined {
+    for (const instance of this.instances.values()) {
+      if (liveContents(instance.view)?.id === webContentsId) {
+        return {
+          checkoutId: instance.checkoutId,
+          host: instance.host,
+          kind: instance.target.kind === "tasks" ? "tasks" : instance.target.leaseId ? "run" : "code",
+        };
+      }
+    }
+    return undefined;
+  }
+
+  agentConfigurationForWebContents(webContentsId: number): IdeAgentConfiguration | undefined {
+    const target = this.checkoutForWebContents(webContentsId);
+    return target ? this.agentConfigurations.get(target.checkoutId) : undefined;
+  }
+
+  async setAgentConfiguration(checkoutId: string, configuration: IdeAgentConfiguration): Promise<void> {
+    if (!THEIA_AGENT_IDS[configuration.runnerId as keyof typeof THEIA_AGENT_IDS]) {
+      throw new Error("That repository runner is not supported by the embedded IDE.");
+    }
+    this.agentConfigurations.set(checkoutId, configuration);
+    const writes: Promise<void>[] = [];
+    for (const instance of this.instances.values()) {
+      if (instance.checkoutId !== checkoutId) continue;
+      const contents = liveContents(instance.view);
+      writes.push(Promise.all([
+        writeAgentConfiguration(instance.configPath, configuration),
+        setTheiaDefaultAgent(instance.configPath, theiaAgentId(configuration)),
+      ]).then(() => {
+        if (contents && !contents.isDestroyed()) {
+          contents.send("phaseatlas:ide:agent:configuration", configuration);
+        }
+      }));
+    }
+    await Promise.all(writes);
+  }
+
+  async openChat(host: BrowserWindow): Promise<void> {
+    const instance = [...this.instances.values()].find((candidate) => candidate.host === host && candidate.visible);
+    const contents = liveContents(instance?.view);
+    if (!instance || !contents) throw new Error("Open an IDE workspace before opening AI Chat.");
+
+    // loadURL resolves before the Theia frontend contributions have necessarily
+    // registered their keybindings. Wait for the application shell so a first
+    // click on a cold workspace cannot disappear into the splash screen.
+    let frontendReady = false;
+    for (let attempt = 0; attempt < 100; attempt += 1) {
+      frontendReady = await contents.executeJavaScript(
+        "Boolean(document.getElementById('theia-app-shell') && !document.querySelector('.theia-preload:not(.theia-hidden)'))",
+        true,
+      ) as boolean;
+      if (frontendReady) break;
+      await new Promise((resolve) => setTimeout(resolve, 100));
+    }
+    if (!frontendReady) throw new Error("Theia is still starting. Try opening AI Chat again.");
+
+    // The command is fixed and bounded: the PhaseAtlas renderer cannot execute
+    // arbitrary Theia commands or JavaScript. If Chat is already visible, keep
+    // it open; otherwise invoke Theia's documented AI Chat toggle keybinding.
+    const chatVisible = await contents.executeJavaScript(
+      "Boolean(document.getElementById('chat-view-widget')?.getClientRects().length)",
+      true,
+    ) as boolean;
+    if (!chatVisible) {
+      const modifiers: Electron.InputEvent["modifiers"] = process.platform === "darwin"
+        ? ["control", "meta"]
+        : ["control", "alt"];
+      contents.sendInputEvent({ type: "keyDown", keyCode: "I", modifiers });
+      contents.sendInputEvent({ type: "keyUp", keyCode: "I", modifiers });
+    }
+    contents.focus();
+  }
+
   private async start(
     target: TheiaTarget,
     repositoryPath: string,
@@ -220,11 +401,16 @@ export class TheiaIdeManager {
       access(this.backendEntry),
       access(this.preloadEntry),
       access(this.defaultExtensionsRoot),
+      access(this.claudeCodePath),
+      access(this.codexSdkPath),
+      access(this.codexExecutablePath),
     ]);
     const checkoutId = target.checkoutId;
     const key = theiaTargetKey(target);
     // Config and plugins are per target, or two workspaces overwrite each other.
-    const checkoutRuntime = target.leaseId
+    const checkoutRuntime = target.kind === "tasks"
+      ? path.join(this.runtimeRoot, "checkouts", checkoutId, "ide-tasks")
+      : target.leaseId
       ? path.join(this.runtimeRoot, "checkouts", checkoutId, "ide-worktrees", target.leaseId)
       : path.join(this.runtimeRoot, "checkouts", checkoutId, "ide");
     const configPath = path.join(checkoutRuntime, "config");
@@ -233,6 +419,17 @@ export class TheiaIdeManager {
       mkdir(configPath, { recursive: true, mode: 0o700 }),
       mkdir(pluginsPath, { recursive: true, mode: 0o700 }),
     ]);
+    // A fresh embedded workspace should feel like part of PhaseAtlas, not the
+    // generic Theia example: start directly in the source tree and suppress the
+    // extension recommendation toast. Existing user settings always win.
+    const agentConfiguration = this.agentConfigurations.get(checkoutId);
+    await seedTheiaSettings(configPath, this.claudeCodePath, agentConfiguration);
+    if (agentConfiguration) {
+      await Promise.all([
+        writeAgentConfiguration(configPath, agentConfiguration),
+        setTheiaDefaultAgent(configPath, theiaAgentId(agentConfiguration)),
+      ]);
+    }
     const port = await reserveTargetPort(target);
     const child = spawn(process.execPath, [this.backendEntry, ...theiaBackendArguments(repositoryPath, port, pluginsPath)], {
       cwd: repositoryPath,
@@ -240,7 +437,10 @@ export class TheiaIdeManager {
         ...process.env,
         ELECTRON_RUN_AS_NODE: "1",
         THEIA_CONFIG_DIR: configPath,
-        THEIA_DEFAULT_PLUGINS: `local-dir:${this.defaultExtensionsRoot}`,
+        THEIA_DEFAULT_PLUGINS: `local-dir:${path.join(this.defaultExtensionsRoot, "plugins")}`,
+        PHASEATLAS_AGENT_CONFIG_PATH: path.join(configPath, "phaseatlas-agent.json"),
+        PHASEATLAS_CODEX_SDK_PATH: this.codexSdkPath,
+        PHASEATLAS_CODEX_BIN: this.codexExecutablePath,
       },
       stdio: ["ignore", "pipe", "pipe"],
     });
@@ -249,6 +449,7 @@ export class TheiaIdeManager {
       target,
       checkoutId,
       repositoryPath,
+      configPath,
       title,
       port,
       process: child,
@@ -345,6 +546,8 @@ export class TheiaIdeManager {
     host.contentView.addChildView(view);
     this.layout(host);
     await view.webContents.loadURL(`http://localhost:${instance.port}`);
+    const configuration = this.agentConfigurations.get(instance.checkoutId);
+    if (configuration) view.webContents.send("phaseatlas:ide:agent:configuration", configuration);
   }
 
   private adoptHost(host: BrowserWindow): void {

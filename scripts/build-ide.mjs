@@ -11,6 +11,9 @@ const repositoryRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url))
 const submodule = path.join(repositoryRoot, "ide", "theia");
 const example = path.join(submodule, "examples", "browser");
 const output = path.join(repositoryRoot, "ide", "lib");
+const sourcePatches = [
+  path.join(repositoryRoot, "ide", "patches", "phaseatlas-agent-runtime.patch"),
+];
 
 // The repository pins Node 24; Theia needs >= 22. A shell still on an older
 // default produces failures deep inside npm rather than at the entry point.
@@ -45,8 +48,23 @@ try {
 // npm is also invoked directly because corepack refuses to run a package manager
 // other than the one this repository declares.
 await run(npmCommand, ["ci"], submodule);
-await run(npmCommand, ["run", "build:browser"], submodule);
-
-await rm(output, { recursive: true, force: true });
-await cp(path.join(example, "lib"), output, { recursive: true });
+const appliedPatches = [];
+try {
+  // Keep the upstream submodule pinned and clean. Product-specific integration
+  // is carried as reviewable root patches, applied only for the build and
+  // always reversed afterward (including when Theia compilation fails).
+  for (const patchFile of sourcePatches) {
+    await access(patchFile);
+    await run("git", ["apply", "--check", patchFile], submodule);
+    await run("git", ["apply", patchFile], submodule);
+    appliedPatches.push(patchFile);
+  }
+  await run(npmCommand, ["run", "build:browser"], submodule);
+  await rm(output, { recursive: true, force: true });
+  await cp(path.join(example, "lib"), output, { recursive: true });
+} finally {
+  for (const patchFile of appliedPatches.reverse()) {
+    await run("git", ["apply", "--reverse", patchFile], submodule);
+  }
+}
 console.log(`Embedded IDE built into ${path.relative(repositoryRoot, output)}`);
