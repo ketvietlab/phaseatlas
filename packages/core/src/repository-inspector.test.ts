@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdir, mkdtemp, readFile, rm, symlink, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, realpath, rm, symlink, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
@@ -41,6 +41,47 @@ test("inspects a configured repository and counts workspace tasks", async (conte
   assert.equal(repository.workspaceCount, 1);
   assert.equal(workspaces[0]?.slug, "core");
   assert.equal(workspaces[0]?.taskCount, 1);
+});
+
+test("loads canonical tasks from a dedicated registry root while preserving checkout identity", async (context) => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "phaseatlas-code-checkout-"));
+  const registryRoot = await mkdtemp(path.join(os.tmpdir(), "phaseatlas-task-contracts-"));
+  context.after(async () => {
+    await rm(root, { recursive: true, force: true });
+    await rm(registryRoot, { recursive: true, force: true });
+  });
+  await mkdir(path.join(root, ".git"));
+  await mkdir(path.join(root, ".phaseatlas"));
+  await writeFile(path.join(root, ".phaseatlas", "repository.yaml"), [
+    "schemaVersion: phaseatlas.repository/v1",
+    "id: repo-test",
+    "name: Test Atlas",
+    "taskRegistry:",
+    "  remote: origin",
+    "  ref: refs/heads/phaseatlas/tasks",
+    "  defaultDeliveryRef: refs/heads/develop",
+    "",
+  ].join("\n"));
+  const tasksRoot = await createConfiguredRepository(registryRoot);
+  await writeFile(path.join(tasksRoot, "PHA-001.yaml"), validTask({ id: "PHA-001" }));
+
+  const inspector = await RepositoryInspector.open(root, { contractRoot: registryRoot });
+  inspector.setRegistrySource({
+    remote: "origin",
+    ref: "refs/heads/phaseatlas/tasks",
+    defaultDeliveryRef: "refs/heads/develop",
+    commit: "a".repeat(40),
+    syncState: "current",
+    changedPaths: [],
+  });
+  const repository = await inspector.describe();
+  const snapshot = await inspector.taskSnapshot();
+
+  assert.equal(repository.path, await realpath(root));
+  assert.equal(repository.workspaceCount, 1);
+  assert.equal(repository.taskRegistry?.ref, "refs/heads/phaseatlas/tasks");
+  assert.equal(snapshot.tasks[0]?.key.taskId, "PHA-001");
+  assert.equal(snapshot.registry?.commit, "a".repeat(40));
 });
 
 test("rejects directories that are not Git repositories", async (context) => {

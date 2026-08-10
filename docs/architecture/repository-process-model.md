@@ -17,6 +17,18 @@ path against the catalog before clearing recovery state.
 The catalog records known checkouts independently of the live-worker registry. Closing or idling a
 worker never removes its catalog entry or checkout history.
 
+Canonical task identity is separate from code-checkout identity:
+
+```text
+repositoryId + configured task ref -> detached registry worktree -> TaskSnapshot
+checkout path + HEAD                  -> execution context       -> operations.sqlite
+```
+
+Every checkout for the same configured repository reads the same remote registry ref. The worker
+uses a private detached worktree, so changing the branch in the user checkout cannot change project
+task state. Dirty registry files are drafts; refresh will not replace them, and publish uses the
+expected registry commit as a force-with-lease guard.
+
 ## Demand and lifecycle
 
 The supervisor tracks two independent sources of worker demand:
@@ -84,7 +96,8 @@ provider protocol payloads do not cross the renderer bridge.
 
 ## Change notifications
 
-The worker watches `.phaseatlas/` with a cross-platform file watcher. Changes are debounced, cached
+The worker watches `.phaseatlas/` in the configured registry worktree (or the checkout for legacy v1
+repositories) with a cross-platform file watcher. Changes are debounced, cached
 repository projections are invalidated, and a typed `repository.changed` event is forwarded through
 Electron main and preload. The renderer requests fresh projections; it never reads the repository or
 operational databases directly.

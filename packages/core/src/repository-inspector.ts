@@ -8,6 +8,7 @@ import type {
   LegacyTaskCandidate,
   PlanningTarget,
   RepositorySummary,
+  TaskRegistrySource,
   TaskSnapshot,
   ValidationIssue,
   WorkspaceSummary,
@@ -24,6 +25,11 @@ interface RepositoryManifest {
   schemaVersion: "phaseatlas.repository/v1";
   id: string;
   name: string;
+  taskRegistry?: {
+    remote: string;
+    ref: string;
+    defaultDeliveryRef?: string;
+  };
 }
 
 interface WorkspaceManifest {
@@ -65,7 +71,35 @@ function validateRepositoryManifest(value: unknown, filePath: string): Repositor
   if (typeof value.name !== "string" || !value.name.trim()) {
     throw new Error(`${filePath}: name must be a non-empty string.`);
   }
-  return { schemaVersion: value.schemaVersion, id: value.id.trim(), name: value.name.trim() };
+  let taskRegistry: RepositoryManifest["taskRegistry"];
+  if (value.taskRegistry !== undefined) {
+    if (!isRecord(value.taskRegistry)) throw new Error(`${filePath}: taskRegistry must be an object.`);
+    const remote = value.taskRegistry.remote;
+    const ref = value.taskRegistry.ref;
+    const defaultDeliveryRef = value.taskRegistry.defaultDeliveryRef;
+    if (typeof remote !== "string" || !/^[A-Za-z0-9._-]{1,80}$/.test(remote)) {
+      throw new Error(`${filePath}: taskRegistry.remote is invalid.`);
+    }
+    if (typeof ref !== "string" || !/^refs\/heads\/[A-Za-z0-9._/-]{1,180}$/.test(ref) || ref.includes("..")) {
+      throw new Error(`${filePath}: taskRegistry.ref must be a safe branch ref.`);
+    }
+    if (defaultDeliveryRef !== undefined && (
+      typeof defaultDeliveryRef !== "string" ||
+      !/^refs\/heads\/[A-Za-z0-9._/-]{1,180}$/.test(defaultDeliveryRef) ||
+      defaultDeliveryRef.includes("..")
+    )) throw new Error(`${filePath}: taskRegistry.defaultDeliveryRef must be a safe branch ref.`);
+    taskRegistry = {
+      remote,
+      ref,
+      ...(typeof defaultDeliveryRef === "string" ? { defaultDeliveryRef } : {}),
+    };
+  }
+  return {
+    schemaVersion: value.schemaVersion,
+    id: value.id.trim(),
+    name: value.name.trim(),
+    ...(taskRegistry ? { taskRegistry } : {}),
+  };
 }
 
 function validateWorkspaceManifest(
@@ -352,16 +386,24 @@ export class RepositoryInspector {
   private tasks: TaskSnapshot | null = null;
   private legacy: LegacyIngestionSnapshot | null = null;
 
-  private constructor(root: string) {
+  private registrySource: TaskRegistrySource | undefined;
+
+  private constructor(root: string, readonly contractRoot = root) {
     this.root = root;
   }
 
-  static async open(candidate: string): Promise<RepositoryInspector> {
+  static async open(candidate: string, options: { contractRoot?: string } = {}): Promise<RepositoryInspector> {
     const root = await realpath(candidate);
     if (!(await exists(path.join(root, ".git")))) {
       throw new Error("Selected directory is not a Git repository or worktree.");
     }
-    return new RepositoryInspector(root);
+    const contractRoot = options.contractRoot ? await realpath(options.contractRoot) : root;
+    return new RepositoryInspector(root, contractRoot);
+  }
+
+  setRegistrySource(source: TaskRegistrySource | undefined): void {
+    this.registrySource = source;
+    this.tasks = null;
   }
 
   invalidate(): void {
@@ -389,6 +431,7 @@ export class RepositoryInspector {
       configuration: manifest?.id ? "configured" : "legacy",
       workspaceCount: workspaces.length,
       openedAt: new Date().toISOString(),
+      ...(manifest?.taskRegistry ? { taskRegistry: manifest.taskRegistry } : {}),
     };
 
     return this.repository;
@@ -397,7 +440,7 @@ export class RepositoryInspector {
   async listWorkspaces(): Promise<WorkspaceSummary[]> {
     if (this.workspaces) return this.workspaces;
 
-    const workspacesRoot = path.join(this.root, ".phaseatlas", "workspaces");
+    const workspacesRoot = path.join(this.contractRoot, ".phaseatlas", "workspaces");
     if (!(await exists(workspacesRoot))) {
       this.workspaces = [];
       return this.workspaces;
@@ -425,7 +468,7 @@ export class RepositoryInspector {
             name: manifest.name,
             description: manifest.description,
             taskCount,
-            sourcePath: path.relative(this.root, manifestPath).replaceAll(path.sep, "/"),
+            sourcePath: path.relative(this.contractRoot, manifestPath).replaceAll(path.sep, "/"),
           };
         }),
     );
@@ -441,10 +484,11 @@ export class RepositoryInspector {
     if (this.tasks) return this.tasks;
     const repository = await this.describe();
     this.tasks = await loadTaskSnapshot({
-      root: this.root,
+      root: this.contractRoot,
       repositoryId: repository.id,
       workspaces: await this.listWorkspaces(),
     });
+    if (this.registrySource) this.tasks = { ...this.tasks, registry: this.registrySource };
     return this.tasks;
   }
 
@@ -547,14 +591,14 @@ export class RepositoryInspector {
   async publishTaskProposals(workspaceSlug: string, value: unknown): Promise<TaskSnapshot> {
     const workspace = (await this.listWorkspaces()).find((item) => item.slug === workspaceSlug);
     if (!workspace) throw new Error(`Workspace ${workspaceSlug} does not exist.`);
-    await publishProposals({ root: this.root, workspace, value });
+    await publishProposals({ root: this.contractRoot, workspace, value });
     this.invalidate();
     return this.taskSnapshot();
   }
 
   async publishPlanningProposals(target: PlanningTarget, value: unknown): Promise<TaskSnapshot> {
     await publishPlanning({
-      root: this.root,
+      root: this.contractRoot,
       workspaces: await this.listWorkspaces(),
       target,
       value,
@@ -568,7 +612,7 @@ export class RepositoryInspector {
       (candidate) => `${candidate.key.workspaceSlug}/${candidate.key.taskId}` === taskKey,
     );
     if (!task) throw new Error(`Task ${taskKey} does not exist.`);
-    await writeTaskContent({ root: this.root, task, body });
+    await writeTaskContent({ root: this.contractRoot, task, body });
     this.invalidate();
     return this.taskSnapshot();
   }

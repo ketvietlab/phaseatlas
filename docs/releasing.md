@@ -145,7 +145,7 @@ installed applications.
    - validate SemVer, tag, and changelog;
    - run `pnpm check` and `pnpm test`.
 2. **Build** on separate Apple Silicon and Intel macOS runners:
-   - build the static renderer, Electron runtime, repository worker, and native terminal runtime;
+   - build the static renderer, Electron runtime, repository worker, and embedded Theia runtime;
    - ad-hoc sign and verify `PhaseAtlas.app`;
    - run the packaged repository smoke test; and
    - upload each architecture ZIP as an intermediate Actions artifact.

@@ -1,5 +1,10 @@
 import { contextBridge, ipcRenderer } from "electron";
-import type { IdeSurfaceState, PhaseAtlasDesktopApi, PhaseAtlasDesktopEvent } from "@phaseatlas/contracts";
+import type {
+  IdeAgentConfiguration,
+  IdeSurfaceState,
+  PhaseAtlasDesktopApi,
+  PhaseAtlasDesktopEvent,
+} from "@phaseatlas/contracts";
 
 const api: PhaseAtlasDesktopApi = {
   repositories: {
@@ -63,24 +68,6 @@ const api: PhaseAtlasDesktopApi = {
     result: (checkoutId, runId) => ipcRenderer.invoke("phaseatlas:agent-runs:result", checkoutId, runId),
     recover: (checkoutId, input) => ipcRenderer.invoke("phaseatlas:agent-runs:recover", checkoutId, input),
   },
-  terminals: {
-    list: (checkoutId) => ipcRenderer.invoke("phaseatlas:terminals:list", checkoutId),
-    create: (checkoutId, input) => ipcRenderer.invoke("phaseatlas:terminals:create", checkoutId, input),
-    write: (checkoutId, sessionId, data) => ipcRenderer.invoke(
-      "phaseatlas:terminals:write",
-      checkoutId,
-      sessionId,
-      data,
-    ),
-    resize: (checkoutId, sessionId, cols, rows) => ipcRenderer.invoke(
-      "phaseatlas:terminals:resize",
-      checkoutId,
-      sessionId,
-      cols,
-      rows,
-    ),
-    close: (checkoutId, sessionId) => ipcRenderer.invoke("phaseatlas:terminals:close", checkoutId, sessionId),
-  },
   chat: {
     createSession: (checkoutId, input) => ipcRenderer.invoke("phaseatlas:chat:sessions:create", checkoutId, input),
     listSessions: (checkoutId) => ipcRenderer.invoke("phaseatlas:chat:sessions:list", checkoutId),
@@ -116,12 +103,28 @@ const api: PhaseAtlasDesktopApi = {
   },
   ide: {
     open: (checkoutId, theme, runId) => ipcRenderer.invoke("phaseatlas:ide:open", checkoutId, theme, runId),
+    openTaskRegistry: (checkoutId, theme) => ipcRenderer.invoke("phaseatlas:ide:tasks:open", checkoutId, theme),
     show: (key) => ipcRenderer.invoke("phaseatlas:ide:show", key),
     hide: () => ipcRenderer.invoke("phaseatlas:ide:hide"),
     close: (key) => ipcRenderer.invoke("phaseatlas:ide:close", key),
     state: () => ipcRenderer.invoke("phaseatlas:ide:state"),
     setViewport: (rect) => ipcRenderer.invoke("phaseatlas:ide:viewport", rect),
     setTheme: (theme) => ipcRenderer.invoke("phaseatlas:ide:theme:set", theme),
+    openChat: () => ipcRenderer.invoke("phaseatlas:ide:chat:open"),
+    configureAgent: (checkoutId, selection) => ipcRenderer.invoke(
+      "phaseatlas:ide:agent:configure",
+      checkoutId,
+      selection,
+    ),
+    onAgentConfigurationChanged: (listener) => {
+      const handler = (
+        _event: Electron.IpcRendererEvent,
+        checkoutId: string,
+        configuration: IdeAgentConfiguration,
+      ) => listener(checkoutId, configuration);
+      ipcRenderer.on("phaseatlas:ide:agent:configuration", handler);
+      return () => ipcRenderer.removeListener("phaseatlas:ide:agent:configuration", handler);
+    },
     onStateChanged: (listener) => {
       const handler = (_event: Electron.IpcRendererEvent, state: IdeSurfaceState) => listener(state);
       ipcRenderer.on("phaseatlas:ide:state", handler);

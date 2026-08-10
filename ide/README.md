@@ -46,7 +46,10 @@ and the default plugins as `Resources/theia-default-extensions` or
 
 ## Extensions
 
-`default-extensions.manifest.json` pins 14 extensions by version, Open VSX URL
-and SHA-256. `fetch:ide-extensions` refuses any download whose digest does not
-match, so the plugin set is reproducible rather than whatever Open VSX serves
-today.
+`default-extensions.manifest.json` pins 42 extensions by version, Open VSX URL
+and SHA-256. The bundle includes common language services and syntax grammars,
+Markdown authoring and preview support, Mermaid rendering, MDX, Svelte, and
+Vue. `fetch:ide-extensions` refuses any download whose digest does not match,
+then validates the embedded extension identity and unpacks the VSIX under
+`default-extensions/plugins` so Theia can deploy it as a built-in plugin. The
+plugin set is therefore reproducible rather than whatever Open VSX serves today.

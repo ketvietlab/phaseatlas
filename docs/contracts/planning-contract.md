@@ -3,10 +3,10 @@
 ## Purpose
 
 Planning converts a natural-language request into untrusted workspace and task outlines. It does not
-modify the repository. A human reviews the outlines before the backend may publish canonical YAML.
+modify code branches. A human reviews the outlines before the backend may save registry draft YAML.
 
 ```text
-request -> runner adapter -> task outlines -> review -> policy validation -> publish YAML
+request -> runner adapter -> task outlines -> review -> policy validation -> registry draft
                                                               |
                                                               +-> optional body initialization -> Markdown
 ```
@@ -44,11 +44,11 @@ planning.failed
 Text deltas are batched before crossing Electron IPC. `planning.completed` is accepted only after the
 runner result passes runtime validation against the shared task-proposal contract.
 
-## Review and publish
+## Review and draft
 
 The renderer may edit workspace identity and description, plus task title, objective, kind, phase,
-priority, paths, and acceptance criteria. Those edits remain untrusted. Publishing validates the
-full proposal set again, rejects unsafe paths, collisions, and workspace mismatches, assigns
+priority, paths, and acceptance criteria. Those edits remain untrusted. Saving validates the full
+proposal set again, rejects unsafe paths, collisions, and workspace mismatches, assigns
 deterministic workspace-prefixed task IDs, and resolves dependencies between temporary proposal IDs.
 
 For a repository target, the backend writes the workspace manifest and starter tasks into a temporary
@@ -56,7 +56,7 @@ sibling directory, then renames it to `.phaseatlas/workspaces/<slug>` as one pro
 before promotion removes the temporary directory. Workspace-targeted task publishing retains its
 exclusive-file creation and rollback behavior.
 
-Published tasks start in `planned`. Suggested capabilities are constrained to safe defaults:
+Draft tasks start in `planned`. Suggested capabilities are constrained to safe defaults:
 
 - no external network;
 - no dependency changes;
@@ -64,7 +64,10 @@ Published tasks start in `planned`. Suggested capabilities are constrained to sa
 - human verification and human-review evidence;
 - repository-relative paths only.
 
-The `.phaseatlas/` watcher then invalidates projections and refreshes the canonical task workbench.
+The registry `.phaseatlas/` watcher then invalidates projections and refreshes the local task
+workbench. The draft becomes canonical only after the user opens Tasks in Theia, validates the full
+registry, and chooses **Review & Publish**. The guarded push must still match the registry commit from
+which the draft was created.
 
 ## Post-publish body initialization
 
@@ -77,5 +80,6 @@ process receives only one approved task outline, repository context, and the tas
 Provider output streams under the canonical task key. Successful results are written to a Markdown
 sidecar and referenced by the YAML task; failures remain isolated and can be retried individually.
 
-Generated Markdown is not immutable. The repository workbench opens it in Monaco Editor, records
-unsaved state locally, and writes only after an explicit Save action.
+Generated Markdown is not immutable. The embedded Theia IDE opens it inside the detached task
+registry workspace and writes through the IDE's normal save flow. A save remains a local draft until
+the explicit registry publish action succeeds.

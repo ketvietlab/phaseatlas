@@ -1,0 +1,157 @@
+diff --git a/packages/ai-claude-code/src/node/claude-code-service-impl.ts b/packages/ai-claude-code/src/node/claude-code-service-impl.ts
+index 962407c..06cdf4e 100644
+--- a/packages/ai-claude-code/src/node/claude-code-service-impl.ts
++++ b/packages/ai-claude-code/src/node/claude-code-service-impl.ts
+@@ -17,7 +17,7 @@
+ import { ILogger, generateUuid, nls } from '@theia/core';
+ import { inject, injectable, named } from '@theia/core/shared/inversify';
+ import { execSync } from 'child_process';
+-import { existsSync, realpathSync } from 'fs';
++import { existsSync, readFileSync, realpathSync } from 'fs';
+ import * as fs from 'fs/promises';
+ import * as path from 'path';
+ import {
+@@ -107,7 +107,16 @@ export class ClaudeCodeServiceImpl implements ClaudeCodeService {
+         this.abortControllers.set(streamId, abortController);
+
+         try {
+-            const cwd = request.options?.cwd || process.cwd();
++            const configuration = this.readPhaseAtlasAgentConfiguration();
++            if (configuration && configuration.runnerId !== 'claude-code') {
++                throw new Error('PhaseAtlas selected a different repository agent. Choose Claude Code in the synchronized agent bar.');
++            }
++            const configuredOptions = {
++                ...request.options,
++                ...(configuration?.modelId ? { model: configuration.modelId } : {}),
++                ...(configuration?.reasoningEffort ? { effort: configuration.reasoningEffort } : {})
++            };
++            const cwd = configuredOptions.cwd || process.cwd();
+             await this.ensureFileBackupHook(cwd);
+             await this.ensureStopHook(cwd);
+             await this.ensureClaudeSettings(cwd);
+@@ -135,7 +144,7 @@ export class ClaudeCodeServiceImpl implements ClaudeCodeService {
+                     await receivedResult;
+                 })(),
+                 options: <typeof Options>{
+-                    ...request.options,
++                    ...configuredOptions,
+                     abortController,
+                     cwd,
+                     settingSources: ['user', 'project', 'local'],
+@@ -149,8 +158,8 @@ export class ClaudeCodeServiceImpl implements ClaudeCodeService {
+                         // We check for this and log it at debug level instead.
+                         if (message.startsWith('Spawning Claude Code process:')) {
+                             // Strip the system prompt if present
+-                            if (request.options?.appendSystemPrompt) {
+-                                const systemPrompt = request.options.appendSystemPrompt;
++                            if (configuredOptions.appendSystemPrompt) {
++                                const systemPrompt = configuredOptions.appendSystemPrompt;
+                                 message = message.replace(systemPrompt, '').trim();
+                             }
+
+@@ -200,6 +209,26 @@ export class ClaudeCodeServiceImpl implements ClaudeCodeService {
+         }
+     }
+
++    protected readPhaseAtlasAgentConfiguration(): { runnerId: string; modelId: string; reasoningEffort?: string } | undefined {
++        const configurationPath = process.env.PHASEATLAS_AGENT_CONFIG_PATH;
++        if (!configurationPath) {
++            return undefined;
++        }
++        try {
++            const value = JSON.parse(readFileSync(configurationPath, 'utf8')) as Record<string, unknown>;
++            if (typeof value.runnerId !== 'string' || typeof value.modelId !== 'string') {
++                return undefined;
++            }
++            return {
++                runnerId: value.runnerId,
++                modelId: value.modelId,
++                ...(typeof value.reasoningEffort === 'string' ? { reasoningEffort: value.reasoningEffort } : {})
++            };
++        } catch {
++            return undefined;
++        }
++    }
++
+     /**
+      * Dynamically imports the Claude Code SDK from the local installation.
+      * @param customClaudeCodePath Optional custom path to Claude Code executable (cli.js)
+diff --git a/packages/ai-codex/src/node/codex-service-impl.ts b/packages/ai-codex/src/node/codex-service-impl.ts
+index c83f613..95075f9 100644
+--- a/packages/ai-codex/src/node/codex-service-impl.ts
++++ b/packages/ai-codex/src/node/codex-service-impl.ts
+@@ -16,6 +16,7 @@
+
+ import { ILogger } from '@theia/core';
+ import { inject, injectable, named } from '@theia/core/shared/inversify';
++import { readFileSync } from 'fs';
+ import type { Thread } from '@openai/codex-sdk';
+ import {
+     CodexBackendRequest,
+@@ -30,7 +31,7 @@ export class CodexServiceImpl implements CodexService {
+     private logger: ILogger;
+
+     private client: CodexClient;
+-    private sessionThreads = new Map<string, Thread>();
++    private sessionThreads = new Map<string, { signature: string; thread: Thread }>();
+     private abortControllers = new Map<string, AbortController>();
+
+     setClient(client: CodexClient): void {
+@@ -50,14 +51,25 @@ export class CodexServiceImpl implements CodexService {
+
+         try {
+             const dynamicImport = new Function('specifier', 'return import(specifier)') as (specifier: string) => Promise<typeof import('@openai/codex-sdk')>;
+-            const { Codex } = await dynamicImport('@openai/codex-sdk');
+-            const codex = new Codex();
++            const { Codex } = await dynamicImport(process.env.PHASEATLAS_CODEX_SDK_PATH || '@openai/codex-sdk');
++            const codex = new Codex({ codexPathOverride: process.env.PHASEATLAS_CODEX_BIN });
++            const configuration = this.readPhaseAtlasAgentConfiguration();
++            if (configuration && configuration.runnerId !== 'codex-cli') {
++                throw new Error('PhaseAtlas selected a different repository agent. Choose Codex in the synchronized agent bar.');
++            }
++            const options = {
++                ...request.options,
++                ...(configuration?.modelId ? { model: configuration.modelId } : {}),
++                ...(configuration?.reasoningEffort ? { modelReasoningEffort: configuration.reasoningEffort } : {})
++            };
++            const signature = JSON.stringify({ model: options.model, modelReasoningEffort: options.modelReasoningEffort });
+
+             const sessionId = request.sessionId || streamId;
+-            let thread = this.sessionThreads.get(sessionId);
++            const existing = this.sessionThreads.get(sessionId);
++            let thread = existing?.signature === signature ? existing.thread : undefined;
+             if (!thread) {
+-                thread = codex.startThread(request.options);
+-                this.sessionThreads.set(sessionId, thread);
++                thread = codex.startThread(options);
++                this.sessionThreads.set(sessionId, { signature, thread });
+                 this.logger.info(`Created new Codex thread for session: ${sessionId}`);
+             } else {
+                 this.logger.info(`Reusing existing Codex thread for session: ${sessionId}`);
+@@ -90,6 +102,26 @@ export class CodexServiceImpl implements CodexService {
+         }
+     }
+
++    protected readPhaseAtlasAgentConfiguration(): { runnerId: string; modelId: string; reasoningEffort?: string } | undefined {
++        const configurationPath = process.env.PHASEATLAS_AGENT_CONFIG_PATH;
++        if (!configurationPath) {
++            return undefined;
++        }
++        try {
++            const value = JSON.parse(readFileSync(configurationPath, 'utf8')) as Record<string, unknown>;
++            if (typeof value.runnerId !== 'string' || typeof value.modelId !== 'string') {
++                return undefined;
++            }
++            return {
++                runnerId: value.runnerId,
++                modelId: value.modelId,
++                ...(typeof value.reasoningEffort === 'string' ? { reasoningEffort: value.reasoningEffort } : {})
++            };
++        } catch {
++            return undefined;
++        }
++    }
++
+     cancel(streamId: string): void {
+         const abortController = this.abortControllers.get(streamId);
+         if (abortController) {

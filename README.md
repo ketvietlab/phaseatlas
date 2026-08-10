@@ -62,7 +62,7 @@ produce evidence; they cannot silently publish contracts or declare canonical wo
 - Review, edit, validate, and publish proposals explicitly.
 - Publish lightweight outlines first, then initialize detailed Markdown bodies individually or in
   batches of up to four concurrent model calls.
-- Keep generated content editable through the built-in repository editor.
+- Keep generated content editable through the embedded checkout-bound Theia IDE.
 
 ### Task workbench
 
@@ -70,7 +70,8 @@ produce evidence; they cannot silently publish contracts or declare canonical wo
 - Visualize task readiness, active work, blockers, and completion.
 - Open rendered Markdown task bodies from either view.
 - Render Mermaid diagrams inside task documentation.
-- Edit repository files in a Monaco-based multi-tab editor with a file explorer and explicit saves.
+- Edit repository files in the embedded Theia IDE, with its explorer, terminals, language services,
+  and extension support.
 
 ### Durable agent execution
 
@@ -78,20 +79,20 @@ produce evidence; they cannot silently publish contracts or declare canonical wo
 - Derive permissions from the task and action instead of accepting arbitrary commands from the UI.
 - Execute write-capable work in a unique PhaseAtlas-owned Git worktree.
 - Stream normalized agent narration, tool activity, file changes, and lifecycle events.
-- Persist run specifications, events, results, retries, and terminal state in checkout-owned SQLite.
+- Persist run specifications, events, results, retries, and final lifecycle state in checkout-owned SQLite.
 - Fetch command output in bounded pages only when a user opens a command; collapsed output is not kept
   in the renderer DOM.
 - Recover interrupted attempts explicitly and reject stale results after a canonical task changes.
 
-### Repository chat
+### Theia AI chat
 
-- Open free-form repository chat without creating or selecting a task.
-- Keep multiple durable conversations per repository.
-- Attach safe repository-relative file references.
-- Use read-only chat by default, with normalized reasoning and tool activity.
-- Request an isolated edit through a separate confirmation and review flow.
-- Accept, discard, retain, or resume a reviewed edit without giving chat canonical task authority.
-- Toggle chat with `Option+L` on macOS (`Alt+L` elsewhere).
+- Open Theia's native AI Chat in the selected repository with `Option+L` on macOS (`Alt+L` elsewhere).
+- Use the registered `Codex` or `ClaudeCode` agent without a parallel PhaseAtlas chat window.
+- Reuse local Codex/ChatGPT and Claude Code authentication instead of requiring provider API keys in
+  the renderer.
+- Keep the repository's agent, model, and reasoning effort synchronized in both directions with the
+  PhaseAtlas bar above Theia's chat input; unsupported values are rejected against the live repo catalog.
+- Keep context attachment, modes, confirmations, and chat history inside Theia.
 
 ### Provider support
 
@@ -116,7 +117,7 @@ or credentials to the renderer.
   - Codex CLI, or the Codex binary bundled with the macOS ChatGPT application
   - Claude Code
 
-You can browse canonical repositories and edit files without a provider. Planning, chat, task-content
+You can browse canonical repositories and edit files without a provider. Planning, AI chat, task-content
 initialization, and agent runs require an available CLI with a discoverable model catalog.
 
 ## Quick start
@@ -156,11 +157,14 @@ another one.
 5. Review the proposal, publish it, and initialize detailed task content only where it is useful.
 6. Open a task from List or Map view to read its Markdown body, edit it, or start an allowed run.
 
-PhaseAtlas stores canonical planning data in the repository:
+PhaseAtlas stores the repository identity in every code branch and canonical planning data on the
+configured task registry ref:
 
 ```text
 .phaseatlas/
-├── repository.yaml
+└── repository.yaml  # points to refs/heads/phaseatlas/tasks
+
+phaseatlas/tasks:.phaseatlas/
 └── workspaces/
     └── <workspace-slug>/
         ├── workspace.yaml
@@ -170,7 +174,9 @@ PhaseAtlas stores canonical planning data in the repository:
 ```
 
 YAML owns the task contract and dependency graph. The optional Markdown sidecar owns the detailed task
-body. Both are normal Git-tracked files that can be reviewed and changed outside PhaseAtlas.
+body. Both are normal Git-tracked files. PhaseAtlas opens the registry as a separate Theia target;
+saving creates a draft and **Review & Publish** validates, commits, and pushes it without switching the
+code checkout away from `develop` or a feature branch.
 
 See the [task contract](docs/contracts/task-contract.md) and
 [planning contract](docs/contracts/planning-contract.md) before generating these files by hand.
@@ -184,7 +190,7 @@ flowchart LR
   Bridge --> Main["Electron supervisor"]
   Main --> WorkerA["Repository worker A"]
   Main --> WorkerB["Repository worker B"]
-  WorkerA --> ContractsA["Git-tracked .phaseatlas contracts"]
+  WorkerA --> ContractsA["Git task registry ref"]
   WorkerA --> StoreA["Checkout SQLite"]
   WorkerA --> AgentA["Provider CLI"]
   AgentA --> ReadOnly["Read-only checkout"]
@@ -221,7 +227,7 @@ Important boundaries:
 - implementation runs write only inside leased worktrees with task-derived scope;
 - Git independently derives changed files before a result can be reviewed;
 - an agent's proposed task state is advisory and never updates canonical YAML automatically; and
-- cancellation, retry, interruption, and terminal ordering are persisted rather than inferred from UI
+- cancellation, retry, interruption, and final-state ordering are persisted rather than inferred from UI
   state.
 
 Read [ADR 0002](docs/decisions/0002-storage-boundaries.md) and the
@@ -259,7 +265,7 @@ packages/contracts       Shared IPC, domain types, and model-output JSON schemas
 packages/core            Validation, persistence, Git inspection, and execution core
 scripts                  Development, packaging, and bundle-verification tooling
 docs/architecture        Runtime and editor architecture
-docs/contracts           Canonical planning, task, run, chat, edit, and terminal contracts
+docs/contracts           Canonical planning, task, run, chat, and edit contracts
 docs/decisions           Architectural decision records
 .phaseatlas              PhaseAtlas's own workspaces and canonical task registry
 ```
@@ -315,8 +321,8 @@ the [production release guide](docs/releasing.md).
 ## Project status and roadmap
 
 PhaseAtlas is currently at version `0.1.0`. The core desktop boundary, canonical task registry,
-provider-neutral planning, task-content initialization, dependency workbench, repository editor,
-durable agent execution, repository chat, isolated chat editing, and macOS packaging path are present.
+provider-neutral planning, task-content initialization, dependency workbench, embedded Theia IDE and
+AI Chat, durable agent execution, task conversation editing, and macOS packaging path are present.
 
 Pre-1.0 priorities include hardening source adapters, promotion workflows, provider compatibility,
 cross-platform support, release hardening, and documentation. Track milestone status in the

@@ -1,10 +1,17 @@
 import { fileURLToPath } from "node:url";
-import { readFileSync, writeFileSync } from "node:fs";
+import { readFileSync, realpathSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { TheiaIdeManager } from "./theia-ide-manager.js";
 import { assertIdeViewport, assertPhaseAtlasTheme } from "./theia-ide-policy.js";
 import { app, BrowserWindow, dialog, ipcMain, shell } from "electron";
 import { RepositoryProcessManager } from "./repository-process-manager.js";
+import type {
+  IdeAgentConfiguration,
+  IdeAgentOption,
+  IdeAgentSelection,
+  RunnerDescriptor,
+  TaskRegistryPublishInput,
+} from "@phaseatlas/contracts";
 
 function writeReleaseSmokeResult(result: Record<string, unknown>): void {
   if (process.env.PHASEATLAS_RELEASE_SMOKE !== "1") return;
@@ -114,6 +121,39 @@ const theiaPreloadEntry = path.join(currentDirectory, "theia-preload.cjs");
 const theiaDefaultExtensionsRoot = app.isPackaged
   ? path.join(process.resourcesPath, "theia-default-extensions")
   : path.resolve(currentDirectory, "../../../ide/default-extensions");
+const claudeCodePath = app.isPackaged
+  ? path.join(process.resourcesPath, "claude-agent-sdk", "cli.js")
+  : path.resolve(currentDirectory, "../node_modules/@anthropic-ai/claude-agent-sdk/cli.js");
+const codexTarget = process.platform === "darwin" && process.arch === "arm64"
+  ? "aarch64-apple-darwin"
+  : process.platform === "darwin" && process.arch === "x64"
+    ? "x86_64-apple-darwin"
+    : process.platform === "linux" && process.arch === "arm64"
+      ? "aarch64-unknown-linux-musl"
+      : process.platform === "linux" && process.arch === "x64"
+        ? "x86_64-unknown-linux-musl"
+        : process.platform === "win32" && process.arch === "arm64"
+          ? "aarch64-pc-windows-msvc"
+          : process.platform === "win32" && process.arch === "x64"
+            ? "x86_64-pc-windows-msvc"
+            : "";
+if (!codexTarget) throw new Error(`The embedded Codex runtime does not support ${process.platform}-${process.arch}.`);
+const codexPlatformPackage = `codex-${process.platform}-${process.arch}`;
+const developmentCodexSdkRoot = app.isPackaged
+  ? ""
+  : realpathSync(path.resolve(currentDirectory, "../node_modules/@openai/codex-sdk"));
+const developmentCodexPackageRoot = app.isPackaged
+  ? ""
+  : realpathSync(path.resolve(developmentCodexSdkRoot, "../codex"));
+const codexSdkPath = app.isPackaged
+  ? path.join(process.resourcesPath, "codex-agent-sdk", "index.js")
+  : path.join(developmentCodexSdkRoot, "dist", "index.js");
+const codexExecutablePath = app.isPackaged
+  ? path.join(process.resourcesPath, "codex-cli", "bin", "codex")
+  : path.resolve(
+    developmentCodexPackageRoot,
+    `../${codexPlatformPackage}/vendor/${codexTarget}/bin/${process.platform === "win32" ? "codex.exe" : "codex"}`,
+  );
 const workerEntry = process.env.PHASEATLAS_WORKER_ENTRY ||
   (app.isPackaged
     ? path.join(process.resourcesPath, "repository-worker", "index.js")
@@ -123,6 +163,9 @@ const embeddedIde = new TheiaIdeManager(
   theiaBackendEntry,
   theiaPreloadEntry,
   theiaDefaultExtensionsRoot,
+  claudeCodePath,
+  codexSdkPath,
+  codexExecutablePath,
   applicationSupportRoot,
   (host, state) => host.webContents.send("phaseatlas:ide:state", state),
   // Leaving the IDE from inside it closes the surface the same way ⌘W does, so
@@ -196,9 +239,97 @@ function ideHost(event: Electron.IpcMainInvokeEvent): BrowserWindow {
   return host;
 }
 
+const THEIA_AGENT_BY_RUNNER = {
+  "codex-cli": "Codex",
+  "claude-code": "ClaudeCode",
+} as const;
+
+function ideAgentOptions(runners: RunnerDescriptor[]): IdeAgentOption[] {
+  return runners.flatMap((runner) => {
+    const theiaAgentId = THEIA_AGENT_BY_RUNNER[runner.id as keyof typeof THEIA_AGENT_BY_RUNNER];
+    if (!theiaAgentId || !runner.available || !runner.models.length) return [];
+    return [{
+      runnerId: runner.id,
+      label: runner.name,
+      theiaAgentId,
+      models: runner.models.map((model) => ({
+        id: model.id,
+        label: model.displayName,
+        isDefault: model.isDefault,
+        reasoningEfforts: [...model.reasoningEfforts],
+        ...(model.defaultReasoningEffort ? { defaultReasoningEffort: model.defaultReasoningEffort } : {}),
+      })),
+    }];
+  });
+}
+
+async function validatedIdeAgentConfiguration(
+  checkoutId: string,
+  input: unknown,
+): Promise<IdeAgentConfiguration> {
+  repositories.describe(checkoutId);
+  if (!input || typeof input !== "object" || Array.isArray(input)) {
+    throw new Error("The IDE agent selection is invalid.");
+  }
+  const candidate = input as Record<string, unknown>;
+  const allowed = new Set(["runnerId", "modelId", "reasoningEffort"]);
+  if (Object.keys(candidate).some((key) => !allowed.has(key))) {
+    throw new Error("The IDE agent selection contains unsupported fields.");
+  }
+  if (typeof candidate.runnerId !== "string" || typeof candidate.modelId !== "string") {
+    throw new Error("The IDE agent and model are required.");
+  }
+  if (candidate.reasoningEffort !== undefined && typeof candidate.reasoningEffort !== "string") {
+    throw new Error("The IDE reasoning effort is invalid.");
+  }
+  const agents = ideAgentOptions(await repositories.listRunners(checkoutId));
+  const agent = agents.find((option) => option.runnerId === candidate.runnerId);
+  const model = agent?.models.find((option) => option.id === candidate.modelId);
+  if (!agent || !model) throw new Error("That agent or model is unavailable for this repository.");
+  const reasoningEffort = typeof candidate.reasoningEffort === "string" && candidate.reasoningEffort.trim()
+    ? candidate.reasoningEffort.trim()
+    : undefined;
+  if (reasoningEffort && !model.reasoningEfforts.includes(reasoningEffort)) {
+    throw new Error("That reasoning effort is unavailable for this model.");
+  }
+  return {
+    runnerId: agent.runnerId,
+    modelId: model.id,
+    ...(reasoningEffort ? { reasoningEffort } : {}),
+    agents,
+  };
+}
+
+async function applyIdeAgentSelection(checkoutId: string, input: unknown): Promise<IdeAgentConfiguration> {
+  const configuration = await validatedIdeAgentConfiguration(checkoutId, input);
+  await embeddedIde.setAgentConfiguration(checkoutId, configuration);
+  return configuration;
+}
+
 function registerIpc(): void {
   ipcMain.on("phaseatlas:ide:theme:get", (event) => {
     event.returnValue = embeddedIde.themeForWebContents(event.sender.id);
+  });
+  ipcMain.on("phaseatlas:ide:agent:configuration:get", (event) => {
+    event.returnValue = embeddedIde.agentConfigurationForWebContents(event.sender.id) ?? null;
+  });
+  ipcMain.on("phaseatlas:ide:agent:selection", (event, selection: unknown) => {
+    const target = embeddedIde.checkoutForWebContents(event.sender.id);
+    if (!target) return;
+    void applyIdeAgentSelection(target.checkoutId, selection).then((configuration) => {
+      if (!target.host.isDestroyed()) {
+        target.host.webContents.send(
+          "phaseatlas:ide:agent:configuration",
+          target.checkoutId,
+          configuration,
+        );
+      }
+    }).catch(() => {
+      const current = embeddedIde.agentConfigurationForWebContents(event.sender.id);
+      if (current && !event.sender.isDestroyed()) {
+        event.sender.send("phaseatlas:ide:agent:configuration", current);
+      }
+    });
   });
   ipcMain.handle("phaseatlas:ide:open", async (event, checkoutId: string, theme: string, runId?: string) => {
     assertPhaseAtlasTheme(theme);
@@ -222,6 +353,38 @@ function registerIpc(): void {
       host,
     );
   });
+  ipcMain.handle("phaseatlas:ide:tasks:open", async (event, checkoutId: string, theme: string) => {
+    assertPhaseAtlasTheme(theme);
+    const repository = repositories.describe(checkoutId);
+    const workspace = await repositories.taskRegistryWorkspace(checkoutId);
+    return embeddedIde.open(
+      { checkoutId: repository.checkoutId, kind: "tasks" },
+      path.join(workspace.path, ".phaseatlas"),
+      `${repository.name} · Task Registry`,
+      theme,
+      ideHost(event),
+    );
+  });
+  ipcMain.handle("phaseatlas:ide:tasks:context", async (event) => {
+    const target = embeddedIde.checkoutForWebContents(event.sender.id);
+    if (!target || target.kind !== "tasks") return null;
+    return repositories.taskRegistryStatus(target.checkoutId);
+  });
+  ipcMain.handle("phaseatlas:ide:tasks:validate", async (event) => {
+    const target = embeddedIde.checkoutForWebContents(event.sender.id);
+    if (!target || target.kind !== "tasks") throw new Error("This IDE target is not the task registry.");
+    return repositories.validateTaskRegistry(target.checkoutId);
+  });
+  ipcMain.handle("phaseatlas:ide:tasks:publish", async (event, input: TaskRegistryPublishInput) => {
+    const target = embeddedIde.checkoutForWebContents(event.sender.id);
+    if (!target || target.kind !== "tasks") throw new Error("This IDE target is not the task registry.");
+    return repositories.publishTaskRegistry(target.checkoutId, input);
+  });
+  ipcMain.handle("phaseatlas:ide:tasks:discard", async (event, expectedCommit: string) => {
+    const target = embeddedIde.checkoutForWebContents(event.sender.id);
+    if (!target || target.kind !== "tasks") throw new Error("This IDE target is not the task registry.");
+    return repositories.discardTaskRegistry(target.checkoutId, expectedCommit);
+  });
   ipcMain.handle("phaseatlas:ide:show", (event, key: string) => embeddedIde.show(ideHost(event), key));
   ipcMain.handle("phaseatlas:ide:hide", (event) => embeddedIde.hide(ideHost(event)));
   ipcMain.handle("phaseatlas:ide:close", (event, key: string) => embeddedIde.close(ideHost(event), key));
@@ -233,6 +396,10 @@ function registerIpc(): void {
   ipcMain.handle("phaseatlas:ide:theme:set", (_event, theme: string) => {
     assertPhaseAtlasTheme(theme);
     embeddedIde.setTheme(theme);
+  });
+  ipcMain.handle("phaseatlas:ide:chat:open", (event) => embeddedIde.openChat(ideHost(event)));
+  ipcMain.handle("phaseatlas:ide:agent:configure", (_event, checkoutId: string, selection: IdeAgentSelection) => {
+    return applyIdeAgentSelection(checkoutId, selection);
   });
   ipcMain.handle("phaseatlas:runtime:platform", () => process.platform);
   ipcMain.handle("phaseatlas:repositories:list", () => repositories.list());
@@ -314,21 +481,6 @@ function registerIpc(): void {
   });
   ipcMain.handle("phaseatlas:agent-runs:recover", (_event, checkoutId: string, input) => {
     return repositories.recoverAgentRun(checkoutId, input);
-  });
-  ipcMain.handle("phaseatlas:terminals:list", (_event, checkoutId: string) => {
-    return repositories.listTerminals(checkoutId);
-  });
-  ipcMain.handle("phaseatlas:terminals:create", (_event, checkoutId: string, input) => {
-    return repositories.createTerminal(checkoutId, input);
-  });
-  ipcMain.handle("phaseatlas:terminals:write", (_event, checkoutId: string, sessionId: string, data: string) => {
-    return repositories.writeTerminal(checkoutId, sessionId, data);
-  });
-  ipcMain.handle("phaseatlas:terminals:resize", (_event, checkoutId: string, sessionId: string, cols: number, rows: number) => {
-    return repositories.resizeTerminal(checkoutId, sessionId, cols, rows);
-  });
-  ipcMain.handle("phaseatlas:terminals:close", (_event, checkoutId: string, sessionId: string) => {
-    return repositories.closeTerminal(checkoutId, sessionId);
   });
   ipcMain.handle("phaseatlas:chat:sessions:create", (_event, checkoutId: string, input) => {
     return repositories.createChatSession(checkoutId, input);

@@ -23,10 +23,15 @@ const LEASE_ID_PATTERN = /^[a-f0-9-]{36}$/;
 export interface TheiaTarget {
   checkoutId: string;
   leaseId?: string;
+  kind?: "tasks";
 }
 
 export function theiaTargetKey(target: TheiaTarget): string {
   if (!CHECKOUT_ID_PATTERN.test(target.checkoutId)) throw new Error("The IDE checkout identity is invalid.");
+  if (target.kind === "tasks") {
+    if (target.leaseId !== undefined) throw new Error("The task registry target cannot be a run worktree.");
+    return `${target.checkoutId}:tasks`;
+  }
   if (target.leaseId === undefined) return target.checkoutId;
   if (!LEASE_ID_PATTERN.test(target.leaseId)) throw new Error("The IDE worktree identity is invalid.");
   return `${target.checkoutId}:${target.leaseId}`;

@@ -32,7 +32,7 @@ import type {
   TaskContentRunSummary,
   TaskContentStartInput,
   TaskProposalOutline,
-  TerminalCreateInput,
+  TaskRegistryPublishInput,
   WorkerEvent,
   WorkerRequest,
   WorkerResponse,
@@ -50,11 +50,11 @@ import {
 } from "@phaseatlas/core";
 import { watch, type FSWatcher } from "chokidar";
 import { assertRunnerSelection, RunnerRegistry } from "./runner-registry.js";
-import { TerminalSessionManager } from "./terminal-session-manager.js";
 import { RepositoryChatAdapterRegistry } from "./chat-adapter-registry.js";
 import { RepositoryChatRuntime } from "./repository-chat-runtime.js";
 import { ChatEditAdapterRegistry } from "./chat-edit-adapter-registry.js";
 import { ChatEditRuntime } from "./chat-edit-runtime.js";
+import { TaskRegistryManager } from "./task-registry-manager.js";
 import {
   AgentTaskRunGuard,
   canonicalAgentTaskKey,
@@ -81,15 +81,28 @@ if (!checkoutStorePath) {
 }
 const canonicalRepositoryRoot = repositoryRoot;
 
-const inspector = await RepositoryInspector.open(canonicalRepositoryRoot);
-const initialRepository = await inspector.describe();
+const checkoutInspector = await RepositoryInspector.open(canonicalRepositoryRoot);
+const checkoutRepository = await checkoutInspector.describe();
 const resolvedCheckoutStorePath = path.resolve(checkoutStorePath);
 if (
   path.basename(resolvedCheckoutStorePath) !== "operations.sqlite" ||
-  path.basename(path.dirname(resolvedCheckoutStorePath)) !== initialRepository.checkoutId
+  path.basename(path.dirname(resolvedCheckoutStorePath)) !== checkoutRepository.checkoutId
 ) {
   throw new Error("Checkout operational store path does not match the worker checkout identity.");
 }
+const taskRegistry = checkoutRepository.taskRegistry
+  ? await TaskRegistryManager.open({
+      repositoryRoot: canonicalRepositoryRoot,
+      runtimeRoot: path.dirname(resolvedCheckoutStorePath),
+      config: checkoutRepository.taskRegistry,
+    })
+  : undefined;
+const registryWorkspace = taskRegistry ? await taskRegistry.workspace() : undefined;
+const inspector = await RepositoryInspector.open(canonicalRepositoryRoot, {
+  ...(registryWorkspace ? { contractRoot: registryWorkspace.path } : {}),
+});
+if (registryWorkspace) inspector.setRegistrySource(registryWorkspace.source);
+const initialRepository = await inspector.describe();
 const operationalStore = new CheckoutOperationalStore(resolvedCheckoutStorePath, initialRepository.checkoutId);
 operationalStore.reconcileInterruptedRuns();
 operationalStore.reconcileInterruptedChatTurns();
@@ -158,10 +171,6 @@ const activeAgentRuns = new Map<string, {
   cancellation?: Promise<AgentRunCancellationResult>;
 }>();
 const agentTaskRunGuard = new AgentTaskRunGuard();
-const terminalSessions = new TerminalSessionManager(canonicalRepositoryRoot, (event) => {
-  send({ type: "terminal.event", payload: { event } });
-});
-
 async function mapConcurrent<Input, Output>(
   items: Input[],
   concurrency: number,
@@ -190,19 +199,6 @@ function requestParams(request: WorkerRequest): Record<string, unknown> {
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return Boolean(value && typeof value === "object" && !Array.isArray(value));
-}
-
-function terminalCreateInput(value: unknown): Partial<TerminalCreateInput> {
-  if (value === undefined) return {};
-  if (!isRecord(value)) throw new Error("Terminal create input must be an object.");
-  const allowedFields = new Set(["cols", "rows"]);
-  if (Object.keys(value).some((field) => !allowedFields.has(field))) {
-    throw new Error("Terminal create input contains unsupported fields.");
-  }
-  return {
-    ...(value.cols !== undefined ? { cols: value.cols as number } : {}),
-    ...(value.rows !== undefined ? { rows: value.rows as number } : {}),
-  };
 }
 
 function chatCreateInput(value: unknown): RepositoryChatCreateInput {
@@ -747,7 +743,7 @@ function startTaskContent(input: TaskContentStartInput): { runId: string } {
               }),
             );
             const contentPath = await writeTaskContent({
-              root: canonicalRepositoryRoot,
+              root: inspector.contractRoot,
               task,
               body: content.body,
             });
@@ -1014,12 +1010,59 @@ async function dispatch(request: WorkerRequest): Promise<unknown> {
     case "repository.describe":
       return inspector.describe();
     case "repository.refresh":
+      if (taskRegistry) inspector.setRegistrySource(await taskRegistry.sync());
       inspector.invalidate();
       return inspector.describe();
     case "workspace.list":
       return inspector.listWorkspaces();
     case "task.snapshot":
+      if (taskRegistry) inspector.setRegistrySource(await taskRegistry.source());
       return inspector.taskSnapshot();
+    case "task-registry.workspace": {
+      if (!taskRegistry) throw new Error("This repository does not configure a dedicated task registry.");
+      return taskRegistry.workspace();
+    }
+    case "task-registry.status": {
+      if (!taskRegistry) throw new Error("This repository does not configure a dedicated task registry.");
+      return taskRegistry.source();
+    }
+    case "task-registry.validate": {
+      if (!taskRegistry) throw new Error("This repository does not configure a dedicated task registry.");
+      const source = await taskRegistry.source();
+      inspector.invalidate();
+      inspector.setRegistrySource(source);
+      const snapshot = await inspector.taskSnapshot();
+      return { source, issues: snapshot.issues };
+    }
+    case "task-registry.publish": {
+      if (!taskRegistry) throw new Error("This repository does not configure a dedicated task registry.");
+      const input = requestParams(request).input as TaskRegistryPublishInput | undefined;
+      if (!input || typeof input.expectedCommit !== "string" || typeof input.message !== "string") {
+        throw new Error("Task registry publish input is required.");
+      }
+      inspector.invalidate();
+      const draftSource = await taskRegistry.source();
+      inspector.setRegistrySource(draftSource);
+      const draft = await inspector.taskSnapshot();
+      if (draft.issues.some((issue) => issue.severity === "error")) {
+        throw new Error("Resolve task registry validation errors before publishing.");
+      }
+      const source = await taskRegistry.publish(input);
+      inspector.invalidate();
+      inspector.setRegistrySource(source);
+      const snapshot = await inspector.taskSnapshot();
+      send({ type: "repository.changed", payload: { paths: draftSource.changedPaths } });
+      return { source, snapshot };
+    }
+    case "task-registry.discard": {
+      if (!taskRegistry) throw new Error("This repository does not configure a dedicated task registry.");
+      const expectedCommit = requestParams(request).expectedCommit;
+      if (typeof expectedCommit !== "string") throw new Error("expectedCommit is required.");
+      const source = await taskRegistry.discard(expectedCommit);
+      inspector.invalidate();
+      inspector.setRegistrySource(source);
+      return source;
+    }
     case "runner.list":
       return runners.list();
     case "planning.start":
@@ -1109,30 +1152,6 @@ async function dispatch(request: WorkerRequest): Promise<unknown> {
         status: "cancelled",
       });
       return released;
-    }
-    case "terminal.list":
-      return terminalSessions.list();
-    case "terminal.create":
-      return terminalSessions.create(terminalCreateInput(requestParams(request).input));
-    case "terminal.write": {
-      const { sessionId, data } = requestParams(request);
-      if (typeof sessionId !== "string" || typeof data !== "string") {
-        throw new Error("sessionId and data are required.");
-      }
-      terminalSessions.write(sessionId, data);
-      return undefined;
-    }
-    case "terminal.resize": {
-      const { sessionId, cols, rows } = requestParams(request);
-      if (typeof sessionId !== "string") throw new Error("sessionId is required.");
-      terminalSessions.resize(sessionId, cols, rows);
-      return undefined;
-    }
-    case "terminal.close": {
-      const { sessionId } = requestParams(request);
-      if (typeof sessionId !== "string") throw new Error("sessionId is required.");
-      terminalSessions.close(sessionId);
-      return undefined;
     }
     case "chat.session.create":
       return chatRuntime.createSession(chatCreateInput(requestParams(request).input));
@@ -1278,22 +1297,29 @@ let changeTimer: NodeJS.Timeout | null = null;
 const changedPaths = new Set<string>();
 
 try {
-  const phaseAtlasRoot = path.join(repositoryRoot, ".phaseatlas");
+  const phaseAtlasRoot = path.join(inspector.contractRoot, ".phaseatlas");
   watcher = watch(phaseAtlasRoot, {
     ignoreInitial: true,
     awaitWriteFinish: { stabilityThreshold: 100, pollInterval: 20 },
   });
   watcher.on("all", (_eventType, changedPath) => {
-    const nestedPath = path.relative(repositoryRoot, changedPath).replaceAll(path.sep, "/");
+    const nestedPath = path.relative(inspector.contractRoot, changedPath).replaceAll(path.sep, "/");
     changedPaths.add(nestedPath || ".phaseatlas");
     if (changeTimer) clearTimeout(changeTimer);
     changeTimer = setTimeout(() => {
-      inspector.invalidate();
-      send({
-        type: "repository.changed",
-        payload: { paths: [...changedPaths].sort() },
-      });
+      const paths = [...changedPaths].sort();
       changedPaths.clear();
+      inspector.invalidate();
+      void (async () => {
+        if (taskRegistry) inspector.setRegistrySource(await taskRegistry.source());
+        send({
+          type: "repository.changed",
+          payload: { paths },
+        });
+      })().catch((error) => send({
+        type: "worker.warning",
+        payload: { message: `Task registry status failed: ${error instanceof Error ? error.message : "unknown error"}` },
+      }));
       changeTimer = null;
     }, 150);
   });
@@ -1314,7 +1340,6 @@ process.once("exit", () => {
   for (const controller of activePlanningRuns.values()) controller.abort();
   for (const run of activeTaskContentRuns.values()) run.controller.abort();
   for (const run of activeAgentRuns.values()) run.controller.abort();
-  terminalSessions.dispose();
   chatRuntime.shutdown();
   operationalStore.close();
   if (changeTimer) clearTimeout(changeTimer);

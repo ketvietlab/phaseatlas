@@ -98,6 +98,202 @@
       "license": "SEE LICENSE IN LICENSE.txt",
       "url": "https://open-vsx.org/api/bmewburn/vscode-intelephense-client/1.18.5/file/bmewburn.vscode-intelephense-client-1.18.5.vsix",
       "sha256": "124e5ad2b7478c52ba68e35629d6ab0c1871fa89012defda8984b1377ff6e618"
+    },
+    {
+      "id": "vscode.typescript",
+      "version": "1.95.3",
+      "license": "SEE LICENSE IN LICENSE-vscode.txt",
+      "url": "https://open-vsx.org/api/vscode/typescript/1.95.3/file/vscode.typescript-1.95.3.vsix",
+      "sha256": "493019c0375ad6d46a8811e041d70f68eb57ed5e5a9698125e4691eaf6f2d8fc"
+    },
+    {
+      "id": "vscode.javascript",
+      "version": "1.95.3",
+      "license": "SEE LICENSE IN LICENSE-vscode.txt",
+      "url": "https://open-vsx.org/api/vscode/javascript/1.95.3/file/vscode.javascript-1.95.3.vsix",
+      "sha256": "df55b5174c57ec057d78d4b9ddd225cc36095b6fc845f1a0df87f1e13dfb64b2"
+    },
+    {
+      "id": "vscode.css",
+      "version": "1.95.3",
+      "license": "SEE LICENSE IN LICENSE-vscode.txt",
+      "url": "https://open-vsx.org/api/vscode/css/1.95.3/file/vscode.css-1.95.3.vsix",
+      "sha256": "843c1114e6b0b5b95173a28874a2614617dc7cc7d7cd95899f971fb625d46a60"
+    },
+    {
+      "id": "vscode.html",
+      "version": "1.95.3",
+      "license": "SEE LICENSE IN LICENSE-vscode.txt",
+      "url": "https://open-vsx.org/api/vscode/html/1.95.3/file/vscode.html-1.95.3.vsix",
+      "sha256": "193c7d03374f3f8b71f01dabae05c93b86069b28521cbb18fad0beab6eb42732"
+    },
+    {
+      "id": "vscode.json",
+      "version": "1.95.3",
+      "license": "SEE LICENSE IN LICENSE-vscode.txt",
+      "url": "https://open-vsx.org/api/vscode/json/1.95.3/file/vscode.json-1.95.3.vsix",
+      "sha256": "53667e2cc9875c6872f8d7eff75314c46f8c0a30398efd9e7bec437b7cb928c3"
+    },
+    {
+      "id": "vscode.markdown",
+      "version": "1.95.3",
+      "license": "SEE LICENSE IN LICENSE-vscode.txt",
+      "url": "https://open-vsx.org/api/vscode/markdown/1.95.3/file/vscode.markdown-1.95.3.vsix",
+      "sha256": "53591b889e8941db812f263d8e5eaa34ec83718e399ecd7a1e178410bd3877a9"
+    },
+    {
+      "id": "vscode.python",
+      "version": "1.95.3",
+      "license": "SEE LICENSE IN LICENSE-vscode.txt",
+      "url": "https://open-vsx.org/api/vscode/python/1.95.3/file/vscode.python-1.95.3.vsix",
+      "sha256": "37c2a0cdfa668bd4dc37265d7d172300a20350098651b1843ee220a30c5e2d88"
+    },
+    {
+      "id": "vscode.php",
+      "version": "1.95.3",
+      "license": "SEE LICENSE IN LICENSE-vscode.txt",
+      "url": "https://open-vsx.org/api/vscode/php/1.95.3/file/vscode.php-1.95.3.vsix",
+      "sha256": "6ce3821ea98d4dee8cd0b9ca20dffe0679959f20bd4c820071061b3d1191299d"
+    },
+    {
+      "id": "vscode.shellscript",
+      "version": "1.95.3",
+      "license": "SEE LICENSE IN LICENSE-vscode.txt",
+      "url": "https://open-vsx.org/api/vscode/shellscript/1.95.3/file/vscode.shellscript-1.95.3.vsix",
+      "sha256": "b60e2bf7de39524bf0608653583b5e0360fe78e3ec59e94f2bd1b9255e89c38d"
+    },
+    {
+      "id": "vscode.docker",
+      "version": "1.95.3",
+      "license": "SEE LICENSE IN LICENSE-vscode.txt",
+      "url": "https://open-vsx.org/api/vscode/docker/1.95.3/file/vscode.docker-1.95.3.vsix",
+      "sha256": "5de2f31e7e8e9c64b17d0b2eb915a5c14653904376a06d07f2229890fe296078"
+    },
+    {
+      "id": "vscode.yaml",
+      "version": "1.95.3",
+      "license": "SEE LICENSE IN LICENSE-vscode.txt",
+      "url": "https://open-vsx.org/api/vscode/yaml/1.95.3/file/vscode.yaml-1.95.3.vsix",
+      "sha256": "1c60f93adad36f20de0696bc75f8b3829f3fc4c760f4d8022ec9f934436bbeb0"
+    },
+    {
+      "id": "vscode.xml",
+      "version": "1.95.3",
+      "license": "SEE LICENSE IN LICENSE-vscode.txt",
+      "url": "https://open-vsx.org/api/vscode/xml/1.95.3/file/vscode.xml-1.95.3.vsix",
+      "sha256": "34024416f2583fa48f7f1a8ab7f30b37986eea54d9a7a6be1f25aff8507dd0a1"
+    },
+    {
+      "id": "vscode.sql",
+      "version": "1.95.3",
+      "license": "SEE LICENSE IN LICENSE-vscode.txt",
+      "url": "https://open-vsx.org/api/vscode/sql/1.95.3/file/vscode.sql-1.95.3.vsix",
+      "sha256": "07206bf02f712748b4e0be539e512090dd2a6f90d65c3b5c9a7f8ae13ed9a33f"
+    },
+    {
+      "id": "vscode.cpp",
+      "version": "1.95.3",
+      "license": "SEE LICENSE IN LICENSE-vscode.txt",
+      "url": "https://open-vsx.org/api/vscode/cpp/1.95.3/file/vscode.cpp-1.95.3.vsix",
+      "sha256": "b70b8b007d21c89f929c32eaa89cf15e710723e091be682418c125cc93733c36"
+    },
+    {
+      "id": "vscode.csharp",
+      "version": "1.95.3",
+      "license": "SEE LICENSE IN LICENSE-vscode.txt",
+      "url": "https://open-vsx.org/api/vscode/csharp/1.95.3/file/vscode.csharp-1.95.3.vsix",
+      "sha256": "384dd3d44b3ebb8ff377c4bfa7a4a2d500a48c22fa30e4697b23d3e2158192a7"
+    },
+    {
+      "id": "vscode.java",
+      "version": "1.95.3",
+      "license": "SEE LICENSE IN LICENSE-vscode.txt",
+      "url": "https://open-vsx.org/api/vscode/java/1.95.3/file/vscode.java-1.95.3.vsix",
+      "sha256": "885469b3e7da89f8b8d0eae58b9ce065a59e67d84f507855460f7d6c9a67b17b"
+    },
+    {
+      "id": "vscode.go",
+      "version": "1.95.3",
+      "license": "SEE LICENSE IN LICENSE-vscode.txt",
+      "url": "https://open-vsx.org/api/vscode/go/1.95.3/file/vscode.go-1.95.3.vsix",
+      "sha256": "af091f9e53479ccd5e3dcee8b770973c7a1cc40d70afaf3aa1066d112a95a400"
+    },
+    {
+      "id": "vscode.rust",
+      "version": "1.95.3",
+      "license": "SEE LICENSE IN LICENSE-vscode.txt",
+      "url": "https://open-vsx.org/api/vscode/rust/1.95.3/file/vscode.rust-1.95.3.vsix",
+      "sha256": "23dd92f554f968fbeefe9976fdb9996c35b2152cf0778cf74bd1019a5ed4b8eb"
+    },
+    {
+      "id": "vscode.scss",
+      "version": "1.95.3",
+      "license": "SEE LICENSE IN LICENSE-vscode.txt",
+      "url": "https://open-vsx.org/api/vscode/scss/1.95.3/file/vscode.scss-1.95.3.vsix",
+      "sha256": "3265b22412db8f0a44926812d767023f6ce4de1143b045e6d62929ce534a3715"
+    },
+    {
+      "id": "vscode.less",
+      "version": "1.95.3",
+      "license": "SEE LICENSE IN LICENSE-vscode.txt",
+      "url": "https://open-vsx.org/api/vscode/less/1.95.3/file/vscode.less-1.95.3.vsix",
+      "sha256": "fa337a4ddb01801b697c6a80d08d5d24b98a2180ae90055a137e63f3640cae3a"
+    },
+    {
+      "id": "vscode.ini",
+      "version": "1.95.3",
+      "license": "SEE LICENSE IN LICENSE-vscode.txt",
+      "url": "https://open-vsx.org/api/vscode/ini/1.95.3/file/vscode.ini-1.95.3.vsix",
+      "sha256": "e9b361ca7870766c658324ae56b8ed9e1e5979044dd0bc055e822ef93f9a613f"
+    },
+    {
+      "id": "vscode.make",
+      "version": "1.95.3",
+      "license": "SEE LICENSE IN LICENSE-vscode.txt",
+      "url": "https://open-vsx.org/api/vscode/make/1.95.3/file/vscode.make-1.95.3.vsix",
+      "sha256": "edd6fd78aff1c9fe79f0bbbc2effe16484f9b2c2920a585e2205891a731eb441"
+    },
+    {
+      "id": "vscode.diff",
+      "version": "1.95.3",
+      "license": "SEE LICENSE IN LICENSE-vscode.txt",
+      "url": "https://open-vsx.org/api/vscode/diff/1.95.3/file/vscode.diff-1.95.3.vsix",
+      "sha256": "ce799c16ac50165bbf2a07fbb353f7a25f3df9d52f91b75dcfe4017d56389335"
+    },
+    {
+      "id": "bierner.markdown-mermaid",
+      "version": "1.32.1",
+      "license": "MIT",
+      "url": "https://open-vsx.org/api/bierner/markdown-mermaid/1.32.1/file/bierner.markdown-mermaid-1.32.1.vsix",
+      "sha256": "91c99eee8b7299e41efa708e20bd01a6fa13206cc4e627b43253e75c0343f442"
+    },
+    {
+      "id": "yzhang.markdown-all-in-one",
+      "version": "3.6.2",
+      "license": "MIT",
+      "url": "https://open-vsx.org/api/yzhang/markdown-all-in-one/3.6.2/file/yzhang.markdown-all-in-one-3.6.2.vsix",
+      "sha256": "75037cc2e0f940ead6cb2db25c5e6f139031885f7dc07d56abe1e0bc0781dd1a"
+    },
+    {
+      "id": "unifiedjs.vscode-mdx",
+      "version": "1.8.17",
+      "license": "MIT",
+      "url": "https://open-vsx.org/api/unifiedjs/vscode-mdx/1.8.17/file/unifiedjs.vscode-mdx-1.8.17.vsix",
+      "sha256": "0d36e01950674fab7ef8016ad3c42658d08a6db8ef34f5cc2a81e048bf94cf21"
+    },
+    {
+      "id": "svelte.svelte-vscode",
+      "version": "110.3.0",
+      "license": "MIT",
+      "url": "https://open-vsx.org/api/svelte/svelte-vscode/110.3.0/file/svelte.svelte-vscode-110.3.0.vsix",
+      "sha256": "94f0e488c4ea7784b29c4616b1c13ce60989df59bdfcd53dfaf6ad9acfe07a57"
+    },
+    {
+      "id": "Vue.volar",
+      "version": "3.3.9",
+      "license": "MIT",
+      "url": "https://open-vsx.org/api/Vue/volar/3.3.9/file/Vue.volar-3.3.9.vsix",
+      "sha256": "8203d522f0a69dfc97bdd9d3b33dac4b57e9f0dfa1afb8890fd8db35bc116b95"
     }
   ]
 }

@@ -37,13 +37,14 @@ export async function verifyBundleLayout(candidate = applicationPath) {
     "app/desktop/theia-preload.cjs",
     "theia-ide/lib/backend/main.js",
     "theia-default-extensions/manifest.json",
+    "claude-agent-sdk/cli.js",
+    "claude-agent-sdk/sdk.mjs",
+    "codex-agent-sdk/index.js",
+    "codex-cli/bin/codex",
     "repository-worker/index.js",
     "ui/build/index.html",
     "ui/build/assets/phaseatlas-logo-mark.png",
     "ui/build/assets/phaseatlas-logo-mark-dark.png",
-    "node_modules/node-pty/package.json",
-    "node_modules/node-pty/lib/index.js",
-    `node_modules/node-pty/prebuilds/${process.platform}-${process.arch}/pty.node`,
     "LICENSE",
     "release-policy.json",
     "bundle-manifest.json",
@@ -51,9 +52,10 @@ export async function verifyBundleLayout(candidate = applicationPath) {
   for (const relative of required) {
     if (!await exists(path.join(resources, relative))) throw new Error(`Packaged desktop bundle is missing ${relative}.`);
   }
-  const [policy, manifest, applicationPackage, main, preload, worker] = await Promise.all([
+  const [policy, manifest, extensionManifest, applicationPackage, main, preload, worker] = await Promise.all([
     readFile(path.join(resources, "release-policy.json"), "utf8").then(JSON.parse),
     readFile(path.join(resources, "bundle-manifest.json"), "utf8").then(JSON.parse),
+    readFile(path.join(resources, "theia-default-extensions", "manifest.json"), "utf8").then(JSON.parse),
     readFile(path.join(resources, "app", "package.json"), "utf8").then(JSON.parse),
     readFile(path.join(resources, "app", "desktop", "main.js"), "utf8"),
     readFile(path.join(resources, "app", "desktop", "preload.cjs"), "utf8"),
@@ -104,6 +106,25 @@ export async function verifyBundleLayout(candidate = applicationPath) {
   if (worker.includes('from "@phaseatlas/') || worker.includes('from "chokidar"')) {
     throw new Error("Packaged worker still depends on workspace JavaScript layout.");
   }
+  if (extensionManifest.schemaVersion !== "phaseatlas.theia-extensions/v1" || !Array.isArray(extensionManifest.extensions)) {
+    throw new Error("Packaged default extension manifest is invalid.");
+  }
+  for (const extension of extensionManifest.extensions) {
+    const extensionPackagePath = path.join(
+      resources,
+      "theia-default-extensions",
+      "plugins",
+      `${extension.id}-${extension.version}`,
+      "extension",
+      "package.json",
+    );
+    if (!await exists(extensionPackagePath)) throw new Error(`Packaged default extension is missing: ${extension.id}.`);
+    const extensionPackage = JSON.parse(await readFile(extensionPackagePath, "utf8"));
+    const actualId = `${extensionPackage.publisher}.${extensionPackage.name}`;
+    if (actualId.toLowerCase() !== extension.id.toLowerCase() || extensionPackage.version !== extension.version) {
+      throw new Error(`Packaged default extension identity mismatch: ${extension.id}.`);
+    }
+  }
   if (manifest.schemaVersion !== "phaseatlas.bundle-manifest/v1" || typeof manifest.files !== "object") {
     throw new Error("Packaged bundle manifest is invalid.");
   }
@@ -120,7 +141,9 @@ export async function verifyBundleLayout(candidate = applicationPath) {
     "ui",
     "theia-ide",
     "theia-default-extensions",
-    "node_modules/node-pty",
+    "claude-agent-sdk",
+    "codex-agent-sdk",
+    "codex-cli",
   ];
   for (const customRoot of customRoots) {
     for (const relative of await filesBelow(path.join(resources, customRoot))) {

@@ -6,15 +6,12 @@
   export let repositoryName = "";
   export let platform = "desktop";
   export let active = true;
-  export let terminalOpen = false;
-  export let terminalHeight = 0;
   export let starting = false;
   export let errorMessage = "";
-  export let onShow: (key: string) => void = () => undefined;
   export let onStop: (key: string) => void = () => undefined;
   export let onClose: () => void = () => undefined;
-  // The IDE is a native view, not DOM: it cannot live inside this card, only be
-  // painted over it. So the card measures the hole it leaves and reports it.
+  // The IDE is a native view, not DOM: it cannot live inside this workspace,
+  // only be painted over it. This element measures the exact available area.
   export let onViewport: (rect: IdeViewportRect) => void = () => undefined;
 
   let viewportElement: HTMLDivElement | undefined;
@@ -26,20 +23,18 @@
   function publishViewport() {
     if (!viewportElement) return;
     const rect = viewportElement.getBoundingClientRect();
-    // A hidden card measures zero, which the main process reads as "nowhere to
+    // A hidden workspace measures zero, which the main process reads as "nowhere to
     // put the view" and hides it — exactly what should happen.
     onViewport(active
       ? { x: rect.left, y: rect.top, width: rect.width, height: rect.height }
       : { x: 0, y: 0, width: 0, height: 0 });
   }
 
-  // Anything that moves the card has to re-report: the terminal opening under
-  // it, the card being covered by another surface, a different tab selected.
+  // Anything that moves the workspace has to re-report: another surface covering
+  // it or a different tab being selected.
   // ResizeObserver alone misses these, because the box is still the same size.
   $: {
     void active;
-    void terminalOpen;
-    void terminalHeight;
     void state.visibleKey;
     void tick().then(publishViewport);
   }
@@ -63,7 +58,6 @@
   class="ide-layer"
   aria-hidden={!active}
   aria-labelledby="embedded-ide-title"
-  style={`--chat-terminal-inset: ${terminalOpen ? terminalHeight : 0}px`}
 >
   <section class="ide-shell">
     <header class="ide-header">
@@ -74,25 +68,6 @@
         <p>Embedded IDE</p>
         <h2 id="embedded-ide-title">{headline} <span>/ Theia</span></h2>
       </div>
-
-      {#if state.targets.length > 1}
-        <div class="ide-tabs" role="tablist" aria-label="Open IDE workspaces">
-          {#each state.targets as target (target.key)}
-            <button
-              class:active={state.visibleKey === target.key}
-              class="ide-tab"
-              type="button"
-              role="tab"
-              aria-selected={state.visibleKey === target.key}
-              title={`Switch to ${target.title}`}
-              onclick={() => onShow(target.key)}
-            >
-              <span>{target.title}</span>
-              {#if target.leaseId}<em>worktree</em>{/if}
-            </button>
-          {/each}
-        </div>
-      {/if}
 
       {#if visibleTarget}
         <button
@@ -122,38 +97,28 @@
 </div>
 
 <style>
-  .ide-layer { position: fixed; z-index: 96; inset: 0 0 var(--chat-terminal-inset,0px) var(--sidebar-width); padding: 10px; background: color-mix(in srgb,var(--canvas) 82%,transparent); backdrop-filter: blur(12px); animation: ide-in .2s cubic-bezier(.2,.76,.2,1); }
+  .ide-layer { position: fixed; z-index: 96; inset: 0 0 0 var(--sidebar-width); background: var(--surface); }
   .ide-layer.inactive { display: none; }
-  .ide-shell { display: grid; width: 100%; height: 100%; grid-template-rows: 64px minmax(0,1fr); overflow: hidden; border: 1px solid var(--border); border-radius: var(--radius-lg); background: var(--surface); color: var(--text); box-shadow: 0 24px 80px rgba(16,22,19,.18); }
-  .ide-header { display: grid; min-width: 0; grid-template-columns: 40px minmax(180px,1fr) auto auto 36px; align-items: center; gap: 8px; border-bottom: 1px solid var(--border); padding: 0 12px 0 16px; background: color-mix(in srgb,var(--surface) 96%,var(--brand-50)); -webkit-app-region: drag; }
+  .ide-shell { display: grid; width: 100%; height: 100%; grid-template-rows: 50px minmax(0,1fr); overflow: hidden; background: var(--surface); color: var(--text); }
+  .ide-header { display: flex; min-width: 0; align-items: center; gap: 10px; border-bottom: 1px solid var(--border); padding: 0 10px 0 14px; background: color-mix(in srgb,var(--surface) 97%,var(--brand-50)); -webkit-app-region: drag; }
   .ide-header button { -webkit-app-region: no-drag; }
-  .ide-mark { display: grid; width: 32px; height: 32px; place-items: center; border: 1px solid var(--brand-200); border-radius: 10px; background: var(--active-surface); color: var(--brand-600); }
-  .ide-mark svg { width: 18px; height: 18px; fill: none; stroke: currentColor; stroke-linecap: round; stroke-linejoin: round; stroke-width: 1.9; }
-  .ide-title { min-width: 0; }
-  .ide-title p { margin: 0 0 2px; color: var(--active-text); font-size: 11px; font-weight: 800; letter-spacing: .09em; text-transform: uppercase; }
-  .ide-title h2 { overflow: hidden; margin: 0; font-size: 16px; letter-spacing: -.015em; text-overflow: ellipsis; white-space: nowrap; }
+  .ide-mark { display: grid; width: 30px; height: 30px; flex: 0 0 30px; place-items: center; border: 1px solid var(--brand-200); border-radius: 9px; background: var(--active-surface); color: var(--brand-600); }
+  .ide-mark svg { width: 17px; height: 17px; fill: none; stroke: currentColor; stroke-linecap: round; stroke-linejoin: round; stroke-width: 1.9; }
+  .ide-title { min-width: 150px; flex: 1 1 260px; }
+  .ide-title p { margin: 0 0 1px; color: var(--active-text); font-size: 9px; font-weight: 800; letter-spacing: .1em; text-transform: uppercase; }
+  .ide-title h2 { overflow: hidden; margin: 0; font-size: 14px; letter-spacing: -.01em; text-overflow: ellipsis; white-space: nowrap; }
   .ide-title h2 span { color: var(--text-subtle); font-weight: 560; }
-  .ide-tabs { display: flex; min-width: 0; align-items: center; gap: 4px; overflow-x: auto; }
-  .ide-tab { display: flex; min-width: 0; align-items: center; gap: 6px; border: 1px solid var(--border); border-radius: var(--radius-full); padding: 5px 10px; background: var(--surface); color: var(--text-muted); font-size: 11px; font-weight: 700; }
-  .ide-tab:hover { border-color: var(--brand-300); color: var(--text); }
-  .ide-tab.active { border-color: var(--brand-300); background: var(--active-surface); color: var(--active-text); }
-  .ide-tab span { overflow: hidden; max-width: 22ch; text-overflow: ellipsis; white-space: nowrap; }
-  .ide-tab em { border-radius: var(--radius-xs); padding: 1px 5px; background: var(--surface-soft); color: var(--text-subtle); font-size: 9px; font-style: normal; font-weight: 700; letter-spacing: .05em; text-transform: uppercase; }
-  .ide-chip { display: flex; align-items: center; gap: 5px; border: 1px solid var(--border); border-radius: var(--radius-full); padding: 5px 10px; background: var(--surface); color: var(--text-muted); font-size: 11px; font-weight: 750; white-space: nowrap; }
+  .ide-chip { display: flex; flex: 0 0 auto; align-items: center; gap: 5px; border: 1px solid var(--border); border-radius: var(--radius-full); padding: 5px 10px; background: var(--surface); color: var(--text-muted); font-size: 11px; font-weight: 750; white-space: nowrap; }
   .ide-chip:hover { border-color: color-mix(in srgb,var(--warning-500) 52%,var(--border)); background: var(--warning-surface); color: var(--warning-text); }
   .ide-chip svg { width: 12px; height: 12px; fill: none; stroke: currentColor; stroke-width: 1.8; }
-  .close-ide { display: grid; width: 34px; height: 34px; place-items: center; border: 0; border-radius: var(--radius); background: transparent; color: var(--text-muted); font-size: 24px; }
+  .close-ide { display: grid; width: 32px; height: 32px; flex: 0 0 32px; place-items: center; border: 0; border-radius: var(--radius); background: transparent; color: var(--text-muted); font-size: 22px; }
   .close-ide:hover { background: var(--surface-soft); color: var(--text); }
   /* Deliberately empty: the Theia view is painted over this box by the main
      process, so anything rendered here is only visible before it arrives. */
   .ide-viewport { display: grid; min-height: 0; place-items: center; background: var(--surface-soft); }
   .ide-placeholder { margin: 0; padding: 0 24px; color: var(--text-subtle); font-size: 13px; text-align: center; }
   .ide-placeholder.error { color: var(--warning-600); }
-  @keyframes ide-in { from { opacity: .4; transform: translateY(7px) scale(.997); } }
   @media (max-width: 767.98px) {
-    .ide-layer { inset: 0 0 var(--chat-terminal-inset,0px); padding: 0; }
-    .ide-shell { border: 0; border-radius: 0; }
-    .ide-header { grid-template-columns: 40px minmax(0,1fr) auto 36px; }
-    .ide-tabs { display: none; }
+    .ide-layer { inset: 0; }
   }
 </style>

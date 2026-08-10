@@ -340,7 +340,7 @@
             {#if task.content}
               <button class="edit-button" type="button" onclick={() => onEdit(task)}>
                 <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m4 20 4.5-1 10-10a2.1 2.1 0 0 0-3-3l-10 10z"/><path d="m14 7 3 3M4 20h16"/></svg>
-                Edit in Monaco
+                Open in IDE
               </button>
             {/if}
             <button class="run-button" type="button" onclick={() => onRun(task)} disabled={!canRun} title={canRun ? "Open this task in the run workbench" : "Choose an available repository provider and model first"}>

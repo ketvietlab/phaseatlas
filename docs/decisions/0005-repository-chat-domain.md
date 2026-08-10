@@ -1,9 +1,13 @@
 # ADR 0005: Keep repository chat separate from canonical task execution
 
-- Status: accepted
+- Status: superseded for repository-wide UI by [ADR 0006](0006-embedded-theia-runtime.md)
 - Date: 2026-08-04
 
 ## Context
+
+> The operational contracts described here remain available to task-scoped conversation and isolated
+> edit workflows. PhaseAtlas no longer exposes the standalone repository chat window; repository-wide
+> chat now uses Theia AI Chat.
 
 Users need to ask an agent about an open repository without first creating a workspace or canonical
 task. PhaseAtlas already has planning and task-execution contracts, but making their task identifiers
