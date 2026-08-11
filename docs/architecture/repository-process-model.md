@@ -90,9 +90,10 @@ Unsolicited events omit `requestId`:
 {"type":"repository.changed","payload":{"paths":[".phaseatlas/workspaces/core/workspace.yaml"]}}
 ```
 
-The provider-neutral protocol includes repository, workspace, task, file, runner, planning,
-task-content, and persisted-run operations. Raw child processes, executable paths, credentials, and
-provider protocol payloads do not cross the renderer bridge.
+The provider-neutral protocol includes repository, workspace, task, coverage, file, runner,
+planning, task-content, and persisted-run operations. Coverage writes are validated append-only
+events published to the configured task registry with an expected-head lease. Raw child processes,
+executable paths, credentials, and provider protocol payloads do not cross the renderer bridge.
 
 ## Change notifications
 

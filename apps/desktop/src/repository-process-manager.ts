@@ -21,6 +21,9 @@ import {
   type ChatEditRecoveryInput,
   type ChatEditResult,
   type ChatEditStartInput,
+  type CoverageEventAppendInput,
+  type CoverageEventAppendResult,
+  type CoverageSnapshot,
   isWorkerEvent,
   isWorkerResponse,
   type PersistedRunEvent,
@@ -463,6 +466,14 @@ export class RepositoryProcessManager {
 
   async taskSnapshot(checkoutId: string): Promise<TaskSnapshot> {
     return (await this.ensureWorker(checkoutId)).call<TaskSnapshot>("task.snapshot");
+  }
+
+  async coverageSnapshot(checkoutId: string, workspaceSlug: string): Promise<CoverageSnapshot> {
+    return (await this.ensureWorker(checkoutId)).call<CoverageSnapshot>("coverage.snapshot", { workspaceSlug });
+  }
+
+  async appendCoverageEvent(checkoutId: string, input: CoverageEventAppendInput): Promise<CoverageEventAppendResult> {
+    return (await this.ensureWorker(checkoutId)).call<CoverageEventAppendResult>("coverage.append", { input });
   }
 
   async taskRegistryWorkspace(checkoutId: string): Promise<TaskRegistryWorkspace> {

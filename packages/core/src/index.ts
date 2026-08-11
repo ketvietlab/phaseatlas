@@ -10,6 +10,7 @@ export {
 } from "./proposal-service.js";
 export { listRepositoryFiles, readRepositoryFile, saveRepositoryFile } from "./repository-files.js";
 export { writeTaskContent } from "./task-content-store.js";
+export { createCoverageEvent, loadCoverageSnapshot, serializeCoverageEvent } from "./coverage-events.js";
 export { CheckoutOperationalStore } from "./checkout-operational-store.js";
 export { createAgentRunSpec, deriveSandboxPolicy, resolveAgentRunTask } from "./agent-run-spec.js";
 export { validateAgentRunResult, isSafeAgentPath } from "./agent-result-validator.js";

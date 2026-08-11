@@ -5,6 +5,8 @@ import path from "node:path";
 import { promisify } from "node:util";
 import test from "node:test";
 import assert from "node:assert/strict";
+import type { CoverageEvent } from "@phaseatlas/contracts";
+import { serializeCoverageEvent } from "@phaseatlas/core";
 import { TaskRegistryManager } from "./task-registry-manager.js";
 
 const executeFile = promisify(execFile);
@@ -67,4 +69,40 @@ test("discard restores the registry base without touching the code checkout", as
   assert.equal(discarded.syncState, "current");
   assert.match(await readFile(taskPath, "utf8"), /state: ready/);
   assert.equal(await git(repository, ["status", "--porcelain"]), "");
+});
+
+test("retries concurrent append-only coverage publishes without a shared-file conflict", async (context) => {
+  const { root, remote, repository, manager: firstManager } = await fixture(context);
+  const secondManager = await TaskRegistryManager.open({
+    repositoryRoot: repository,
+    runtimeRoot: path.join(root, "second-runtime"),
+    config: { remote: "origin", ref: "refs/heads/phaseatlas/tasks", defaultDeliveryRef: "refs/heads/develop" },
+  });
+  const base: Omit<CoverageEvent, "id" | "result"> = {
+    schemaVersion: "phaseatlas.coverage-event/v1",
+    path: "docs/guide.md",
+    contentSha256: "a".repeat(64),
+    size: 8,
+    sourceCommit: "b".repeat(40),
+    recordedAt: "2026-08-11T00:00:00.000Z",
+    codeScopes: [],
+    stagingStatus: "not-applicable",
+    inlineFixes: [],
+    taskRefs: [],
+    workItemRefs: [],
+    resolves: [],
+  };
+  const first: CoverageEvent = { ...base, id: "30000000-0000-4000-8000-000000000001", result: "clean" };
+  const second: CoverageEvent = { ...base, id: "30000000-0000-4000-8000-000000000002", result: "issue" };
+
+  await Promise.all([
+    firstManager.appendImmutableCoverageEvent("core", first, serializeCoverageEvent(first)),
+    secondManager.appendImmutableCoverageEvent("core", second, serializeCoverageEvent(second)),
+  ]);
+
+  const tree = await git(remote, ["ls-tree", "-r", "--name-only", "refs/heads/phaseatlas/tasks", ".phaseatlas/workspaces/core/coverage-events"]);
+  assert.deepEqual(tree.split("\n").sort(), [
+    `.phaseatlas/workspaces/core/coverage-events/${first.id}.yaml`,
+    `.phaseatlas/workspaces/core/coverage-events/${second.id}.yaml`,
+  ]);
 });

@@ -3,6 +3,7 @@ import { constants } from "node:fs";
 import { access, lstat, open, readdir, readFile, realpath } from "node:fs/promises";
 import path from "node:path";
 import type {
+  CoverageSnapshot,
   LegacyIngestionSnapshot,
   LegacySourceLocation,
   LegacyTaskCandidate,
@@ -14,6 +15,7 @@ import type {
   WorkspaceSummary,
 } from "@phaseatlas/contracts";
 import { parse } from "yaml";
+import { loadCoverageSnapshot } from "./coverage-events.js";
 import { loadTaskSnapshot } from "./task-loader.js";
 import {
   publishPlanningProposals as publishPlanning,
@@ -490,6 +492,21 @@ export class RepositoryInspector {
     });
     if (this.registrySource) this.tasks = { ...this.tasks, registry: this.registrySource };
     return this.tasks;
+  }
+
+  async coverageSnapshot(workspaceSlug: string): Promise<CoverageSnapshot> {
+    const repository = await this.describe();
+    const workspaces = await this.listWorkspaces();
+    if (!workspaces.some((workspace) => workspace.slug === workspaceSlug)) {
+      throw new Error(`Unknown coverage workspace: ${workspaceSlug}.`);
+    }
+    return loadCoverageSnapshot({
+      repositoryRoot: this.root,
+      contractRoot: this.contractRoot,
+      repositoryId: repository.id,
+      workspaceSlug,
+      ...(this.registrySource ? { registrySource: this.registrySource } : {}),
+    });
   }
 
   async legacySnapshot(): Promise<LegacyIngestionSnapshot> {

@@ -168,6 +168,8 @@ phaseatlas/tasks:.phaseatlas/
 └── workspaces/
     └── <workspace-slug>/
         ├── workspace.yaml
+        ├── coverage-events/
+        │   └── <uuid>.yaml
         └── tasks/
             ├── <task-id>.yaml
             └── <task-id>.md
@@ -178,8 +180,14 @@ body. Both are normal Git-tracked files. PhaseAtlas opens the registry as a sepa
 saving creates a draft and **Review & Publish** validates, commits, and pushes it without switching the
 code checkout away from `develop` or a feature branch.
 
+Documentation coverage is derived from tracked `docs/` files plus immutable, uniquely named coverage
+events. Concurrent audits append different paths and are automatically rebased with an expected-head
+lease, so they never rewrite a shared `coverage.yaml`. A changed document becomes pending by hash;
+different audit conclusions become an explicit PhaseAtlas projection conflict.
+
 See the [task contract](docs/contracts/task-contract.md) and
-[planning contract](docs/contracts/planning-contract.md) before generating these files by hand.
+[planning contract](docs/contracts/planning-contract.md), plus the
+[coverage contract](docs/contracts/coverage-contract.md), before generating these files by hand.
 
 ## How it works
 
