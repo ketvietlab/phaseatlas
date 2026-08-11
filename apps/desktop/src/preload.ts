@@ -28,6 +28,12 @@ const api: PhaseAtlasDesktopApi = {
       body,
     ),
   },
+  coverage: {
+    snapshot: (checkoutId, workspaceSlug) => ipcRenderer.invoke(
+      "phaseatlas:coverage:snapshot", checkoutId, workspaceSlug,
+    ),
+    append: (checkoutId, input) => ipcRenderer.invoke("phaseatlas:coverage:append", checkoutId, input),
+  },
   files: {
     list: (checkoutId, directory = "") => ipcRenderer.invoke("phaseatlas:files:list", checkoutId, directory),
     read: (checkoutId, path) => ipcRenderer.invoke("phaseatlas:files:read", checkoutId, path),

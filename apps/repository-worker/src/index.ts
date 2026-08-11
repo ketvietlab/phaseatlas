@@ -17,6 +17,7 @@ import type {
   AgentRunStartInput,
   AgentRunSummary,
   AgentSandbox,
+  CoverageEventAppendInput,
   ChatEditPrepareInput,
   ChatEditStartInput,
   PersistedRunEventPage,
@@ -47,6 +48,8 @@ import {
   reviewAgentResult,
   writeTaskContent,
   WorktreeLeaseManager,
+  createCoverageEvent,
+  serializeCoverageEvent,
 } from "@phaseatlas/core";
 import { watch, type FSWatcher } from "chokidar";
 import { assertRunnerSelection, RunnerRegistry } from "./runner-registry.js";
@@ -1018,6 +1021,50 @@ async function dispatch(request: WorkerRequest): Promise<unknown> {
     case "task.snapshot":
       if (taskRegistry) inspector.setRegistrySource(await taskRegistry.source());
       return inspector.taskSnapshot();
+    case "coverage.snapshot": {
+      const workspaceSlug = requestParams(request).workspaceSlug;
+      if (typeof workspaceSlug !== "string") throw new Error("workspaceSlug is required.");
+      if (taskRegistry) inspector.setRegistrySource(await taskRegistry.sync());
+      return inspector.coverageSnapshot(workspaceSlug);
+    }
+    case "coverage.append": {
+      if (!taskRegistry) throw new Error("Coverage events require a dedicated task registry.");
+      const input = requestParams(request).input as CoverageEventAppendInput | undefined;
+      if (!input || typeof input.workspaceSlug !== "string" || typeof input.path !== "string") {
+        throw new Error("Coverage event input is required.");
+      }
+      const registrySource = await taskRegistry.source();
+      if (registrySource.changedPaths.length) {
+        throw new Error("Publish or discard the current task registry draft before recording coverage.");
+      }
+      inspector.invalidate();
+      inspector.setRegistrySource(await taskRegistry.sync());
+      const before = await inspector.coverageSnapshot(input.workspaceSlug);
+      if (before.issues.some((issue) => issue.severity === "error")) {
+        throw new Error("Resolve coverage validation errors before recording another event.");
+      }
+      const document = before.documents.find((candidate) => candidate.path === input.path);
+      if (!document) throw new Error("Coverage document is not tracked by Git.");
+      const resolves = input.resolves ?? [];
+      if (resolves.some((id) => !document.activeEventIds.includes(id))) {
+        throw new Error("Coverage resolutions may reference only active events for the current document revision.");
+      }
+      const event = await createCoverageEvent({
+        repositoryRoot: canonicalRepositoryRoot,
+        input,
+        id: randomUUID(),
+        recordedAt: new Date().toISOString(),
+      });
+      const source = await taskRegistry.appendImmutableCoverageEvent(input.workspaceSlug, event, serializeCoverageEvent(event));
+      inspector.invalidate();
+      inspector.setRegistrySource(source);
+      const snapshot = await inspector.coverageSnapshot(input.workspaceSlug);
+      send({
+        type: "repository.changed",
+        payload: { paths: [`.phaseatlas/workspaces/${input.workspaceSlug}/coverage-events/${event.id}.yaml`] },
+      });
+      return { event, source, snapshot };
+    }
     case "task-registry.workspace": {
       if (!taskRegistry) throw new Error("This repository does not configure a dedicated task registry.");
       return taskRegistry.workspace();
@@ -1032,7 +1079,10 @@ async function dispatch(request: WorkerRequest): Promise<unknown> {
       inspector.invalidate();
       inspector.setRegistrySource(source);
       const snapshot = await inspector.taskSnapshot();
-      return { source, issues: snapshot.issues };
+      const coverageIssues = (await Promise.all(
+        (await inspector.listWorkspaces()).map((workspace) => inspector.coverageSnapshot(workspace.slug)),
+      )).flatMap((coverage) => coverage.issues);
+      return { source, issues: [...snapshot.issues, ...coverageIssues] };
     }
     case "task-registry.publish": {
       if (!taskRegistry) throw new Error("This repository does not configure a dedicated task registry.");
@@ -1044,7 +1094,10 @@ async function dispatch(request: WorkerRequest): Promise<unknown> {
       const draftSource = await taskRegistry.source();
       inspector.setRegistrySource(draftSource);
       const draft = await inspector.taskSnapshot();
-      if (draft.issues.some((issue) => issue.severity === "error")) {
+      const coverageIssues = (await Promise.all(
+        (await inspector.listWorkspaces()).map((workspace) => inspector.coverageSnapshot(workspace.slug)),
+      )).flatMap((coverage) => coverage.issues);
+      if ([...draft.issues, ...coverageIssues].some((issue) => issue.severity === "error")) {
         throw new Error("Resolve task registry validation errors before publishing.");
       }
       const source = await taskRegistry.publish(input);

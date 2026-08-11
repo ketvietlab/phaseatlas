@@ -56,6 +56,66 @@ export interface TaskRegistryPublishResult {
   snapshot: TaskSnapshot;
 }
 
+export type CoverageResult = "clean" | "fixed" | "issue";
+export type CoverageStagingStatus = "not-applicable" | "not-verified" | "verified-read-only";
+export type CoverageDocumentStatus = "pending" | "covered" | "conflicted";
+
+export interface CoverageEvent {
+  schemaVersion: "phaseatlas.coverage-event/v1";
+  id: string;
+  path: string;
+  contentSha256: string;
+  size: number;
+  sourceCommit: string;
+  recordedAt: string;
+  result: CoverageResult;
+  codeScopes: string[];
+  stagingStatus: CoverageStagingStatus;
+  inlineFixes: string[];
+  taskRefs: string[];
+  workItemRefs: string[];
+  resolves: string[];
+}
+
+export interface CoverageEventAppendInput {
+  workspaceSlug: string;
+  path: string;
+  expectedContentSha256: string;
+  result: CoverageResult;
+  codeScopes?: string[];
+  stagingStatus?: CoverageStagingStatus;
+  inlineFixes?: string[];
+  taskRefs?: string[];
+  workItemRefs?: string[];
+  resolves?: string[];
+}
+
+export interface CoverageDocumentProjection {
+  path: string;
+  contentSha256: string;
+  size: number;
+  status: CoverageDocumentStatus;
+  activeEventIds: string[];
+  event?: CoverageEvent;
+}
+
+export interface CoverageSnapshot {
+  repositoryId: string;
+  workspaceSlug: string;
+  sourceCommit: string;
+  registry?: Pick<TaskRegistrySource, "remote" | "ref" | "commit">;
+  generatedAt: string;
+  documents: CoverageDocumentProjection[];
+  issues: ValidationIssue[];
+  summary: Record<CoverageDocumentStatus, number>;
+}
+
+export interface CoverageEventAppendResult {
+  event: CoverageEvent;
+  source: TaskRegistrySource;
+  snapshot: CoverageSnapshot;
+}
+
 export interface RepositorySummary {
   id: string;
   checkoutId: string;
@@ -869,6 +929,8 @@ export type RepositoryWorkerMethod =
   | "repository.refresh"
   | "workspace.list"
   | "task.snapshot"
+  | "coverage.snapshot"
+  | "coverage.append"
   | "task-registry.workspace"
   | "task-registry.status"
   | "task-registry.validate"
@@ -1054,6 +1116,10 @@ export interface PhaseAtlasDesktopApi {
     initializeContent(checkoutId: string, input: TaskContentStartInput): Promise<{ runId: string }>;
     cancelContent(checkoutId: string, runId: string): Promise<void>;
     saveContent(checkoutId: string, taskKey: string, body: string): Promise<TaskSnapshot>;
+  };
+  coverage: {
+    snapshot(checkoutId: string, workspaceSlug: string): Promise<CoverageSnapshot>;
+    append(checkoutId: string, input: CoverageEventAppendInput): Promise<CoverageEventAppendResult>;
   };
   files: {
     list(checkoutId: string, directory?: string): Promise<RepositoryFileEntry[]>;

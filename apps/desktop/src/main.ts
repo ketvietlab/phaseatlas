@@ -425,6 +425,12 @@ function registerIpc(): void {
   ipcMain.handle("phaseatlas:tasks:snapshot", (_event, checkoutId: string) => {
     return repositories.taskSnapshot(checkoutId);
   });
+  ipcMain.handle("phaseatlas:coverage:snapshot", (_event, checkoutId: string, workspaceSlug: string) => {
+    return repositories.coverageSnapshot(checkoutId, workspaceSlug);
+  });
+  ipcMain.handle("phaseatlas:coverage:append", (_event, checkoutId: string, input) => {
+    return repositories.appendCoverageEvent(checkoutId, input);
+  });
   ipcMain.handle("phaseatlas:tasks:content:list", (_event, checkoutId: string) => {
     return repositories.listTaskContentRuns(checkoutId);
   });

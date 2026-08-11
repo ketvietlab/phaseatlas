@@ -1,8 +1,9 @@
 import { execFile } from "node:child_process";
-import { access, mkdir } from "node:fs/promises";
+import { access, mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { promisify } from "node:util";
 import type {
+  CoverageEvent,
   TaskRegistryConfig,
   TaskRegistryPublishInput,
   TaskRegistrySource,
@@ -11,6 +12,7 @@ import type {
 
 const executeFile = promisify(execFile);
 const COMMIT_PATTERN = /^[a-f0-9]{40}$/;
+const EVENT_ID_PATTERN = /^[a-f0-9]{8}-[a-f0-9]{4}-[1-8][a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/i;
 
 async function exists(candidate: string): Promise<boolean> {
   try {
@@ -122,6 +124,56 @@ export class TaskRegistryManager {
     return this.source();
   }
 
+  async appendImmutableCoverageEvent(workspaceSlug: string, event: CoverageEvent, content: string): Promise<TaskRegistrySource> {
+    if (!/^[a-z0-9][a-z0-9-]{0,63}$/.test(workspaceSlug)) throw new Error("Coverage workspace slug is invalid.");
+    if (!EVENT_ID_PATTERN.test(event.id)) throw new Error("Coverage event id is invalid.");
+    const relativePath = `.phaseatlas/workspaces/${workspaceSlug}/coverage-events/${event.id}.yaml`;
+    const message = `coverage: record ${event.path}`.slice(0, 120);
+    if (Buffer.byteLength(content) > 1024 * 1024) throw new Error("Coverage event exceeds the one MiB limit.");
+
+    const temporaryRoot = await mkdtemp(path.join(path.dirname(this.workspacePath), "coverage-event-"));
+    const eventPath = path.join(temporaryRoot, `${event.id}.yaml`);
+    const indexPath = path.join(temporaryRoot, "index");
+    await writeFile(eventPath, content, { encoding: "utf8", mode: 0o600 });
+    try {
+      const blob = await this.git(["hash-object", "-w", eventPath], this.repositoryRoot);
+      for (let attempt = 0; attempt < 5; attempt += 1) {
+        await this.fetch();
+        const expectedCommit = await this.git(["rev-parse", this.localRef], this.repositoryRoot);
+        const alreadyExists = await this.git(["ls-tree", "-z", "--name-only", expectedCommit, "--", relativePath], this.repositoryRoot);
+        if (alreadyExists) throw new Error("Coverage event id already exists in the task registry.");
+
+        const environment = { ...process.env, GIT_INDEX_FILE: indexPath };
+        await rm(indexPath, { force: true });
+        await this.git(["read-tree", expectedCommit], this.repositoryRoot, environment);
+        await this.git(["update-index", "--add", "--cacheinfo", `100644,${blob},${relativePath}`], this.repositoryRoot, environment);
+        const tree = await this.git(["write-tree"], this.repositoryRoot, environment);
+        const commit = await this.git([
+          "-c", "user.name=PhaseAtlas",
+          "-c", "user.email=phaseatlas@local",
+          "commit-tree", tree, "-p", expectedCommit, "-m", message,
+        ], this.repositoryRoot, environment);
+        try {
+          await this.git([
+            "push",
+            `--force-with-lease=${this.config.ref}:${expectedCommit}`,
+            this.config.remote,
+            `${commit}:${this.config.ref}`,
+          ], this.repositoryRoot);
+          await this.fetch();
+          if (!(await this.changedPaths()).length) await this.git(["checkout", "--detach", this.localRef], this.workspacePath);
+          return this.source();
+        } catch (error) {
+          const message = error instanceof Error ? error.message : "";
+          if (attempt === 4 || !/(stale info|non-fast-forward|remote rejected|failed to update ref|cannot lock ref|fetch first)/i.test(message)) throw error;
+        }
+      }
+      throw new Error("Coverage event could not be published after five attempts.");
+    } finally {
+      await rm(temporaryRoot, { recursive: true, force: true });
+    }
+  }
+
   private async ensureWorkspace(): Promise<void> {
     await mkdir(path.dirname(this.workspacePath), { recursive: true, mode: 0o700 });
     await this.fetch();
@@ -153,13 +205,14 @@ export class TaskRegistryManager {
       .filter(Boolean))].sort();
   }
 
-  private async git(args: string[], cwd: string): Promise<string> {
+  private async git(args: string[], cwd: string, env?: NodeJS.ProcessEnv): Promise<string> {
     try {
       const result = await executeFile("git", args, {
         cwd,
         encoding: "utf8",
         maxBuffer: 4 * 1024 * 1024,
         timeout: 30_000,
+        ...(env ? { env } : {}),
       });
       return result.stdout.trimEnd();
     } catch (error) {
