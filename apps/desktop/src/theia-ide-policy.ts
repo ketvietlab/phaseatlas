@@ -97,3 +97,24 @@ export function isAllowedTheiaNavigation(rawUrl: string, port: number): boolean 
   if (url.protocol !== "http:" || url.port !== String(port)) return false;
   return url.hostname === "localhost" || url.hostname.endsWith(".webview.localhost");
 }
+
+const THEIA_CLIPBOARD_PERMISSIONS = new Set([
+  "clipboard-read",
+  "clipboard-sanitized-write",
+  "deprecated-sync-clipboard-read",
+]);
+
+// The embedded IDE needs clipboard reads for Monaco, the terminal and AI Chat.
+// Scope that exception to the target's loopback origin; every unrelated
+// browser permission remains denied by the session handlers in the manager.
+export function isAllowedTheiaClipboardPermission(
+  permission: string,
+  requestingUrl: string | undefined,
+  port: number,
+): boolean {
+  return Boolean(
+    THEIA_CLIPBOARD_PERMISSIONS.has(permission) &&
+    requestingUrl &&
+    isAllowedTheiaNavigation(requestingUrl, port),
+  );
+}

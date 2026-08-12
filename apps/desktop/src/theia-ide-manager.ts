@@ -13,6 +13,7 @@ import type {
 } from "@phaseatlas/contracts";
 import {
   assertTheiaLaunchIdentity,
+  isAllowedTheiaClipboardPermission,
   isAllowedTheiaNavigation,
   theiaBackendArguments,
   theiaPortForTarget,
@@ -528,7 +529,21 @@ export class TheiaIdeManager {
     instance.view = view;
     view.setBackgroundColor(PHASEATLAS_THEIA_BACKGROUND_COLORS[instance.theme]);
     view.setVisible(false);
-    view.webContents.session.setPermissionRequestHandler((_webContents, _permission, callback) => callback(false));
+    const theiaContentsId = view.webContents.id;
+    view.webContents.session.setPermissionCheckHandler((webContents, permission, requestingOrigin, details) => {
+      if (webContents?.id !== theiaContentsId) return false;
+      return isAllowedTheiaClipboardPermission(
+        permission,
+        details.requestingUrl ?? requestingOrigin,
+        instance.port,
+      );
+    });
+    view.webContents.session.setPermissionRequestHandler((webContents, permission, callback, details) => {
+      callback(
+        webContents.id === theiaContentsId &&
+        isAllowedTheiaClipboardPermission(permission, details.requestingUrl, instance.port),
+      );
+    });
     view.webContents.setWindowOpenHandler(({ url }) => {
       if (isAllowedTheiaNavigation(url, instance.port)) {
         return {
