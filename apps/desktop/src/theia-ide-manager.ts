@@ -37,6 +37,7 @@ const PHASEATLAS_THEIA_DEFAULTS = {
   "files.autoSave": "afterDelay",
   "git.autoRepositoryDetection": true,
   "git.openRepositoryInParentFolders": "always",
+  "mdx.server.enable": false,
   "workbench.editor.closeOnFileDelete": true,
   "workbench.startupEditor": "none",
 } as const;
