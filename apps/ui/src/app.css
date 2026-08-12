@@ -59,6 +59,10 @@ button:focus-visible, a:focus-visible { outline: 3px solid var(--brand-200); out
 .sidebar-footer strong,.sidebar-footer small { display: block; }.sidebar-footer strong { font-size: 10.5px; }.sidebar-footer small { margin-top: 1px; color: var(--text-subtle); font-size: 9.5px; }
 .mobile-topbar,.sidebar-backdrop { display: none; }
 .main { min-height: 100vh; margin-left: var(--sidebar-width); }
+/* Theia is a native child view. Removing the covered PhaseAtlas subtree from
+   painting means a delayed native frame can reveal only the solid app canvas,
+   never stale repository cards or controls. */
+.main.ide-obscured { visibility: hidden; }
 .command-bar { position: sticky; top: 0; z-index: 20; display: flex; min-height: 52px; align-items: center; justify-content: space-between; border-bottom: 1px solid var(--border); padding: 0 24px; background: color-mix(in srgb,var(--surface) 94%,transparent); backdrop-filter: blur(14px); -webkit-app-region: drag; }
 .breadcrumbs { display: flex; align-items: center; gap: 7px; color: var(--text-subtle); font-size: 11px; }.breadcrumbs strong { color: var(--text); font-weight: 650; }
 .command-actions { display: flex; align-items: center; gap: 12px; -webkit-app-region: no-drag; }.runtime-badge { display: inline-flex; align-items: center; gap: 6px; color: var(--text-muted); font-size: 12px; text-transform: capitalize; }

@@ -154,7 +154,25 @@ const PHASEATLAS_THEIA_CSS = `
   --theia-scrollbarSlider-activeBackground: color-mix(in srgb, var(--pa-text-subtle) 54%, transparent) !important;
   --theia-terminal-background: var(--pa-surface) !important;
   --theia-terminal-foreground: var(--pa-text) !important;
-  background: var(--pa-surface);
+  background: var(--pa-surface) !important;
+}
+
+/* The embedded IDE is composited above the PhaseAtlas renderer. Keep every
+   root layer opaque and stop macOS rubber-band scrolling from exposing the
+   renderer below while Chromium is rasterizing a long document. */
+:root[data-phaseatlas-theme] body,
+:root[data-phaseatlas-theme] #theia-app-shell,
+:root[data-phaseatlas-theme] .theia-ApplicationShell,
+:root[data-phaseatlas-theme] .theia-preview-widget {
+  background-color: var(--pa-surface) !important;
+}
+
+:root[data-phaseatlas-theme],
+:root[data-phaseatlas-theme] body,
+:root[data-phaseatlas-theme] #theia-app-shell,
+:root[data-phaseatlas-theme] .theia-ApplicationShell,
+:root[data-phaseatlas-theme] .theia-preview-widget {
+  overscroll-behavior: none;
 }
 
 body,

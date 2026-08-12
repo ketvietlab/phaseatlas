@@ -598,10 +598,16 @@ export class TheiaIdeManager {
     if (host.isDestroyed()) return;
     const rect = this.viewports.get(host);
     for (const instance of this.instances.values()) {
-      if (instance.host !== host || !liveContents(instance.view)) continue;
+      const contents = liveContents(instance.view);
+      if (instance.host !== host || !contents) continue;
       const placed = Boolean(rect && rect.width > 0 && rect.height > 0);
+      const visible = instance.visible && placed;
       if (rect && placed) instance.view?.setBounds(rect);
-      instance.view?.setVisible(instance.visible && placed);
+      // A WebContentsView can briefly be classified as occluded while it sits
+      // above the host renderer. Keep the active IDE rasterizing at full speed
+      // during trackpad scrolling, but retain throttling for hidden workspaces.
+      contents.setBackgroundThrottling(!visible);
+      instance.view?.setVisible(visible);
     }
   }
 
