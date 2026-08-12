@@ -1,5 +1,12 @@
 {
   "schemaVersion": "phaseatlas.theia-extensions/v1",
+  "localExtensions": [
+    {
+      "id": "ketvietlab.phaseatlas-theme",
+      "version": "1.0.0",
+      "source": "extensions/phaseatlas-theme"
+    }
+  ],
   "extensions": [
     {
       "id": "vscode.typescript-language-features",

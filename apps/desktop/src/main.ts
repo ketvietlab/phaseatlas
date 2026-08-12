@@ -395,7 +395,7 @@ function registerIpc(): void {
   });
   ipcMain.handle("phaseatlas:ide:theme:set", (_event, theme: string) => {
     assertPhaseAtlasTheme(theme);
-    embeddedIde.setTheme(theme);
+    return embeddedIde.setTheme(theme);
   });
   ipcMain.handle("phaseatlas:ide:chat:open", (event) => embeddedIde.openChat(ideHost(event)));
   ipcMain.handle("phaseatlas:ide:agent:configure", (_event, checkoutId: string, selection: IdeAgentSelection) => {

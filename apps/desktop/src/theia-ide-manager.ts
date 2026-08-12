@@ -21,6 +21,10 @@ import {
   type PhaseAtlasTheme,
   type TheiaTarget,
 } from "./theia-ide-policy.js";
+import {
+  PHASEATLAS_THEIA_BACKGROUND_COLORS,
+  phaseAtlasTheiaThemeId,
+} from "./theia-theme.js";
 
 const STARTUP_TIMEOUT_MS = 20_000;
 const DIAGNOSTIC_LIMIT = 4_000;
@@ -74,12 +78,14 @@ function liveContents(view: WebContentsView | undefined): Electron.WebContents |
 async function seedTheiaSettings(
   configPath: string,
   claudeCodePath: string,
+  theme: PhaseAtlasTheme,
   configuration?: IdeAgentConfiguration,
 ): Promise<void> {
   const defaults = {
     ...PHASEATLAS_THEIA_DEFAULTS,
     "ai-features.chat.defaultChatAgent": theiaAgentId(configuration),
     "ai-features.claudeCode.executablePath": claudeCodePath,
+    "workbench.colorTheme": phaseAtlasTheiaThemeId(theme),
   } as const;
   const settingsPath = path.join(configPath, "settings.json");
   try {
@@ -106,6 +112,25 @@ async function seedTheiaSettings(
     const updated = `${before}${separator}${additions}\n}${current.slice(closingBrace + 1)}`;
     await writeFile(settingsPath, updated, { encoding: "utf8", mode: 0o600 });
   }
+}
+
+async function setTheiaColorTheme(configPath: string, theme: PhaseAtlasTheme): Promise<void> {
+  const settingsPath = path.join(configPath, "settings.json");
+  let current = await readFile(settingsPath, "utf8");
+  const key = "workbench.colorTheme";
+  const escaped = key.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const property = new RegExp(`(^[\\t ]*["']${escaped}["'][\\t ]*:[\\t ]*)(["'][^"']*["'])`, "m");
+  const value = JSON.stringify(phaseAtlasTheiaThemeId(theme));
+  if (property.test(current)) {
+    current = current.replace(property, `$1${value}`);
+  } else {
+    const closingBrace = current.lastIndexOf("}");
+    if (closingBrace < 0) throw new Error("The IDE settings file is invalid.");
+    const before = current.slice(0, closingBrace).trimEnd();
+    const separator = before.endsWith("{") ? "\n" : ",\n";
+    current = `${before}${separator}  ${JSON.stringify(key)}: ${value}\n}${current.slice(closingBrace + 1)}`;
+  }
+  await writeFile(settingsPath, current, { encoding: "utf8", mode: 0o600 });
 }
 
 async function setTheiaDefaultAgent(configPath: string, agentId: "Codex" | "ClaudeCode"): Promise<void> {
@@ -214,7 +239,7 @@ export class TheiaIdeManager {
       if (existing.repositoryPath !== repositoryPath) {
         throw new Error("The IDE workspace path no longer matches its registered identity.");
       }
-      this.applyTheme(existing, theme);
+      await this.applyTheme(existing, theme);
       return this.show(host, key);
     }
     // Two clicks before the backend is ready must not spawn two backends.
@@ -311,8 +336,8 @@ export class TheiaIdeManager {
     return "light";
   }
 
-  setTheme(theme: PhaseAtlasTheme): void {
-    for (const instance of this.instances.values()) this.applyTheme(instance, theme);
+  async setTheme(theme: PhaseAtlasTheme): Promise<void> {
+    await Promise.all([...this.instances.values()].map((instance) => this.applyTheme(instance, theme)));
   }
 
   checkoutForWebContents(webContentsId: number): { checkoutId: string; host: BrowserWindow; kind: "code" | "run" | "tasks" } | undefined {
@@ -423,7 +448,8 @@ export class TheiaIdeManager {
     // generic Theia example: start directly in the source tree and suppress the
     // extension recommendation toast. Existing user settings always win.
     const agentConfiguration = this.agentConfigurations.get(checkoutId);
-    await seedTheiaSettings(configPath, this.claudeCodePath, agentConfiguration);
+    await seedTheiaSettings(configPath, this.claudeCodePath, theme, agentConfiguration);
+    await setTheiaColorTheme(configPath, theme);
     if (agentConfiguration) {
       await Promise.all([
         writeAgentConfiguration(configPath, agentConfiguration),
@@ -499,7 +525,7 @@ export class TheiaIdeManager {
       },
     });
     instance.view = view;
-    view.setBackgroundColor(instance.theme === "dark" ? "#2e3034" : "#ffffff");
+    view.setBackgroundColor(PHASEATLAS_THEIA_BACKGROUND_COLORS[instance.theme]);
     view.setVisible(false);
     view.webContents.session.setPermissionRequestHandler((_webContents, _permission, callback) => callback(false));
     view.webContents.setWindowOpenHandler(({ url }) => {
@@ -507,7 +533,7 @@ export class TheiaIdeManager {
         return {
           action: "allow",
           overrideBrowserWindowOptions: {
-            backgroundColor: instance.theme === "dark" ? "#2e3034" : "#ffffff",
+            backgroundColor: PHASEATLAS_THEIA_BACKGROUND_COLORS[instance.theme],
             webPreferences: {
               contextIsolation: true,
               nodeIntegration: false,
@@ -578,11 +604,12 @@ export class TheiaIdeManager {
     }
   }
 
-  private applyTheme(instance: TheiaInstance, theme: PhaseAtlasTheme): void {
+  private async applyTheme(instance: TheiaInstance, theme: PhaseAtlasTheme): Promise<void> {
     instance.theme = theme;
+    await setTheiaColorTheme(instance.configPath, theme);
     const contents = liveContents(instance.view);
     if (!contents) return;
-    instance.view?.setBackgroundColor(theme === "dark" ? "#2e3034" : "#ffffff");
+    instance.view?.setBackgroundColor(PHASEATLAS_THEIA_BACKGROUND_COLORS[theme]);
     contents.send("phaseatlas:ide:theme-changed", theme);
   }
 

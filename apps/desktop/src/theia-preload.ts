@@ -8,7 +8,7 @@ import type {
 } from "@phaseatlas/contracts";
 import {
   applyPhaseAtlasTheiaStyle,
-  setBuiltinTheiaTheme,
+  setPhaseAtlasTheiaTheme,
   type PhaseAtlasIdeTheme,
 } from "./theia-phaseatlas-style.js";
 
@@ -297,7 +297,7 @@ async function mountTaskRegistryBar(): Promise<void> {
   taskRegistryTimer = window.setInterval(() => void refreshTaskRegistryBar(bar), 1_500);
 }
 
-setBuiltinTheiaTheme(initialTheme);
+setPhaseAtlasTheiaTheme(initialTheme);
 applyPhaseAtlasTheiaStyle(initialTheme);
 
 window.addEventListener("DOMContentLoaded", () => {
@@ -311,7 +311,7 @@ ipcRenderer.on("phaseatlas:ide:theme-changed", (_event, theme: unknown) => {
   if (theme !== "light" && theme !== "dark") return;
   if (theme === currentTheme) return;
   currentTheme = theme;
-  setBuiltinTheiaTheme(theme);
+  setPhaseAtlasTheiaTheme(theme);
   applyPhaseAtlasTheiaStyle(theme);
   for (const callback of themeCallbacks) callback(theme);
   // Theia reads its Monaco color theme at frontend startup. Reconnecting this

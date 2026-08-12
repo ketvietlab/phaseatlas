@@ -1,4 +1,10 @@
-export type PhaseAtlasIdeTheme = "light" | "dark";
+import {
+  PHASEATLAS_THEIA_BACKGROUND_COLORS,
+  phaseAtlasTheiaThemeId,
+  type PhaseAtlasIdeTheme,
+} from "./theia-theme.js";
+
+export type { PhaseAtlasIdeTheme } from "./theia-theme.js";
 
 const STYLE_ID = "phaseatlas-theia-style";
 
@@ -363,9 +369,10 @@ button,
 }
 `;
 
-export function setBuiltinTheiaTheme(theme: PhaseAtlasIdeTheme): void {
+export function setPhaseAtlasTheiaTheme(theme: PhaseAtlasIdeTheme): void {
   try {
-    window.localStorage.setItem("theme", theme);
+    window.localStorage.setItem("theme", phaseAtlasTheiaThemeId(theme));
+    window.localStorage.setItem("theme.background", PHASEATLAS_THEIA_BACKGROUND_COLORS[theme]);
   } catch {
     // Local storage can be unavailable before the loopback origin is ready.
   }

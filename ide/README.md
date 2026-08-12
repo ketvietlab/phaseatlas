@@ -47,9 +47,14 @@ and the default plugins as `Resources/theia-default-extensions` or
 ## Extensions
 
 `default-extensions.manifest.json` pins 42 extensions by version, Open VSX URL
-and SHA-256. The bundle includes common language services and syntax grammars,
-Markdown authoring and preview support, Mermaid rendering, MDX, Svelte, and
-Vue. `fetch:ide-extensions` refuses any download whose digest does not match,
-then validates the embedded extension identity and unpacks the VSIX under
-`default-extensions/plugins` so Theia can deploy it as a built-in plugin. The
-plugin set is therefore reproducible rather than whatever Open VSX serves today.
+and SHA-256, plus the Git-tracked `ketvietlab.phaseatlas-theme` extension. The
+bundle includes common language services and syntax grammars, Markdown authoring
+and preview support, Mermaid rendering, MDX, Svelte, and Vue. The PhaseAtlas
+extension contributes matching light and dark IDE color themes, including UI,
+terminal, diff, TextMate, and semantic-token colors.
+
+`fetch:ide-extensions` refuses any download whose digest does not match, validates
+the identity and complete color layers of the local theme, then places every
+extension under `default-extensions/plugins` so Theia can deploy it as a built-in
+plugin. The plugin set is therefore reproducible rather than whatever Open VSX
+serves today.
