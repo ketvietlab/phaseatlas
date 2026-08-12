@@ -21,10 +21,10 @@ const PHASEATLAS_THEIA_CSS = `
   --phaseatlas-radius-sm: 6px;
   --phaseatlas-radius: 8px;
   --theia-ui-font-family: "Inter", ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif !important;
-  --theia-ui-font-size0: 10px !important;
-  --theia-ui-font-size1: 11px !important;
-  --theia-ui-font-size2: 12px !important;
-  --theia-ui-font-size3: 13px !important;
+  --theia-ui-font-size0: 12px !important;
+  --theia-ui-font-size1: 13px !important;
+  --theia-ui-font-size2: 14px !important;
+  --theia-ui-font-size3: 15px !important;
   --theia-private-sidebar-tab-width: 44px !important;
   --theia-private-sidebar-icon-size: 21px !important;
   --theia-private-horizontal-tab-height: 34px !important;
