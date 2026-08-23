@@ -1,8 +1,10 @@
 import assert from "node:assert/strict";
+import { execFile } from "node:child_process";
 import { mkdir, mkdtemp, readFile, rm, symlink, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
+import { promisify } from "node:util";
 import {
   validatePlanningProposalSet,
   validateTaskContent,
@@ -11,11 +13,25 @@ import {
 import { listRepositoryFiles, readRepositoryFile, saveRepositoryFile } from "./repository-files.js";
 import { RepositoryInspector } from "./repository-inspector.js";
 
+const execFileAsync = promisify(execFile);
+
+/**
+ * A real repository, not an empty `.git` directory.
+ *
+ * Publishing now records the result in the task-store ref, so the fixtures have to
+ * be what production always is: an actual checkout.
+ */
+async function initGit(root: string): Promise<void> {
+  await execFileAsync("git", ["init", "--initial-branch=main"], { cwd: root });
+  await execFileAsync("git", ["config", "user.name", "Test"], { cwd: root });
+  await execFileAsync("git", ["config", "user.email", "test@local"], { cwd: root });
+}
+
 test("inspects a configured repository and counts workspace tasks", async (context) => {
   const root = await mkdtemp(path.join(os.tmpdir(), "phaseatlas-core-"));
   context.after(() => rm(root, { recursive: true, force: true }));
 
-  await mkdir(path.join(root, ".git"));
+  await initGit(root);
   await mkdir(path.join(root, ".phaseatlas", "workspaces", "core", "tasks"), {
     recursive: true,
   });
@@ -56,7 +72,7 @@ test("projects deterministic legacy candidates without creating canonical tasks"
     await rm(root, { recursive: true, force: true });
     await rm(otherRoot, { recursive: true, force: true });
   });
-  await mkdir(path.join(root, ".git"));
+  await initGit(root);
   await mkdir(path.join(root, "docs"));
   await writeFile(path.join(root, "TODO.md"), [
     "## Delivery {#delivery}",
@@ -67,7 +83,7 @@ test("projects deterministic legacy candidates without creating canonical tasks"
     "## Delivery {#delivery}",
     "- [X] [LEG-001] Normalize cafe\u0301 :: Preserve Unicode identity.",
   ].join("\n"));
-  await mkdir(path.join(otherRoot, ".git"));
+  await initGit(otherRoot);
   await mkdir(path.join(otherRoot, "docs"));
   await writeFile(path.join(otherRoot, "docs", "TODO.md"), await readFile(path.join(root, "docs", "TODO.md")));
   await writeFile(path.join(otherRoot, "TODO.md"), await readFile(path.join(root, "TODO.md")));
@@ -99,7 +115,7 @@ test("projects deterministic legacy candidates without creating canonical tasks"
 test("invalidates the cached legacy projection after source changes", async (context) => {
   const root = await mkdtemp(path.join(os.tmpdir(), "phaseatlas-legacy-cache-"));
   context.after(() => rm(root, { recursive: true, force: true }));
-  await mkdir(path.join(root, ".git"));
+  await initGit(root);
   await writeFile(path.join(root, "TODO.md"), "## Core {#core}\n- [ ] [LEG-001] First title :: First objective.\n");
   const inspector = await RepositoryInspector.open(root);
 
@@ -117,7 +133,7 @@ test("invalidates the cached legacy projection after source changes", async (con
 test("excludes conflicting and malformed legacy entries with located issues", async (context) => {
   const root = await mkdtemp(path.join(os.tmpdir(), "phaseatlas-legacy-errors-"));
   context.after(() => rm(root, { recursive: true, force: true }));
-  await mkdir(path.join(root, ".git"));
+  await initGit(root);
   await mkdir(path.join(root, "docs"));
   await writeFile(path.join(root, "TODO.md"), [
     "- [ ] [ORPHAN] No phase :: Must not be accepted.",
@@ -153,7 +169,7 @@ test("excludes conflicting and malformed legacy entries with located issues", as
 test("fails closed for unsafe and invalid legacy source files", async (context) => {
   const root = await mkdtemp(path.join(os.tmpdir(), "phaseatlas-legacy-files-"));
   context.after(() => rm(root, { recursive: true, force: true }));
-  await mkdir(path.join(root, ".git"));
+  await initGit(root);
   await mkdir(path.join(root, "docs"));
   await writeFile(path.join(root, "target.md"), "## Core {#core}\n- [ ] [LEG-001] Hidden :: Symlink content.\n");
   await symlink("target.md", path.join(root, "TODO.md"));
@@ -180,7 +196,7 @@ test("does not follow a legacy source parent directory outside the repository", 
     await rm(root, { recursive: true, force: true });
     await rm(outside, { recursive: true, force: true });
   });
-  await mkdir(path.join(root, ".git"));
+  await initGit(root);
   await writeFile(path.join(outside, "TODO.md"), "## Core {#core}\n- [ ] [LEG-001] Outside :: Must never be read.\n");
   await symlink(outside, path.join(root, "docs"));
 
@@ -215,7 +231,7 @@ test("configured repositories never inspect or merge legacy candidates", async (
 test("a present invalid manifest never falls back to legacy inspection", async (context) => {
   const root = await mkdtemp(path.join(os.tmpdir(), "phaseatlas-invalid-authority-"));
   context.after(() => rm(root, { recursive: true, force: true }));
-  await mkdir(path.join(root, ".git"));
+  await initGit(root);
   await mkdir(path.join(root, ".phaseatlas"));
   await writeFile(path.join(root, ".phaseatlas", "repository.yaml"), "schemaVersion: unsupported\nid: repo-test\nname: Invalid\n");
   await writeFile(path.join(root, "TODO.md"), "## Core {#core}\n- [ ] [LEG-001] Legacy title :: Must not become a fallback.\n");
@@ -227,7 +243,7 @@ test("a present invalid manifest never falls back to legacy inspection", async (
 test("missing manifest isolates legacy inspection from partial canonical directories", async (context) => {
   const root = await mkdtemp(path.join(os.tmpdir(), "phaseatlas-legacy-remnants-"));
   context.after(() => rm(root, { recursive: true, force: true }));
-  await mkdir(path.join(root, ".git"));
+  await initGit(root);
   await mkdir(path.join(root, ".phaseatlas", "workspaces", "broken"), { recursive: true });
   await writeFile(path.join(root, ".phaseatlas", "workspaces", "broken", "workspace.yaml"), "not: a valid workspace\n");
   await writeFile(path.join(root, "TODO.md"), "## Core {#core}\n- [ ] [LEG-001] Legacy title :: Remains inspectable.\n");
@@ -279,7 +295,7 @@ evidenceRequirements:
 
 async function createConfiguredRepository(root: string): Promise<string> {
   const tasksRoot = path.join(root, ".phaseatlas", "workspaces", "core", "tasks");
-  await mkdir(path.join(root, ".git"));
+  await initGit(root);
   await mkdir(tasksRoot, { recursive: true });
   await writeFile(
     path.join(root, ".phaseatlas", "repository.yaml"),
@@ -444,7 +460,7 @@ test("initializes an optional Markdown task body after outline publication", asy
 test("validates generated task body length and safely edits repository text files", async (context) => {
   const root = await mkdtemp(path.join(os.tmpdir(), "phaseatlas-files-"));
   context.after(() => rm(root, { recursive: true, force: true }));
-  await mkdir(path.join(root, ".git"));
+  await initGit(root);
   await writeFile(path.join(root, "README.md"), "before\n");
 
   assert.equal(validateTaskContent({ body: "short" }).content, null);
@@ -490,7 +506,7 @@ const workspaceProposalSet = {
 test("publishes a reviewed workspace and starter tasks as one planning result", async (context) => {
   const root = await mkdtemp(path.join(os.tmpdir(), "phaseatlas-workspace-proposal-"));
   context.after(() => rm(root, { recursive: true, force: true }));
-  await mkdir(path.join(root, ".git"));
+  await initGit(root);
   await mkdir(path.join(root, ".phaseatlas"), { recursive: true });
   await writeFile(
     path.join(root, ".phaseatlas", "repository.yaml"),

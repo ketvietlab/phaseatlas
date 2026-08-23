@@ -7,3 +7,5 @@ build/
 coverage/
 artifacts/
 
+# Canonical tasks live in the task-store ref; this is the materialized cache.
+.phaseatlas/

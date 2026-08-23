@@ -80,6 +80,9 @@ if (!checkoutStorePath) {
 const canonicalRepositoryRoot = repositoryRoot;
 
 const inspector = await RepositoryInspector.open(canonicalRepositoryRoot);
+// Before anything reads a task: bring the working-tree cache and the task-store
+// ref into agreement, seeding the ref from tracked files the first time.
+await inspector.syncTasks();
 const initialRepository = await inspector.describe();
 const resolvedCheckoutStorePath = path.resolve(checkoutStorePath);
 if (
@@ -962,7 +965,7 @@ async function dispatch(request: WorkerRequest): Promise<unknown> {
     case "repository.describe":
       return inspector.describe();
     case "repository.refresh":
-      inspector.invalidate();
+      await inspector.syncTasks();
       return inspector.describe();
     case "workspace.list":
       return inspector.listWorkspaces();

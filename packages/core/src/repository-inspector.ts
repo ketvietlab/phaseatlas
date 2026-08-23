@@ -19,6 +19,7 @@ import {
   publishTaskProposals as publishProposals,
 } from "./proposal-service.js";
 import { writeTaskContent } from "./task-content-store.js";
+import { DEFAULT_TASK_REF, TaskRefStore } from "./task-ref-store.js";
 
 interface RepositoryManifest {
   schemaVersion: "phaseatlas.repository/v1";
@@ -347,21 +348,48 @@ function sortLegacyIssues(issues: ValidationIssue[]): ValidationIssue[] {
 
 export class RepositoryInspector {
   readonly root: string;
+  /**
+   * Where canonical tasks actually live. `.phaseatlas/` in the working tree is the
+   * cache this materializes, so everything below still reads plain files — only
+   * the authority moved off the branch the code is on.
+   */
+  readonly taskStore: TaskRefStore;
   private repository: RepositorySummary | null = null;
   private workspaces: WorkspaceSummary[] | null = null;
   private tasks: TaskSnapshot | null = null;
   private legacy: LegacyIngestionSnapshot | null = null;
 
-  private constructor(root: string) {
+  private constructor(root: string, taskStore: TaskRefStore) {
     this.root = root;
+    this.taskStore = taskStore;
   }
 
-  static async open(candidate: string): Promise<RepositoryInspector> {
+  static async open(
+    candidate: string,
+    options: { taskRef?: string } = {},
+  ): Promise<RepositoryInspector> {
     const root = await realpath(candidate);
     if (!(await exists(path.join(root, ".git")))) {
       throw new Error("Selected directory is not a Git repository or worktree.");
     }
-    return new RepositoryInspector(root);
+    const ref = options.taskRef ?? process.env.PHASEATLAS_TASK_REF ?? DEFAULT_TASK_REF;
+    return new RepositoryInspector(root, new TaskRefStore(root, { ref }));
+  }
+
+  /**
+   * Reconcile the cache with the ref before anything reads it.
+   *
+   * A repository whose tasks are still tracked files seeds the ref from them on
+   * first open, so adopting this costs nobody a migration step.
+   */
+  async syncTasks(): Promise<void> {
+    await this.taskStore.sync();
+    this.invalidate();
+  }
+
+  /** Record what a publish or a save just wrote to the cache. */
+  private async record(message: string): Promise<void> {
+    await this.taskStore.commit(message);
   }
 
   invalidate(): void {
@@ -548,6 +576,7 @@ export class RepositoryInspector {
     const workspace = (await this.listWorkspaces()).find((item) => item.slug === workspaceSlug);
     if (!workspace) throw new Error(`Workspace ${workspaceSlug} does not exist.`);
     await publishProposals({ root: this.root, workspace, value });
+    await this.record(`phaseatlas: publish tasks in ${workspaceSlug}`);
     this.invalidate();
     return this.taskSnapshot();
   }
@@ -559,6 +588,7 @@ export class RepositoryInspector {
       target,
       value,
     });
+    await this.record("phaseatlas: publish planning proposals");
     this.invalidate();
     return this.taskSnapshot();
   }
@@ -569,6 +599,7 @@ export class RepositoryInspector {
     );
     if (!task) throw new Error(`Task ${taskKey} does not exist.`);
     await writeTaskContent({ root: this.root, task, body });
+    await this.record(`phaseatlas: update ${taskKey}`);
     this.invalidate();
     return this.taskSnapshot();
   }

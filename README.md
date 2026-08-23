@@ -156,10 +156,11 @@ another one.
 5. Review the proposal, publish it, and initialize detailed task content only where it is useful.
 6. Open a task from List or Map view to read its Markdown body, edit it, or start an allowed run.
 
-PhaseAtlas stores canonical planning data in the repository:
+PhaseAtlas stores canonical planning data in the repository, in a Git ref of its own:
 
 ```text
-.phaseatlas/
+refs/heads/phaseatlas/task-store     canonical tasks, never checked out
+.phaseatlas/                         a materialized cache of that ref, gitignored
 ├── repository.yaml
 └── workspaces/
     └── <workspace-slug>/
@@ -170,7 +171,15 @@ PhaseAtlas stores canonical planning data in the repository:
 ```
 
 YAML owns the task contract and dependency graph. The optional Markdown sidecar owns the detailed task
-body. Both are normal Git-tracked files that can be reviewed and changed outside PhaseAtlas.
+body. Both remain ordinary Git objects — versioned, pushable, and readable with `git ls-tree` while
+nothing is running — but they live outside the namespace the code occupies, so a task edit never
+appears in `git status`, a rebase, or a pull request for a code change. Editing the files on disk is
+still safe: a cache that differs from the ref is committed before anything is written back over it.
+
+Set `PHASEATLAS_TASK_REF` to store tasks under a true hidden ref such as `refs/phaseatlas/tasks`;
+the default is a branch only because GitHub refuses to accept a push to anything else.
+
+See [ADR 0006](docs/decisions/0006-task-store-ref.md) for the concurrency model and the trade-off.
 
 See the [task contract](docs/contracts/task-contract.md) and
 [planning contract](docs/contracts/planning-contract.md) before generating these files by hand.
