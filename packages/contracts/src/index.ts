@@ -822,6 +822,8 @@ export interface RepositoryChatEventPage {
 }
 
 export type RepositoryWorkerMethod =
+  | "task-storage.status"
+  | "task-storage.migrate"
   | "repository.describe"
   | "repository.refresh"
   | "workspace.list"

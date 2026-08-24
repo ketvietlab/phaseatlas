@@ -182,6 +182,11 @@ reached is reported and ignored — the local ref stays authoritative and the ap
 because a local-first tool treats the network as an optimisation. A task changed on two machines is a
 different matter and is refused, naming the task, rather than merged silently.
 
+A repository whose tasks are still ordinary tracked files is seeded from them the first time it is
+opened, so the data needs no migration step. Untracking them does not happen on its own — that would
+stage changes in your index without asking — so PhaseAtlas reports the half-moved state and completes
+it when you ask, leaving the result staged for you to commit.
+
 Set `PHASEATLAS_TASK_REF` to store tasks under a true hidden ref such as `refs/phaseatlas/tasks`;
 the default is a branch only because GitHub refuses to accept a push to anything else. Set
 `PHASEATLAS_TASK_SYNC=off` to keep the store entirely local.

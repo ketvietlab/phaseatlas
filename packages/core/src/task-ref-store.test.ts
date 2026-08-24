@@ -326,3 +326,80 @@ test("task ref: the same task edited on two machines is refused, not merged", as
   );
   for (const root of [first, second, origin]) await rm(root, { recursive: true, force: true });
 });
+
+test("task ref: a repository whose tasks are tracked files is seeded, and says it is half moved", async () => {
+  const root = await repository();
+  await task(root, "PHA-001", "objective: legacy\n");
+  await task(root, "PHA-002", "objective: also legacy\n");
+  await git(root, "add", "-A");
+  await git(root, "commit", "-m", "tasks tracked the old way");
+
+  const store = new TaskRefStore(root);
+  const synced = await store.sync();
+  assert.equal(synced.action, "seeded", "the data moves with no migration step");
+
+  // But Git still follows the files, and nothing about seeding could change that.
+  const tracked = await store.trackedOnCodeBranch();
+  assert.equal(tracked.length, 2, "the half-moved state must be detectable, not silent");
+  await rm(root, { recursive: true, force: true });
+});
+
+test("task ref: migrating untracks the tasks and ignores the cache, keeping both copies intact", async () => {
+  const root = await repository();
+  await task(root, "PHA-001", "objective: legacy\n");
+  await git(root, "add", "-A");
+  await git(root, "commit", "-m", "tasks tracked the old way");
+  const store = new TaskRefStore(root);
+  await store.sync();
+
+  const migrated = await store.migrateFromTrackedFiles();
+  assert.equal(migrated.untracked.length, 1);
+  assert.equal(migrated.ignored, true);
+  assert.deepEqual(await store.trackedOnCodeBranch(), [], "nothing is tracked afterwards");
+
+  // The task survives in both places it should: the ref, and the cache on disk.
+  assert.match(await git(root, "ls-tree", "-r", "--name-only", store.ref), /PHA-001\.yaml/);
+  assert.match(await readTask(root, "PHA-001"), /legacy/);
+
+  // Migrating stages the untracking, which the person then commits — that part is
+  // theirs to do, and is the reason this is not run behind their back.
+  assert.match((await git(root, "status", "--porcelain")).trim(), /^D {2}\.phaseatlas/m);
+  await git(root, "add", "-A");
+  await git(root, "commit", "-m", "move tasks into the task-store ref");
+
+  // From then on a task change never reaches the code branch at all.
+  await task(root, "PHA-002", "objective: new\n");
+  await store.commit("phaseatlas: add PHA-002");
+  assert.equal((await git(root, "status", "--porcelain")).trim(), "", "a task change leaves no trace");
+  await rm(root, { recursive: true, force: true });
+});
+
+test("task ref: migrating never untracks the only copy of the tasks", async () => {
+  const root = await repository();
+  await task(root, "PHA-001", "objective: legacy\n");
+  await git(root, "add", "-A");
+  await git(root, "commit", "-m", "tasks tracked the old way");
+  // The files are tracked but no longer on disk, and no ref has been seeded — so
+  // the commit is the only copy left, and untracking would be the end of it.
+  await rm(path.join(root, TASK_ROOT), { recursive: true, force: true });
+
+  const store = new TaskRefStore(root);
+  await assert.rejects(
+    () => store.migrateFromTrackedFiles(),
+    (error: TaskRefError) => error.code === "E_TASK_REF_EMPTY_MIGRATION",
+    "untracking the only copy must be refused",
+  );
+  assert.equal((await store.trackedOnCodeBranch()).length, 1, "the tasks are still tracked, and still exist");
+  await rm(root, { recursive: true, force: true });
+});
+
+test("task ref: migrating a repository that never tracked tasks is a harmless no-op", async () => {
+  const root = await repository();
+  const store = new TaskRefStore(root);
+  await task(root, "PHA-001", "objective: born in the ref\n");
+  await store.sync();
+  const migrated = await store.migrateFromTrackedFiles();
+  assert.deepEqual(migrated.untracked, [], "there was nothing to untrack");
+  assert.equal(migrated.ignored, true, "the cache is ignored either way");
+  await rm(root, { recursive: true, force: true });
+});

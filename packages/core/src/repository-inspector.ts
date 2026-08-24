@@ -387,6 +387,24 @@ export class RepositoryInspector {
     this.invalidate();
   }
 
+  /**
+   * Tasks this repository still tracks on its code branch.
+   *
+   * Non-empty means the move to the task-store ref is half done: the data is in
+   * the ref, but Git still follows the files, so the next task change will show up
+   * as a modification on a code branch.
+   */
+  trackedTaskFiles(): Promise<string[]> {
+    return this.taskStore.trackedOnCodeBranch();
+  }
+
+  /** Stop tracking the tasks and ignore the cache. Explicit, never implicit. */
+  async migrateTaskStorage(): Promise<{ untracked: string[]; ignored: boolean }> {
+    const result = await this.taskStore.migrateFromTrackedFiles();
+    this.invalidate();
+    return result;
+  }
+
   /** Record what a publish or a save just wrote to the cache. */
   private async record(message: string): Promise<void> {
     await this.taskStore.commit(message);

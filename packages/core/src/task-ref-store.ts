@@ -28,7 +28,7 @@
 // reported exactly as a conflict between two local writers is.
 
 import { execFile } from "node:child_process";
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { promisify } from "node:util";
@@ -234,6 +234,67 @@ export class TaskRefStore {
       this.base = head;
       return head;
     });
+  }
+
+  /**
+   * Whether the code branch still tracks the tasks this ref now owns.
+   *
+   * Seeding the ref moves the data but cannot untrack anything: `.gitignore` has no
+   * effect on a path Git already follows, and only `git rm --cached` does. A
+   * repository left in between looks fine until the first task is deleted or
+   * renamed, at which point the change surfaces as a modification to a tracked file
+   * on a code branch — the exact noise this whole arrangement removes, arriving
+   * late and quietly enough to be committed by accident.
+   */
+  async trackedOnCodeBranch(): Promise<string[]> {
+    const listed = (await this.git(["ls-files", "--", TASK_ROOT]).catch(() => "")).trim();
+    return listed ? listed.split("\n").filter(Boolean) : [];
+  }
+
+  /**
+   * Finish what seeding started: stop tracking the tasks, and ignore the cache.
+   *
+   * Deliberately not run on its own. It stages a deletion in the caller's index and
+   * edits their `.gitignore`, and a tool that did that unasked would sooner or later
+   * fold those changes into somebody's unrelated commit. The worker reports the
+   * state and this runs when a person says so.
+   */
+  async migrateFromTrackedFiles(): Promise<{ untracked: string[]; ignored: boolean }> {
+    return this.exclusive(async () => {
+      const tracked = await this.trackedOnCodeBranch();
+      if (tracked.length) {
+        if (!(await this.head())) {
+          // Never untrack before the ref holds the same data: until the seed exists,
+          // those tracked files are the only copy there is.
+          const working = await this.workingTree();
+          if (working === EMPTY_TREE) {
+            throw new TaskRefError(
+              "E_TASK_REF_EMPTY_MIGRATION",
+              "There are no tasks to migrate.",
+              `open the repository so ${TASK_ROOT} is populated before migrating`,
+            );
+          }
+          const commit = await this.write(working, null, "phaseatlas: seed task store");
+          this.base = commit;
+        }
+        await this.git(["rm", "-r", "--cached", "--quiet", "--", TASK_ROOT]);
+      }
+      return { untracked: tracked, ignored: await this.ignoreCache() };
+    });
+  }
+
+  /** Add the cache to `.gitignore`, once, without disturbing what is already there. */
+  private async ignoreCache(): Promise<boolean> {
+    const file = path.join(this.repositoryPath, ".gitignore");
+    const existing = await readFile(file, "utf8").catch(() => "");
+    if (existing.split("\n").some((line) => line.trim().replace(/\/$/, "") === TASK_ROOT)) return false;
+    const separator = !existing || existing.endsWith("\n") ? "" : "\n";
+    await writeFile(
+      file,
+      `${existing}${separator}\n# Canonical tasks live in the task-store ref; this is the materialized cache.\n${TASK_ROOT}/\n`,
+      "utf8",
+    );
+    return true;
   }
 
   // ── remote ───────────────────────────────────────────────────────────────

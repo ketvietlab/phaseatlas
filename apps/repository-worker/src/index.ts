@@ -964,6 +964,10 @@ async function dispatch(request: WorkerRequest): Promise<unknown> {
   switch (request.method) {
     case "repository.describe":
       return inspector.describe();
+    case "task-storage.migrate":
+      return inspector.migrateTaskStorage();
+    case "task-storage.status":
+      return { tracked: await inspector.trackedTaskFiles(), ref: inspector.taskStore.ref };
     case "repository.refresh":
       await inspector.syncTasks();
       return inspector.describe();
@@ -1253,6 +1257,27 @@ try {
     payload: { message: `File watching is unavailable: ${error instanceof Error ? error.message : "unknown error"}` },
   });
 }
+
+// Seeding the task-store ref moves the data but cannot untrack anything. A
+// repository left half-moved looks fine until the first task is deleted, so say so
+// now rather than letting it surface as a stray deletion on a code branch.
+void inspector
+  .trackedTaskFiles()
+  .then((tracked) => {
+    if (!tracked.length) return;
+    send({
+      type: "worker.warning",
+      payload: {
+        code: "TASK_STORAGE_HALF_MIGRATED",
+        message:
+          `${tracked.length} task file(s) are still tracked on the code branch now that the task-store ref owns them. ` +
+          "Until they are untracked, changing a task will show up as a change to a tracked file.",
+        hint: "run the repository's task-storage migration, or `git rm -r --cached .phaseatlas` and ignore the directory",
+        files: tracked.slice(0, 10),
+      },
+    });
+  })
+  .catch(() => undefined);
 
 process.once("exit", () => {
   for (const controller of activePlanningRuns.values()) controller.abort();

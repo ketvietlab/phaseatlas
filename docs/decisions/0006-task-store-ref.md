@@ -87,8 +87,17 @@ Local edits are never discarded. On open, a cache that differs from the ref is c
 anything is written back over it, so hand-editing `.phaseatlas/` outside PhaseAtlas is still safe.
 
 A repository whose tasks are still tracked files seeds the ref from them the first time it is opened,
-so adopting this costs nobody a migration step. Untracking `.phaseatlas/` is a one-time
-`git rm -r --cached .phaseatlas` on the code branch; the files stay on disk as the cache.
+so the data moves with no migration step. Untracking them is a separate matter, and deliberately not
+automatic: `git rm --cached` stages a deletion in somebody's index and editing `.gitignore` changes a
+tracked file, and a tool that did either unasked would eventually fold those changes into an unrelated
+commit.
+
+Seeding therefore leaves a repository half moved, which is worse than either end state because it is
+quiet: everything looks correct until the first task is deleted or renamed, at which point the change
+surfaces as a modification to a tracked file on a code branch. The worker detects that state on open
+and reports it, and `task-storage.migrate` completes it when a person asks — untracking the files,
+ignoring the cache, and leaving the staged result for them to commit. Migration refuses to untrack
+tasks that exist nowhere else, so it can never be the step that loses them.
 
 The cost is real and worth stating: tasks no longer appear as files in a code branch, so they are not
 visible in a pull-request diff or in a forge's file browser. Reviewing a task change means reading the
