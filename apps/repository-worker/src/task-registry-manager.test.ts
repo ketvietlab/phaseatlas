@@ -106,3 +106,108 @@ test("retries concurrent append-only coverage publishes without a shared-file co
     `.phaseatlas/workspaces/core/coverage-events/${second.id}.yaml`,
   ]);
 });
+
+/**
+ * Somebody else publishing to the registry, without touching this workspace —
+ * another machine's push, or a second checkout of the same repository.
+ */
+async function publishElsewhere(
+  root: string,
+  remote: string,
+  changes: Record<string, string>,
+  message: string,
+): Promise<void> {
+  const other = path.join(root, `other-${Math.abs(message.length * 31 + Object.keys(changes).length)}`);
+  await git(root, ["clone", "--branch", "phaseatlas/tasks", remote, other]);
+  await git(other, ["config", "user.name", "Other"]);
+  await git(other, ["config", "user.email", "other@example.com"]);
+  for (const [relative, body] of Object.entries(changes)) {
+    const target = path.join(other, relative);
+    await mkdir(path.dirname(target), { recursive: true });
+    await writeFile(target, body);
+  }
+  await git(other, ["add", "-A"]);
+  await git(other, ["commit", "-m", message]);
+  await git(other, ["push", "origin", "HEAD:refs/heads/phaseatlas/tasks"]);
+}
+
+test("publishing rebases onto a registry that moved, when the other side changed a different task", async (context) => {
+  const { root, remote, manager } = await fixture(context);
+  const workspace = await manager.workspace();
+
+  // This checkout edits one task...
+  const mine = path.join(workspace.path, ".phaseatlas", "workspaces", "core", "tasks", "TST-001.yaml");
+  await writeFile(mine, (await readFile(mine, "utf8")).replace("state: ready", "state: in_progress"));
+  const draft = await manager.source();
+
+  // ...while somebody else publishes a different one against the same base.
+  await publishElsewhere(
+    root,
+    remote,
+    { ".phaseatlas/workspaces/core/tasks/TST-002.yaml": "schemaVersion: phaseatlas.task/v1\nid: TST-002\n" },
+    "tasks: add TST-002",
+  );
+
+  const published = await manager.publish({ expectedCommit: draft.commit, message: "tasks: start TST-001" });
+  assert.equal(published.syncState, "current", "a different task must converge without a person");
+
+  // Neither side is lost.
+  assert.match(
+    await git(remote, ["show", "refs/heads/phaseatlas/tasks:.phaseatlas/workspaces/core/tasks/TST-001.yaml"]),
+    /state: in_progress/,
+  );
+  assert.match(
+    await git(remote, ["show", "refs/heads/phaseatlas/tasks:.phaseatlas/workspaces/core/tasks/TST-002.yaml"]),
+    /id: TST-002/,
+  );
+});
+
+test("publishing refuses when the same task changed on both sides, and keeps the draft", async (context) => {
+  const { root, remote, manager } = await fixture(context);
+  const workspace = await manager.workspace();
+  const mine = path.join(workspace.path, ".phaseatlas", "workspaces", "core", "tasks", "TST-001.yaml");
+  const original = await readFile(mine, "utf8");
+  await writeFile(mine, original.replace("state: ready", "state: in_progress"));
+  const draft = await manager.source();
+
+  await publishElsewhere(
+    root,
+    remote,
+    { ".phaseatlas/workspaces/core/tasks/TST-001.yaml": original.replace("state: ready", "state: blocked") },
+    "tasks: block TST-001",
+  );
+
+  await assert.rejects(
+    () => manager.publish({ expectedCommit: draft.commit, message: "tasks: start TST-001" }),
+    /same task changed on both sides/i,
+    "the same task on both sides must be reported, never merged silently",
+  );
+
+  // The edit is still there to review, and the remote still holds the other side.
+  assert.match(await readFile(mine, "utf8"), /state: in_progress/, "the draft survives a refused publish");
+  assert.match(
+    await git(remote, ["show", "refs/heads/phaseatlas/tasks:.phaseatlas/workspaces/core/tasks/TST-001.yaml"]),
+    /state: blocked/,
+    "the other side is untouched",
+  );
+});
+
+test("an unreachable remote reports offline instead of failing the workspace", async (context) => {
+  const { root, repository, manager } = await fixture(context);
+  // Point the remote at nothing, the way a laptop off the network sees it.
+  await git(repository, ["remote", "set-url", "origin", path.join(root, "no-such-remote.git")]);
+
+  const synced = await manager.sync();
+  assert.equal(synced.syncState, "offline", "being unable to reach a host is not a fact about the tasks");
+
+  // And the workspace still works: the local registry is authoritative.
+  const workspace = await manager.workspace();
+  const taskPath = path.join(workspace.path, ".phaseatlas", "workspaces", "core", "tasks", "TST-001.yaml");
+  assert.match(await readFile(taskPath, "utf8"), /id: TST-001/, "tasks remain readable offline");
+  await writeFile(taskPath, (await readFile(taskPath, "utf8")).replace("state: ready", "state: in_progress"));
+  assert.deepEqual(
+    (await manager.source()).changedPaths,
+    [".phaseatlas/workspaces/core/tasks/TST-001.yaml"],
+    "edits are still recorded while offline",
+  );
+});

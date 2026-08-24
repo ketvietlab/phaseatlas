@@ -25,6 +25,8 @@ async function exists(candidate: string): Promise<boolean> {
 
 export class TaskRegistryManager {
   private readonly localRef: string;
+  /** False once a fetch could not reach the remote; reported as `offline`. */
+  private reachable = true;
 
   private constructor(
     private readonly repositoryRoot: string,
@@ -60,17 +62,25 @@ export class TaskRegistryManager {
     return {
       ...this.config,
       commit,
-      syncState: changedPaths.length
-        ? remoteCommit === commit ? "draft" : "conflicted"
-        : remoteCommit === commit ? "current" : "ahead",
+      // Unreachable outranks the rest: "current" would claim agreement with a
+      // remote nobody has spoken to, and that is the one answer that misleads.
+      syncState: !this.reachable
+        ? "offline"
+        : changedPaths.length
+          ? remoteCommit === commit ? "draft" : "conflicted"
+          : remoteCommit === commit ? "current" : "ahead",
       changedPaths,
     };
   }
 
   async sync(): Promise<TaskRegistrySource> {
-    await this.fetch();
+    const reached = await this.fetch();
     if ((await this.changedPaths()).length) return this.source();
-    await this.git(["checkout", "--detach", this.localRef], this.workspacePath);
+    // Offline, the local ref is where it already was; moving onto it again would
+    // be a no-op that can only fail.
+    if (reached && (await this.hasLocalRef())) {
+      await this.git(["checkout", "--detach", this.localRef], this.workspacePath);
+    }
     return this.source();
   }
 
@@ -97,14 +107,9 @@ export class TaskRegistryManager {
       "-c", "user.email=phaseatlas@local",
       "commit", "-m", message,
     ], this.workspacePath);
-    const commit = await this.git(["rev-parse", "HEAD"], this.workspacePath);
+    let commit = await this.git(["rev-parse", "HEAD"], this.workspacePath);
     try {
-      await this.git([
-        "push",
-        `--force-with-lease=${this.config.ref}:${input.expectedCommit}`,
-        this.config.remote,
-        `HEAD:${this.config.ref}`,
-      ], this.workspacePath);
+      commit = await this.pushWithRebase(commit, input.expectedCommit);
       await this.fetch();
     } catch (error) {
       // Preserve the edited files as a draft while returning to the expected
@@ -174,27 +179,117 @@ export class TaskRegistryManager {
     }
   }
 
+  /**
+   * Send the commit, and if somebody got there first, rebase onto them and retry.
+   *
+   * One task is one file, so two checkouts editing different tasks touch different
+   * paths and the rebase is clean — which is the ordinary case and the one that
+   * should not need a person. Two checkouts editing the same task is the case
+   * nothing can decide: the rebase is aborted and the caller is told, so the draft
+   * comes back for review instead of one version quietly replacing the other.
+   *
+   * The lease is recomputed from the ref each attempt rather than reused, because
+   * after a rebase the commit being replaced is no longer the one we started from.
+   */
+  private async pushWithRebase(commit: string, expectedCommit: string): Promise<string> {
+    let lease = expectedCommit;
+    let head = commit;
+    for (let attempt = 0; attempt < 4; attempt += 1) {
+      try {
+        await this.git([
+          "push",
+          `--force-with-lease=${this.config.ref}:${lease}`,
+          this.config.remote,
+          `HEAD:${this.config.ref}`,
+        ], this.workspacePath);
+        return head;
+      } catch (error) {
+        const message = error instanceof Error ? error.message : "";
+        const raced = /stale info|non-fast-forward|remote rejected|failed to update ref|cannot lock ref|fetch first|rejected/i.test(message);
+        if (!raced || attempt === 3) throw error;
+        if (!(await this.fetch())) throw error; // offline: nothing to rebase onto
+        const theirs = await this.git(["rev-parse", this.localRef], this.repositoryRoot);
+        if (theirs === lease) throw error; // rejected for some other reason
+        try {
+          await this.git(["rebase", theirs], this.workspacePath);
+        } catch (rebaseError) {
+          await this.git(["rebase", "--abort"], this.workspacePath).catch(() => undefined);
+          throw new Error(
+            `The task registry changed elsewhere and the same task changed on both sides. ${
+              rebaseError instanceof Error ? rebaseError.message : ""
+            }`.trim(),
+          );
+        }
+        lease = theirs;
+        head = await this.git(["rev-parse", "HEAD"], this.workspacePath);
+      }
+    }
+    throw new Error("The task registry could not be published after several attempts.");
+  }
+
   private async ensureWorkspace(): Promise<void> {
     await mkdir(path.dirname(this.workspacePath), { recursive: true, mode: 0o700 });
     await this.fetch();
     if (!(await exists(this.workspacePath))) {
+      if (!(await this.hasLocalRef())) {
+        // Nothing fetched and nothing stored: there is no registry to open. Say
+        // which of the two it is, because the answers are different — one waits
+        // for a network, the other waits for somebody to publish.
+        throw new Error(
+          this.reachable
+            ? `The task registry ref ${this.config.ref} does not exist on ${this.config.remote} yet.`
+            : `The task registry could not be opened: ${this.config.remote} is unreachable and this checkout has no local copy yet.`,
+        );
+      }
       await this.git(["worktree", "add", "--detach", this.workspacePath, this.localRef], this.repositoryRoot);
       return;
     }
     if (!(await exists(path.join(this.workspacePath, ".git")))) {
       throw new Error("The task registry workspace exists but is not a managed Git worktree.");
     }
+    // An existing workspace is enough to work in. Offline only means it cannot be
+    // moved onto anything newer, and a checkout that refuses to open because a
+    // host is down is a local-first tool in name only.
     const changedPaths = await this.changedPaths();
-    if (!changedPaths.length) await this.git(["checkout", "--detach", this.localRef], this.workspacePath);
+    if (!changedPaths.length && (await this.hasLocalRef())) {
+      await this.git(["checkout", "--detach", this.localRef], this.workspacePath);
+    }
   }
 
-  private async fetch(): Promise<void> {
-    await this.git([
-      "fetch",
-      "--no-tags",
-      this.config.remote,
-      `+${this.config.ref}:${this.localRef}`,
-    ], this.repositoryRoot);
+  private async hasLocalRef(): Promise<boolean> {
+    return Boolean(await this.git(["rev-parse", "--verify", "--quiet", `${this.localRef}^{commit}`], this.repositoryRoot).catch(() => ""));
+  }
+
+  /**
+   * Bring the local copy of the registry ref up to date.
+   *
+   * Returns false when the remote could not be reached. Being unable to reach a
+   * host is the ordinary state of a laptop on a train, and it says nothing about
+   * the tasks: the local ref is still the authority, the workspace still opens,
+   * and the work still saves. Only a remote that answers and refuses is a fact
+   * worth failing on, which is what publish's compare-and-swap is for.
+   */
+  private async fetch(): Promise<boolean> {
+    try {
+      await this.git([
+        "fetch",
+        "--no-tags",
+        this.config.remote,
+        `+${this.config.ref}:${this.localRef}`,
+      ], this.repositoryRoot);
+      this.reachable = true;
+      return true;
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "";
+      // A remote that simply has no registry ref yet is not an unreachable one:
+      // that is what the first checkout to publish meets.
+      if (/couldn't find remote ref|not our ref|no such ref/i.test(message)) {
+        this.reachable = true;
+        return true;
+      }
+      this.reachable = false;
+      return false;
+    }
   }
 
   private async changedPaths(): Promise<string[]> {
