@@ -948,12 +948,32 @@ export type PhaseAtlasDesktopEvent =
   | RepositoryChatDesktopEvent
   | ChatEditDesktopEvent;
 
+/**
+ * Whether a repository still tracks the task files the task-store ref now owns.
+ *
+ * Non-empty `tracked` means the move is half done and the next task change will
+ * surface as a modification on a code branch.
+ */
+export interface TaskStorageStatus {
+  tracked: string[];
+  ref: string;
+}
+
+export interface TaskStorageMigration {
+  untracked: string[];
+  ignored: boolean;
+}
+
 export interface PhaseAtlasDesktopApi {
   repositories: {
     open(): Promise<RepositorySummary | null>;
     close(checkoutId: string): Promise<void>;
     list(): Promise<RepositorySummary[]>;
     refresh(checkoutId: string): Promise<RepositorySummary>;
+  };
+  taskStorage: {
+    status(checkoutId: string): Promise<TaskStorageStatus>;
+    migrate(checkoutId: string): Promise<TaskStorageMigration>;
   };
   workspaces: {
     list(checkoutId: string): Promise<WorkspaceSummary[]>;

@@ -8,6 +8,10 @@ const api: PhaseAtlasDesktopApi = {
     list: () => ipcRenderer.invoke("phaseatlas:repositories:list"),
     refresh: (checkoutId) => ipcRenderer.invoke("phaseatlas:repositories:refresh", checkoutId),
   },
+  taskStorage: {
+    status: (checkoutId) => ipcRenderer.invoke("phaseatlas:task-storage:status", checkoutId),
+    migrate: (checkoutId) => ipcRenderer.invoke("phaseatlas:task-storage:migrate", checkoutId),
+  },
   workspaces: {
     list: (checkoutId) => ipcRenderer.invoke("phaseatlas:workspaces:list", checkoutId),
   },

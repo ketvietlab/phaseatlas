@@ -146,6 +146,41 @@
   let taskContentPanel: { closeActiveSurface(): void } | undefined;
   let chatOpen = false;
   let workbenchStateReady = false;
+  /**
+   * Set when a repository still tracks the task files the task-store ref now owns.
+   * Seeding moves the data but cannot untrack anything, and the state is quiet
+   * until the first task changes — so it is surfaced rather than waited for.
+   */
+  let taskStorageTracked: string[] = [];
+  let taskStorageRef = "";
+  let migratingTaskStorage = false;
+  let taskStorageMigrated = "";
+
+  /**
+   * Finish moving tasks off the code branch.
+   *
+   * Deliberately a button rather than something that happens on open: it stages a
+   * deletion in the user's index and edits their .gitignore, and doing that unasked
+   * would eventually fold those changes into a commit about something else. The
+   * result is left staged for them to commit.
+   */
+  async function migrateTaskStorage(): Promise<void> {
+    if (!window.phaseatlas || !selectedCheckoutId || migratingTaskStorage) return;
+    const checkoutId = selectedCheckoutId;
+    migratingTaskStorage = true;
+    errorMessage = "";
+    try {
+      const result = await window.phaseatlas.taskStorage.migrate(checkoutId);
+      if (checkoutId !== selectedCheckoutId) return;
+      taskStorageTracked = [];
+      taskStorageMigrated = `${result.untracked.length} task file${result.untracked.length === 1 ? "" : "s"} untracked${result.ignored ? " and the cache is now ignored" : ""}. Commit the staged change to finish.`;
+    } catch (error) {
+      if (checkoutId !== selectedCheckoutId) return;
+      errorMessage = error instanceof Error ? error.message : "Could not migrate task storage.";
+    } finally {
+      if (checkoutId === selectedCheckoutId) migratingTaskStorage = false;
+    }
+  }
 
   $: selectedRepository = repositories.find(
     (repository) => repository.checkoutId === selectedCheckoutId,
@@ -407,19 +442,26 @@
     expandedCommandKeys = new Set();
     commandOutputs = {};
     errorMessage = "";
+    taskStorageTracked = [];
+    taskStorageMigrated = "";
     menuOpen = false;
     try {
       const recoveredRepository = await window.phaseatlas.repositories.refresh(checkoutId);
       if (requestId !== repositoryLoadRequest || checkoutId !== selectedCheckoutId) return;
-      const [nextWorkspaces, nextTaskSnapshot, nextRunners, activeContentRuns, nextAgentRuns] = await Promise.all([
-        window.phaseatlas.workspaces.list(checkoutId),
-        window.phaseatlas.tasks.snapshot(checkoutId),
-        window.phaseatlas.runners.list(checkoutId),
-        window.phaseatlas.tasks.listContentRuns(checkoutId),
-        window.phaseatlas.agentRuns.list(checkoutId),
-      ]);
+      const [nextWorkspaces, nextTaskSnapshot, nextRunners, activeContentRuns, nextAgentRuns, taskStorage] =
+        await Promise.all([
+          window.phaseatlas.workspaces.list(checkoutId),
+          window.phaseatlas.tasks.snapshot(checkoutId),
+          window.phaseatlas.runners.list(checkoutId),
+          window.phaseatlas.tasks.listContentRuns(checkoutId),
+          window.phaseatlas.agentRuns.list(checkoutId),
+          window.phaseatlas.taskStorage.status(checkoutId),
+        ]);
       if (requestId !== repositoryLoadRequest || checkoutId !== selectedCheckoutId) return;
       workspaces = nextWorkspaces;
+      taskStorageTracked = taskStorage.tracked;
+      taskStorageRef = taskStorage.ref;
+      taskStorageMigrated = "";
       repositories = repositories.map((repository) => repository.checkoutId === checkoutId ? recoveredRepository : repository);
       taskSnapshot = nextTaskSnapshot;
       runners = nextRunners;
@@ -1698,6 +1740,29 @@
 
         {#if errorMessage}
           <div class="alert warning" role="alert"><span aria-hidden="true">!</span><div><strong>Unable to complete the action</strong><p>{errorMessage}</p></div></div>
+        {/if}
+
+        {#if taskStorageTracked.length}
+          <div class="alert warning task-storage-alert" role="status">
+            <span aria-hidden="true">!</span>
+            <div>
+              <strong>Tasks are still tracked on the code branch</strong>
+              <p>
+                {taskStorageTracked.length} task file{taskStorageTracked.length === 1 ? "" : "s"} moved into
+                <code>{taskStorageRef}</code>, but Git still follows {taskStorageTracked.length === 1 ? "it" : "them"}.
+                Until {taskStorageTracked.length === 1 ? "it is" : "they are"} untracked, changing a task will show up
+                as a change to a tracked file. Migrating stages the untracking and ignores the cache; you commit it.
+              </p>
+              <button class="primary-button" type="button" onclick={migrateTaskStorage} disabled={migratingTaskStorage}>
+                {migratingTaskStorage ? "Migrating…" : "Untrack task files"}
+              </button>
+            </div>
+          </div>
+        {:else if taskStorageMigrated}
+          <div class="alert task-storage-alert" role="status">
+            <span aria-hidden="true">✓</span>
+            <div><strong>Task storage migrated</strong><p>{taskStorageMigrated}</p></div>
+          </div>
         {/if}
 
         <section class="workspace-section">

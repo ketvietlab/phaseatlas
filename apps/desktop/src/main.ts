@@ -188,6 +188,12 @@ function registerIpc(): void {
   ipcMain.handle("phaseatlas:repositories:close", (event, checkoutId: string) => {
     repositories.close(checkoutId, event.sender.id);
   });
+  ipcMain.handle("phaseatlas:task-storage:status", (_event, checkoutId: string) => {
+    return repositories.taskStorageStatus(checkoutId);
+  });
+  ipcMain.handle("phaseatlas:task-storage:migrate", (_event, checkoutId: string) => {
+    return repositories.migrateTaskStorage(checkoutId);
+  });
   ipcMain.handle("phaseatlas:workspaces:list", (_event, checkoutId: string) => {
     return repositories.listWorkspaces(checkoutId);
   });

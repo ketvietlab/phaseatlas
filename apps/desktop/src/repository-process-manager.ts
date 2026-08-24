@@ -50,6 +50,8 @@ import {
   type TaskContentRunSummary,
   type TaskContentStartInput,
   type TaskSnapshot,
+  type TaskStorageMigration,
+  type TaskStorageStatus,
   type TerminalCreateInput,
   type TerminalEvent,
   type TerminalSessionSnapshot,
@@ -426,6 +428,14 @@ export class RepositoryProcessManager {
 
   async listWorkspaces(checkoutId: string): Promise<WorkspaceSummary[]> {
     return (await this.ensureWorker(checkoutId)).call<WorkspaceSummary[]>("workspace.list");
+  }
+
+  async taskStorageStatus(checkoutId: string): Promise<TaskStorageStatus> {
+    return (await this.ensureWorker(checkoutId)).call<TaskStorageStatus>("task-storage.status");
+  }
+
+  async migrateTaskStorage(checkoutId: string): Promise<TaskStorageMigration> {
+    return (await this.ensureWorker(checkoutId)).call<TaskStorageMigration>("task-storage.migrate");
   }
 
   async taskSnapshot(checkoutId: string): Promise<TaskSnapshot> {
