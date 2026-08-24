@@ -1739,7 +1739,7 @@
   </header>
   {#if menuOpen}<button class="sidebar-backdrop" type="button" aria-label="Close menu" onclick={() => (menuOpen = false)}></button>{/if}
 
-  <main class="main" id="main-content">
+  <main class:ide-covered={ideOpen} class="main" id="main-content">
     <header class="command-bar">
       <div class="breadcrumbs">
         <span>PhaseAtlas</span><span>/</span><strong>{selectedRepository?.name || "Repositories"}</strong>
