@@ -17,7 +17,7 @@
     "release:metadata": "node scripts/create-release-metadata.mjs",
     "check": "pnpm --filter @phaseatlas/contracts build && pnpm --filter @phaseatlas/core build && pnpm --filter @phaseatlas/contracts check && pnpm --filter @phaseatlas/core check && pnpm --filter @phaseatlas/repository-worker check && pnpm --filter @phaseatlas/ui check && pnpm --filter @phaseatlas/desktop check",
     "dev": "node scripts/dev.mjs",
-    "test": "pnpm --filter @phaseatlas/contracts build && pnpm --filter @phaseatlas/core build && pnpm --filter @phaseatlas/core test && pnpm --filter @phaseatlas/repository-worker test",
+    "test": "pnpm --filter @phaseatlas/contracts build && pnpm --filter @phaseatlas/core build && pnpm --filter @phaseatlas/core test && pnpm --filter @phaseatlas/repository-worker test && pnpm --filter @phaseatlas/desktop test",
     "build:ide": "node scripts/build-ide.mjs",
     "fetch:ide-extensions": "node scripts/fetch-ide-extensions.mjs"
   },

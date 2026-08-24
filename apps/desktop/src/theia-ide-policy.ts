@@ -97,3 +97,32 @@ export function isAllowedTheiaNavigation(rawUrl: string, port: number): boolean 
   if (url.protocol !== "http:" || url.port !== String(port)) return false;
   return url.hostname === "localhost" || url.hostname.endsWith(".webview.localhost");
 }
+
+/**
+ * The permissions the embedded IDE is allowed to hold, and nothing else.
+ *
+ * Theia is served over HTTP and so runs its browser frontend, whose clipboard
+ * service is the asynchronous Web one: reading asks `navigator.permissions` for
+ * `clipboard-read` and falls back to `navigator.clipboard.readText()`. Denying
+ * every permission — which is otherwise the right default for a view that hosts
+ * a whole IDE — denied both, and paste stopped working while copy went on looking
+ * fine, because writing is the half the browser grants on a user gesture.
+ *
+ * Reading the clipboard is a real capability, so it is granted to the IDE's own
+ * origin and to nothing else: not to a webview an extension opens, and not to any
+ * page that manages to be loaded in this partition.
+ */
+const IDE_PERMISSIONS = new Set(["clipboard-read", "clipboard-sanitized-write"]);
+
+export function isAllowedTheiaPermission(permission: string, requestingOrigin: string, port: number): boolean {
+  if (!IDE_PERMISSIONS.has(permission)) return false;
+  let origin: URL;
+  try {
+    origin = new URL(requestingOrigin);
+  } catch {
+    return false;
+  }
+  // The frontend itself, not the `*.webview.localhost` origins Theia serves
+  // extension content from: those are somebody else's code in the same partition.
+  return origin.protocol === "http:" && origin.hostname === "localhost" && origin.port === String(port);
+}

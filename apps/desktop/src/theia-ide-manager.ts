@@ -14,6 +14,7 @@ import type {
 import {
   assertTheiaLaunchIdentity,
   isAllowedTheiaNavigation,
+  isAllowedTheiaPermission,
   theiaBackendArguments,
   theiaPortForTarget,
   theiaTargetKey,
@@ -501,7 +502,14 @@ export class TheiaIdeManager {
     instance.view = view;
     view.setBackgroundColor(instance.theme === "dark" ? "#2e3034" : "#ffffff");
     view.setVisible(false);
-    view.webContents.session.setPermissionRequestHandler((_webContents, _permission, callback) => callback(false));
+    // Deny-all, except the clipboard, and only for the frontend's own origin —
+    // see isAllowedTheiaPermission for why paste needs both of these hooks.
+    view.webContents.session.setPermissionRequestHandler((_webContents, permission, callback, details) =>
+      callback(isAllowedTheiaPermission(permission, details?.requestingUrl ?? "", instance.port)),
+    );
+    view.webContents.session.setPermissionCheckHandler((_webContents, permission, requestingOrigin) =>
+      isAllowedTheiaPermission(permission, requestingOrigin, instance.port),
+    );
     view.webContents.setWindowOpenHandler(({ url }) => {
       if (isAllowedTheiaNavigation(url, instance.port)) {
         return {
