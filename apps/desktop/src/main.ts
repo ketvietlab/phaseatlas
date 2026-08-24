@@ -13,6 +13,19 @@ import type {
   TaskRegistryPublishInput,
 } from "@phaseatlas/contracts";
 
+/**
+ * Vietnamese input methods that are not a system keyboard layout — Unikey, EVKey,
+ * OpenKey — compose an accented character by sending a synthetic backspace
+ * immediately followed by the replacement character, both as ordinary key events
+ * rather than through IME composition. Chromium coalesces closely-spaced macOS
+ * key events by default to cut render work; that coalescing is exactly what a
+ * backspace-then-retype needs not to happen, so accented characters were dropped
+ * and typing came out as the unaccented base letters. This has to run before
+ * `app.whenReady()`, because the switch configures Chromium's own input pipeline
+ * before either the Theia child process or any BrowserWindow exists to feel it.
+ */
+if (process.platform === "darwin") app.commandLine.appendSwitch("disable-features", "MacCoalesceKeyEvents");
+
 function writeReleaseSmokeResult(result: Record<string, unknown>): void {
   if (process.env.PHASEATLAS_RELEASE_SMOKE !== "1") return;
   const resultPath = process.env.PHASEATLAS_RELEASE_SMOKE_RESULT;
