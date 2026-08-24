@@ -203,3 +203,126 @@ test("task ref: a repository with no tasks stays empty rather than committing no
   assert.equal(await store.head(), null, "no ref is created until there is something to store");
   await rm(root, { recursive: true, force: true });
 });
+
+/** A bare repository standing in for a remote, so these run with no network. */
+async function remote(): Promise<string> {
+  const bare = await mkdtemp(path.join(tmpdir(), "phaseatlas-remote-"));
+  await execFileAsync("git", ["init", "--bare", "--initial-branch=main", bare], { encoding: "utf8" });
+  return bare;
+}
+
+test("task ref: a write is published to the remote without anyone asking", async () => {
+  const origin = await remote();
+  const root = await repository();
+  await git(root, "remote", "add", "origin", origin);
+  const store = new TaskRefStore(root);
+
+  await task(root, "PHA-001", "objective: first\n");
+  const synced = await store.sync();
+  assert.equal(synced.remote.pushed, "pushed", "seeding must reach the remote on its own");
+
+  const onRemote = await git(origin, "ls-tree", "-r", "--name-only", store.ref);
+  assert.match(onRemote, /PHA-001\.yaml/, "the remote holds the task");
+  await rm(root, { recursive: true, force: true });
+  await rm(origin, { recursive: true, force: true });
+});
+
+test("task ref: a second machine receives tasks without a manual fetch", async () => {
+  const origin = await remote();
+  const first = await repository();
+  await git(first, "remote", "add", "origin", origin);
+  await task(first, "PHA-001", "objective: from the first machine\n");
+  await new TaskRefStore(first).sync();
+
+  // A different checkout of the same repository, which has never seen the ref.
+  const second = await repository();
+  await git(second, "remote", "add", "origin", origin);
+  const store = new TaskRefStore(second);
+  const synced = await store.sync();
+
+  assert.equal(synced.remote.fetched, "fast-forward");
+  assert.match(
+    await readTask(second, "PHA-001"),
+    /from the first machine/,
+    "opening the repository is enough; no fetch command is needed",
+  );
+  await rm(first, { recursive: true, force: true });
+  await rm(second, { recursive: true, force: true });
+  await rm(origin, { recursive: true, force: true });
+});
+
+test("task ref: two machines editing different tasks converge through the remote", async () => {
+  const origin = await remote();
+  const first = await repository();
+  const second = await repository();
+  for (const root of [first, second]) await git(root, "remote", "add", "origin", origin);
+
+  await task(first, "PHA-001", "objective: shared\n");
+  const firstStore = new TaskRefStore(first);
+  await firstStore.sync();
+
+  const secondStore = new TaskRefStore(second);
+  await secondStore.sync(); // picks up PHA-001
+
+  // Each machine adds a task of its own, neither knowing about the other.
+  await task(first, "PHA-002", "objective: from first\n");
+  await firstStore.commit("phaseatlas: add PHA-002");
+  await task(second, "PHA-003", "objective: from second\n");
+  const merged = await secondStore.commit("phaseatlas: add PHA-003");
+  assert.equal(merged.remote.fetched, "merged", "the second machine merges rather than overwrites");
+
+  // And the first machine sees everything on its next sync.
+  await firstStore.sync();
+  const files = (await readdir(path.join(first, TASK_ROOT, "workspaces", "w", "tasks"))).sort();
+  assert.deepEqual(files, ["PHA-001.yaml", "PHA-002.yaml", "PHA-003.yaml"], "no machine's write is lost");
+  for (const root of [first, second, origin]) await rm(root, { recursive: true, force: true });
+});
+
+test("task ref: an unreachable remote is reported, not thrown", async () => {
+  const root = await repository();
+  await git(root, "remote", "add", "origin", path.join(tmpdir(), "phaseatlas-no-such-remote"));
+  const store = new TaskRefStore(root, { networkTimeoutMs: 5_000 });
+
+  await task(root, "PHA-001", "objective: offline\n");
+  const synced = await store.sync();
+
+  assert.equal(synced.action, "seeded", "work continues while the network does not");
+  assert.equal(synced.remote.reason, "unreachable");
+  assert.ok(synced.commit, "the local ref remains authoritative");
+  assert.match(await readTask(root, "PHA-001"), /offline/);
+  await rm(root, { recursive: true, force: true });
+});
+
+test("task ref: a repository with no remote simply works locally", async () => {
+  const root = await repository();
+  const store = new TaskRefStore(root);
+  await task(root, "PHA-001", "objective: local only\n");
+  const synced = await store.sync();
+  assert.equal(synced.action, "seeded");
+  assert.equal(synced.remote.reason, "no-remote");
+  await rm(root, { recursive: true, force: true });
+});
+
+test("task ref: the same task edited on two machines is refused, not merged", async () => {
+  const origin = await remote();
+  const first = await repository();
+  const second = await repository();
+  for (const root of [first, second]) await git(root, "remote", "add", "origin", origin);
+
+  await task(first, "PHA-001", "objective: shared\n");
+  const firstStore = new TaskRefStore(first);
+  await firstStore.sync();
+  const secondStore = new TaskRefStore(second);
+  await secondStore.sync();
+
+  await task(first, "PHA-001", "objective: the first machine's version\n");
+  await firstStore.commit("phaseatlas: edit PHA-001 here");
+  await task(second, "PHA-001", "objective: the second machine's version\n");
+
+  await assert.rejects(
+    () => secondStore.commit("phaseatlas: edit PHA-001 there"),
+    (error: TaskRefError) => error.code === "E_TASK_REF_CONFLICT",
+    "a conflict between machines is a data failure and must surface",
+  );
+  for (const root of [first, second, origin]) await rm(root, { recursive: true, force: true });
+});

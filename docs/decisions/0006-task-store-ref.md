@@ -62,6 +62,25 @@ Tracking the merge base matters more than it looks. A compare-and-swap alone onl
 move *while* I was writing"; it misses the ref having moved *before* the write, where committing the
 cache would quietly drop whatever arrived in between.
 
+## Sharing
+
+The same three layers carry the ref to and from a remote, so a second machine is not a manual
+`git fetch` away: opening a repository fetches, and recording a task pushes.
+
+Network failure is not data failure. A remote that cannot be reached is reported and ignored, leaving
+the local ref authoritative — the point of a local-first tool is that the network is an optimisation.
+A remote that simply has no task ref yet is not a failure either; that is what the first machine to
+publish encounters, and treating it as one would stop it ever pushing.
+
+Two consequences of moving the ref from underneath the cache are worth stating, because both were
+found by tests rather than by reasoning:
+
+- a checkout opening the store for the first time has no `.phaseatlas/` at all, and reading that empty
+  directory as "every task was deleted" would commit an empty tree over the whole store. Only a cache
+  this store has itself materialized can speak for a deletion;
+- when a fetch brings another machine's work in, the cache must be rebuilt from the new commit, or the
+  next write reads those tasks as absent and commits their deletion.
+
 ## Consequences
 
 Local edits are never discarded. On open, a cache that differs from the ref is committed before
@@ -72,7 +91,14 @@ so adopting this costs nobody a migration step. Untracking `.phaseatlas/` is a o
 `git rm -r --cached .phaseatlas` on the code branch; the files stay on disk as the cache.
 
 The cost is real and worth stating: tasks no longer appear as files in a code branch, so they are not
-visible in a pull-request diff or in a forge's file browser, and a plain `git clone` does not bring
-them without also fetching the ref. Reviewing a task change means reading the ref's history rather
-than a PR. A repository that wants tasks reviewed alongside code in the same pull request should not
-adopt this and should commit `.phaseatlas/` on the working branch instead.
+visible in a pull-request diff or in a forge's file browser. Reviewing a task change means reading the
+ref's history rather than a PR. A repository that wants tasks reviewed alongside code in the same pull
+request should not adopt this and should commit `.phaseatlas/` on the working branch instead.
+
+A plain `git clone` still does not bring the ref, since Git fetches only branches by default. It costs
+nobody anything in practice — opening the repository in PhaseAtlas fetches it — but a script that
+expects to read tasks straight out of a fresh clone needs the refspec:
+
+```bash
+git fetch origin +refs/heads/phaseatlas/task-store:refs/heads/phaseatlas/task-store
+```

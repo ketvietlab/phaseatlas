@@ -19,6 +19,13 @@
 //   3. a failed compare-and-swap is retried through a real three-way merge, which
 //      succeeds when two writers touched different tasks (the common case, since
 //      one task is one file) and fails loudly when they touched the same one.
+//
+// The same three layers carry the ref to and from a remote, so a second machine is
+// not a manual `git fetch` away. Network failure is not a data failure: being
+// unable to reach the remote leaves the local ref authoritative and the
+// application working, because the point of a local-first tool is that the network
+// is an optimisation. A conflict between two machines is a data failure and is
+// reported exactly as a conflict between two local writers is.
 
 import { execFile } from "node:child_process";
 import { mkdtemp, rm } from "node:fs/promises";
@@ -40,7 +47,10 @@ export const TASK_ROOT = ".phaseatlas";
  */
 export const DEFAULT_TASK_REF = "refs/heads/phaseatlas/task-store";
 
-export type TaskRefGit = (args: string[], options?: { env?: Record<string, string> }) => Promise<string>;
+export type TaskRefGit = (
+  args: string[],
+  options?: { env?: Record<string, string>; timeoutMs?: number },
+) => Promise<string>;
 
 export class TaskRefError extends Error {
   readonly code: string;
@@ -63,13 +73,32 @@ export interface TaskRefCommit {
   readonly unchanged: boolean;
   /** True when a concurrent write was merged in rather than overwritten. */
   readonly merged: boolean;
+  readonly remote: TaskRefRemote;
 }
 
 export interface TaskRefSync {
   readonly commit: string | null;
   /** What the sync had to do — useful in a log, and in a test. */
   readonly action: "empty" | "seeded" | "materialized" | "committed" | "merged";
+  readonly remote: TaskRefRemote;
 }
+
+/**
+ * What talking to the remote achieved, if anything.
+ *
+ * `unreachable` is not an error the caller has to handle: it is the ordinary state
+ * of a laptop on a train, and the local ref remains the authority until the
+ * network comes back.
+ */
+export interface TaskRefRemote {
+  readonly attempted: boolean;
+  readonly fetched: "none" | "up-to-date" | "fast-forward" | "merged";
+  readonly pushed: "none" | "up-to-date" | "pushed";
+  readonly reason?: "disabled" | "no-remote" | "no-remote-ref" | "unreachable";
+  readonly detail?: string;
+}
+
+const QUIET: TaskRefRemote = { attempted: false, fetched: "none", pushed: "none" };
 
 const EMPTY_TREE = "4b825dc642cb6eb9a060e54bf8d69288fbee4904";
 
@@ -87,12 +116,19 @@ export class TaskRefStore {
    */
   private base: string | null = null;
 
+  private readonly remoteName: string | null;
+  private readonly networkTimeoutMs: number;
+
   constructor(
     private readonly repositoryPath: string,
-    options: { ref?: string; git?: TaskRefGit } = {},
+    options: { ref?: string; git?: TaskRefGit; remote?: string | null; networkTimeoutMs?: number } = {},
   ) {
     if (!path.isAbsolute(repositoryPath)) throw new Error("Task ref store needs an absolute repository path.");
     this.ref = options.ref ?? DEFAULT_TASK_REF;
+    this.remoteName = options.remote === undefined ? "origin" : options.remote;
+    // Bounded on purpose: an unreachable host must cost a moment, not a hang. A
+    // publish that waits on the network is a publish the user experiences as broken.
+    this.networkTimeoutMs = options.networkTimeoutMs ?? 15_000;
     if (options.git) this.git = options.git;
   }
 
@@ -102,6 +138,7 @@ export class TaskRefStore {
       encoding: "utf8",
       maxBuffer: 64 * 1024 * 1024,
       env: { ...process.env, ...(options.env ?? {}) },
+      ...(options.timeoutMs ? { timeout: options.timeoutMs, killSignal: "SIGKILL" as const } : {}),
     });
     return stdout;
   };
@@ -125,14 +162,17 @@ export class TaskRefStore {
    */
   async sync(message = "phaseatlas: sync task store"): Promise<TaskRefSync> {
     return this.exclusive(async () => {
-      const head = await this.head();
+      // Whatever another machine recorded arrives first, so the local write below
+      // is made against it rather than on top of it.
+      const beforeWork = await this.exchange(message);
       const working = await this.workingTree();
+      let head = await this.head();
 
       if (!head) {
-        if (working === EMPTY_TREE) return { commit: null, action: "empty" as const };
+        if (working === EMPTY_TREE) return { commit: null, action: "empty" as const, remote: beforeWork };
         const commit = await this.write(working, null, "phaseatlas: seed task store");
         this.base = commit;
-        return { commit, action: "seeded" as const };
+        return { commit, action: "seeded" as const, remote: await this.exchange(message) };
       }
 
       await this.assertTaskOnly(head);
@@ -140,12 +180,28 @@ export class TaskRefStore {
       if (stored === working) {
         this.base = head;
         await this.materializeTree(head);
-        return { commit: head, action: "materialized" as const };
+        return { commit: head, action: "materialized" as const, remote: beforeWork };
+      }
+
+      // An empty cache that was never filled is not an opinion about the tasks.
+      // A checkout opening the store for the first time — a second machine, a fresh
+      // clone — has no `.phaseatlas/` yet, and reading that as "every task was
+      // deleted" would commit an empty tree over the whole store. Only a cache this
+      // store has actually materialized can speak for a deletion.
+      if (this.base === null && working === EMPTY_TREE) {
+        this.base = head;
+        await this.materializeTree(head);
+        return { commit: head, action: "materialized" as const, remote: beforeWork };
       }
 
       const result = await this.commitTree(working, message);
       if (result.commit) await this.materializeTree(result.commit);
-      return { commit: result.commit, action: result.merged ? "merged" : "committed" };
+      head = result.commit;
+      return {
+        commit: head,
+        action: result.merged ? "merged" : "committed",
+        remote: await this.exchange(message),
+      };
     });
   }
 
@@ -156,7 +212,13 @@ export class TaskRefStore {
    * path above stays exactly as it was: ordinary files, atomic rename, no Git.
    */
   async commit(message: string): Promise<TaskRefCommit> {
-    return this.exclusive(async () => this.commitTree(await this.workingTree(), message));
+    return this.exclusive(async () => {
+      const result = await this.commitTree(await this.workingTree(), message);
+      // Sending it on is part of recording it. A push that cannot reach the host
+      // leaves the local ref authoritative and is reported, not thrown.
+      const remote = result.unchanged ? QUIET : await this.exchange(message);
+      return { ...result, remote };
+    });
   }
 
   /** Write the ref's tree into the working tree, replacing the cache. */
@@ -174,6 +236,151 @@ export class TaskRefStore {
     });
   }
 
+  // ── remote ───────────────────────────────────────────────────────────────
+
+  /**
+   * Bring the remote's tasks in, then send ours out.
+   *
+   * Called around every sync and every write, so a second machine needs no manual
+   * fetch. Everything here is best-effort with respect to the network and strict
+   * with respect to the data: a host that cannot be reached is reported and
+   * ignored, a task changed on both machines is reported and refused.
+   */
+  private async exchange(message: string): Promise<TaskRefRemote> {
+    if (process.env.PHASEATLAS_TASK_SYNC === "off") {
+      return { attempted: false, fetched: "none", pushed: "none", reason: "disabled" };
+    }
+    const remote = await this.resolveRemote();
+    if (!remote) return { attempted: false, fetched: "none", pushed: "none", reason: "no-remote" };
+
+    let fetched: TaskRefRemote["fetched"] = "none";
+    try {
+      const before = await this.head();
+      fetched = await this.pull(remote, message);
+      const after = await this.head();
+      if (after && after !== before) {
+        // The ref took on work from another machine. Leaving the cache behind would
+        // make the next write read those tasks as absent, and commit their deletion.
+        await this.materializeTree(after);
+        this.base = after;
+      }
+    } catch (error) {
+      if (error instanceof TaskRefError) throw error; // a conflict is data, not network
+      return {
+        attempted: true,
+        fetched: "none",
+        pushed: "none",
+        reason: "unreachable",
+        detail: (error as Error).message,
+      };
+    }
+
+    try {
+      return { attempted: true, fetched, pushed: await this.push(remote) };
+    } catch (error) {
+      if (error instanceof TaskRefError) throw error;
+      return {
+        attempted: true,
+        fetched,
+        pushed: "none",
+        reason: "unreachable",
+        detail: (error as Error).message,
+      };
+    }
+  }
+
+  private async resolveRemote(): Promise<string | null> {
+    if (!this.remoteName) return null;
+    const remotes = (await this.git(["remote"])).trim().split("\n").filter(Boolean);
+    if (!remotes.length) return null;
+    return remotes.includes(this.remoteName) ? this.remoteName : (remotes[0] as string);
+  }
+
+  /** Where a fetched copy of the remote's task ref is kept locally. */
+  private trackingRef(remote: string): string {
+    return this.ref.startsWith("refs/heads/")
+      ? `refs/remotes/${remote}/${this.ref.slice("refs/heads/".length)}`
+      : `refs/phaseatlas/remotes/${remote}/${this.ref.replace(/^refs\//, "")}`;
+  }
+
+  private async pull(remote: string, message: string): Promise<TaskRefRemote["fetched"]> {
+    const tracking = this.trackingRef(remote);
+    try {
+      await this.git(["fetch", "--no-tags", "--quiet", remote, `+${this.ref}:${tracking}`], {
+        timeoutMs: this.networkTimeoutMs,
+      });
+    } catch (error) {
+      // A remote that has never been given the task ref is not an unreachable one.
+      // The distinction matters: the first machine to publish reaches exactly this
+      // path, and treating it as a network failure would stop it ever pushing.
+      const detail = `${String((error as { stderr?: string }).stderr ?? "")}${(error as Error).message ?? ""}`;
+      if (!/couldn't find remote ref|not our ref|no such ref/i.test(detail)) throw error;
+      return "none";
+    }
+    const theirs = (await this.git(["rev-parse", "--verify", "--quiet", `${tracking}^{commit}`]).catch(() => ""))
+      .trim();
+    if (!theirs) return "none";
+    await this.assertTaskOnly(theirs);
+
+    const ours = await this.head();
+    if (!ours) {
+      // Nothing here yet: adopt the remote wholesale.
+      await this.git(["update-ref", this.ref, theirs]);
+      this.base = null;
+      return "fast-forward";
+    }
+    if (ours === theirs) return "up-to-date";
+    if (await this.isAncestor(theirs, ours)) return "up-to-date"; // we are ahead
+    if (await this.isAncestor(ours, theirs)) {
+      await this.git(["update-ref", this.ref, theirs, ours]);
+      // The cache was built from a commit that is still an ancestor, so it stays a
+      // valid merge base for anything uncommitted in it.
+      return "fast-forward";
+    }
+    // mergeCommits writes the commit and moves the ref under compare-and-swap, so
+    // there is nothing left to update here.
+    await this.mergeCommits(ours, theirs, `${message} (merge remote)`);
+    return "merged";
+  }
+
+  private async push(remote: string): Promise<TaskRefRemote["pushed"]> {
+    const head = await this.head();
+    if (!head) return "none";
+    const tracking = this.trackingRef(remote);
+    const known = (await this.git(["rev-parse", "--verify", "--quiet", `${tracking}^{commit}`]).catch(() => ""))
+      .trim();
+    if (known === head) return "up-to-date";
+    await this.git(["push", remote, `${head}:${this.ref}`], { timeoutMs: this.networkTimeoutMs });
+    // Keep the tracking ref honest so the next push can tell "already sent" from
+    // "not sent yet" without another round trip.
+    await this.git(["update-ref", tracking, head]);
+    return "pushed";
+  }
+
+  private async isAncestor(candidate: string, descendant: string): Promise<boolean> {
+    try {
+      await this.git(["merge-base", "--is-ancestor", candidate, descendant]);
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
+  /**
+   * Merge two commits that both exist, using their real merge base.
+   *
+   * Distinct from the cache-versus-ref merge below, which has a tree on one side
+   * and no commit at all, and so has to be told what the base was.
+   */
+  private async mergeCommits(ours: string, theirs: string, message: string): Promise<string> {
+    const base = (await this.git(["merge-base", ours, theirs]).catch(() => "")).trim();
+    const baseTree = base ? (await this.git(["rev-parse", `${base}^{tree}`])).trim() : EMPTY_TREE;
+    const ourTree = (await this.git(["rev-parse", `${ours}^{tree}`])).trim();
+    const theirTree = (await this.git(["rev-parse", `${theirs}^{tree}`])).trim();
+    const merged = await this.mergeTrees(baseTree, ourTree, theirTree);
+    return this.write(merged, ours, message, [theirs]);
+  }
+
   // ── internals ────────────────────────────────────────────────────────────
 
   private async commitTree(working: string, message: string): Promise<TaskRefCommit> {
@@ -182,7 +389,7 @@ export class TaskRefStore {
     const stored = head ? (await this.git(["rev-parse", `${head}^{tree}`])).trim() : EMPTY_TREE;
     if (stored === working) {
       this.base = head;
-      return { commit: head, unchanged: true, merged: false };
+      return { commit: head, unchanged: true, merged: false, remote: QUIET };
     }
 
     // The cache was built from `base`. If the ref has moved past it, this write and
@@ -192,20 +399,20 @@ export class TaskRefStore {
     if (diverged) {
       const commit = await this.mergeOnto(working, message);
       this.base = commit;
-      return { commit, unchanged: false, merged: true };
+      return { commit, unchanged: false, merged: true, remote: QUIET };
     }
 
     try {
       const commit = await this.write(working, head, message);
       this.base = commit;
-      return { commit, unchanged: false, merged: false };
+      return { commit, unchanged: false, merged: false, remote: QUIET };
     } catch (error) {
       if (!(error instanceof TaskRefError) || error.code !== "E_TASK_REF_RACE") throw error;
       // Someone moved the ref between reading it and writing. Same fork, found a
       // moment later.
       const commit = await this.mergeOnto(working, message);
       this.base = commit;
-      return { commit, unchanged: false, merged: true };
+      return { commit, unchanged: false, merged: true, remote: QUIET };
     }
   }
 
@@ -217,13 +424,22 @@ export class TaskRefStore {
     const base = this.base;
     const baseTree = base ? (await this.git(["rev-parse", `${base}^{tree}`])).trim() : EMPTY_TREE;
 
-    // One task is one file, so two writers editing different tasks touch different
-    // paths and this merges cleanly. Editing the same task is the case no tool can
-    // decide, and it stops here rather than picking a winner.
-    let merged: string;
+    const merged = await this.mergeTrees(baseTree, working, theirTree);
+    return this.write(merged, theirs, message, base && base !== theirs ? [base] : []);
+  }
+
+  /**
+   * Three trees in, one tree out — or a refusal.
+   *
+   * One task is one file, so two writers editing different tasks touch different
+   * paths and this merges cleanly, which is the ordinary case. Editing the same
+   * task is the case nothing can decide, and it stops here rather than picking a
+   * winner: both versions stay reachable in the ref history either way.
+   */
+  private async mergeTrees(baseTree: string, ourTree: string, theirTree: string): Promise<string> {
     try {
-      merged = (
-        (await this.git(["merge-tree", "--write-tree", "--merge-base", baseTree, working, theirTree]))
+      return (
+        (await this.git(["merge-tree", "--write-tree", "--merge-base", baseTree, ourTree, theirTree]))
           .trim()
           .split("\n")[0] as string
       ).trim();
@@ -239,7 +455,6 @@ export class TaskRefStore {
         conflicts,
       );
     }
-    return this.write(merged, theirs, message, base && base !== theirs ? [base] : []);
   }
 
   /** Hash the working-tree cache into a tree object without touching the real index. */

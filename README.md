@@ -176,8 +176,15 @@ nothing is running — but they live outside the namespace the code occupies, so
 appears in `git status`, a rebase, or a pull request for a code change. Editing the files on disk is
 still safe: a cache that differs from the ref is committed before anything is written back over it.
 
+Sharing needs no Git commands. Opening a repository fetches the ref, and recording a task publishes
+it, so a second machine sees the work without anyone running `git fetch`. A remote that cannot be
+reached is reported and ignored — the local ref stays authoritative and the application keeps working,
+because a local-first tool treats the network as an optimisation. A task changed on two machines is a
+different matter and is refused, naming the task, rather than merged silently.
+
 Set `PHASEATLAS_TASK_REF` to store tasks under a true hidden ref such as `refs/phaseatlas/tasks`;
-the default is a branch only because GitHub refuses to accept a push to anything else.
+the default is a branch only because GitHub refuses to accept a push to anything else. Set
+`PHASEATLAS_TASK_SYNC=off` to keep the store entirely local.
 
 See [ADR 0006](docs/decisions/0006-task-store-ref.md) for the concurrency model and the trade-off.
 
